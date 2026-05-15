@@ -1,0 +1,2992 @@
+#include "stdafx.h"
+#include <windowsx.h>
+#include <commdlg.h>
+#include <d3d11.h>
+#include <chrono>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <regex>
+#include <cmath>
+#pragma comment(lib,"d3d11.lib")
+#pragma comment(lib,"dxgi.lib")
+
+#include "ImGui/imgui_impl_dx11.h"
+#include "ImGui/imgui_impl_win32.h"
+#include "globals.h"
+#include "GUI_Skills.h"
+#include "InstanceManager.h"
+#include "GUI_Manager.h"
+#include "Theme.h"
+#include "Fonts.h"
+
+// === STRING STORAGE ===
+static int g_stringStorageMode = 0; // 0=.hook, 1=.text
+
+// === INJECTION ===
+static bool g_injDlgOpen = false;
+static char g_injAddrBuf[64] = { 0 };
+static char g_injCodeBuf[9000] = { 0 };
+static int g_injMode = 1; // 0=Smart, 1=Hook
+static std::string g_injLog;
+static ByteInjector g_injector;
+static int g_injSmartMode = 0; // 0=Consuming, 1=Shift
+static bool g_injKeepBoundary = true;
+static int g_injTargetMode = 0; // 0=Auto(.hook), 1=Code Cave, 2=Manual Address
+static char g_injManualAddrBuf[64] = { 0 };
+static char g_injCaveSizeBuf[32] = "256";
+
+// === FREE MEMORY ALLOCATION ===
+static bool g_freeMemDlgOpen = false;
+static char g_freeMemSizeBuf[32] = "4096";
+static char g_freeMemNameBuf[32] = ".data2";
+static int g_freeMemMode = 0;
+static u64 g_lastAllocatedAddr = 0;
+static u64 g_lastAllocatedSize = 0;
+
+// === HEXDUMP AUTO ROW ===
+static bool g_hexAutoRowBytes = true;
+
+// === INSTANCE MANAGEMENT DIALOGS ===
+static bool g_newInstanceDlgOpen = false;
+static int g_newInstanceType = 0;
+static char g_newInstancePidBuf[32] = { 0 };
+static bool g_saveSelectDlgOpen = false;
+static bool g_instanceManagerDlgOpen = false;
+static bool g_addTabsDlgOpen = false;
+static int g_instanceManagerSelected = -1;
+
+// === D3D ===
+static ID3D11Device* g_dev = nullptr;
+static ID3D11DeviceContext* g_ctx = nullptr;
+static IDXGISwapChain* g_swap = nullptr;
+static ID3D11RenderTargetView* g_rtv = nullptr;
+static HWND g_hwnd = nullptr;
+static int g_w = 1600, g_h = 950;
+
+// === COLUMN ORDER ===
+enum class DisasmColumn { Address = 0, Bytes, Jump, Opcode, Comments, COUNT };
+struct ColumnConfig { DisasmColumn type; float width; bool visible; const char* name; };
+static std::vector<ColumnConfig> g_columnOrder = {
+    {DisasmColumn::Address, 180, true, "Address"},
+    {DisasmColumn::Bytes, 180, true, "Bytes"},
+    {DisasmColumn::Jump, 80, true, "Jump"},
+    {DisasmColumn::Opcode, 320, true, "Opcode"},
+    {DisasmColumn::Comments, 250, true, "Comments"}
+};
+static int g_draggingColumnIdx = -1, g_dropTargetColumnIdx = -1, g_resizingColumn = -1;
+static float g_resizeStartX = 0, g_resizeStartWidth = 0;
+static constexpr float MIN_COL_WIDTH[] = { 80, 100, 40, 150, 100 };
+
+// === HEXDUMP VIEW TYPE ===
+enum class HexViewType {
+    ByteHex, ByteDec, Word2Hex, Word2Dec, Word4Hex, Word4Dec, Word8Hex, Word8Dec, Float, Double
+};
+static HexViewType g_hexViewType = HexViewType::ByteHex;
+
+static const char* GetHexViewName(HexViewType t) {
+    switch (t) {
+    case HexViewType::ByteHex: return "Byte Hex";
+    case HexViewType::ByteDec: return "Byte Dec";
+    case HexViewType::Word2Hex: return "2B Hex";
+    case HexViewType::Word2Dec: return "2B Dec";
+    case HexViewType::Word4Hex: return "4B Hex";
+    case HexViewType::Word4Dec: return "4B Dec";
+    case HexViewType::Word8Hex: return "8B Hex";
+    case HexViewType::Word8Dec: return "8B Dec";
+    case HexViewType::Float: return "Float";
+    case HexViewType::Double: return "Double";
+    default: return "Byte Hex";
+    }
+}
+
+static int GetHexViewSize(HexViewType t) {
+    switch (t) {
+    case HexViewType::ByteHex: case HexViewType::ByteDec: return 1;
+    case HexViewType::Word2Hex: case HexViewType::Word2Dec: return 2;
+    case HexViewType::Word4Hex: case HexViewType::Word4Dec: case HexViewType::Float: return 4;
+    case HexViewType::Word8Hex: case HexViewType::Word8Dec: case HexViewType::Double: return 8;
+    default: return 1;
+    }
+}
+
+// === DISPLAY ===
+static u64 g_displayBase = 0;
+static bool g_useCustomBase = false, g_showHexPrefix = false, g_showModuleNames = false;
+static int g_hexBytesPerRow = 16;
+
+// Register sets
+static const std::set<std::string> g_regs32 = { "eax","ebx","ecx","edx","esi","edi","ebp","esp","eip" };
+static const std::set<std::string> g_regs64 = { "rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","rip","r8","r9","r10","r11","r12","r13","r14","r15" };
+static const std::set<std::string> g_regsSeg = { "cs","ds","es","fs","gs","ss" };
+static const std::set<std::string> g_regsXmm = { "xmm0","xmm1","xmm2","xmm3","xmm4","xmm5","xmm6","xmm7","xmm8","xmm9","xmm10","xmm11","xmm12","xmm13","xmm14","xmm15" };
+static const std::set<std::string> g_regs8 = { "al","ah","bl","bh","cl","ch","dl","dh" };
+static const std::set<std::string> g_regs16 = { "ax","bx","cx","dx","si","di","bp","sp" };
+
+// === STATE (per-instance state moved to InstanceInfo, these are global UI state) ===
+static int g_disVisibleLines = 40, g_disPreBufferLines = 100;
+static int g_hexScrollMode = 0;
+
+// Per-instance disasm prebuffer cache
+struct DisasmCache {
+    std::vector<DisLine> preBuffer;
+    u64 preBufferStart = 0, preBufferEnd = 0;
+    bool valid = false;
+};
+static std::unordered_map<std::string, DisasmCache> g_disasmCaches;
+
+// Hex selection state (per-instance would be better, but keeping global for now)
+static std::unordered_map<std::string, u64> g_hexAnchors;
+static std::unordered_map<std::string, u64> g_hexCursors;
+static std::unordered_map<std::string, bool> g_hexHasSelections;
+static std::unordered_map<std::string, bool> g_hexDraggings;
+static std::unordered_map<std::string, bool> g_hexHighNibbles;
+static std::unordered_map<std::string, bool> g_hexSelectionFromAsciis;
+static std::unordered_map<std::string, std::set<u64>> g_selectedAddrsMap;
+
+// Dialog state
+static bool g_gotoOpen = false, g_editOpen = false, g_copyOpen = false, g_searchOpen = false, g_refsPopupOpen = false;
+static bool g_displaySettingsOpen = false, g_columnSettingsOpen = false;
+static char g_gotoBuf[256] = { 0 }, g_editBuf[128] = { 0 }, g_copyFromBuf[32] = { 0 }, g_copyToBuf[32] = { 0 };
+static u64 g_editAddr = 0, g_copyFrom = 0, g_copyTo = 0, g_refsPopupAddr = 0;
+static bool g_gotoSelectAddress = true, g_gotoBothPanels = false;
+static bool g_copyAddr = true, g_copyBytes = true, g_copyOpcode = true, g_copyComment = true;
+
+enum FocusedPanel { FOCUS_NONE, FOCUS_DISASM, FOCUS_HEXDUMP, FOCUS_IMPORTS, FOCUS_LOG, FOCUS_HWBP, FOCUS_NAVHIST, FOCUS_NAVSEARCH };
+static FocusedPanel g_focusedPanel = FOCUS_NONE;
+
+// Key repeat
+static std::chrono::steady_clock::time_point g_keyDownTime, g_scrollHoldTime;
+static ImGuiKey g_lastKey = ImGuiKey_None;
+static bool g_keyRepeating = false, g_scrollHolding = false;
+static int g_scrollHoldDir = 0;
+static const int KEY_REPEAT_DELAY_MS = 400, KEY_REPEAT_RATE_MS = 30, SCROLL_HOLD_DELAY_MS = 300, SCROLL_HOLD_RATE_MS = 50;
+
+// === NAVIGATION (instance-aware) ===
+struct HWBPEntry { u64 addr = 0; int type = 0, size = 1; bool enabled = false; std::string instanceId; };
+struct NavEntry { u64 addr; std::string label; FocusedPanel source; std::string instanceId; };
+struct EditHistoryEntry { u64 startAddr, endAddr; std::string label; std::vector<u8> oldBytes, newBytes; std::string instanceId; };
+
+// NAV SEARCH
+struct SearchResult { u64 srcAddr; std::string instruction; std::string type; std::string instanceId; };
+static std::vector<SearchResult> g_navSearchResults;
+static char g_navSearchBuf[256] = { 0 };
+static std::set<int> g_navSearchSelected;
+static int g_navSearchLastClicked = -1;
+
+static std::vector<HWBPEntry> g_hwbps;
+static std::vector<NavEntry> g_navHistoryDisasm, g_navHistoryHex;
+static int g_navIndexDisasm = -1, g_navIndexHex = -1, g_navHistoryTab = 0;
+static std::vector<EditHistoryEntry> g_editHistory;
+static std::vector<RefInfo> g_refsPopupList;
+static std::atomic<bool> g_refBuilding{ false };
+static std::atomic<int> g_refProg{ 0 };
+static std::string g_refBuildingInstanceId;
+
+// Log
+static std::vector<std::string> g_log;
+static std::mutex g_logMtx;
+
+// Search results
+static std::vector<std::pair<std::string, u64>> g_searchRes;
+static std::unordered_map<u64, std::string> g_stringCache;
+
+// Branch lines for disasm visualization
+struct BranchLine { int srcInstrIdx, dstInstrIdx; u64 srcAddr, dstAddr; int lane; ImU32 color; bool isCall, isConditional, isForward, isSelected; };
+static std::vector<BranchLine> g_branchLines;
+static int g_maxBranchLane = 0;
+static std::unordered_map<u64, float> g_instrYPositions;
+
+// HexDump edit dialog
+static bool g_hexEditDlgOpen = false;
+static u64 g_hexEditDlgAddr = 0;
+static char g_hexEditDlgBuf[256] = { 0 };
+static HexViewType g_hexEditDlgType = HexViewType::ByteHex;
+static std::string g_hexEditDlgInstanceId;
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+
+// === CONFIG ===
+static const char* CONFIG_FILE = "Config.cfg";
+
+// === FORWARD DECLARATIONS ===
+static void Log(const char* fmt, ...);
+static std::wstring OpenFileDlg();
+static std::wstring SaveFileDlg();
+static void DoOpen();
+static void RenderImportsForInstance(InstanceInfo* inst);
+static void RenderSectionsForInstance(InstanceInfo* inst);
+static void RenderDisasmForInstance(InstanceInfo* inst);
+static void RenderHexDumpForInstance(InstanceInfo* inst);
+static void RenderLogTab();
+static void RenderNavDisasmForInstance(InstanceInfo* inst);
+static void RenderNavHexForInstance(InstanceInfo* inst);
+static void RenderNavEditsForInstance(InstanceInfo* inst);
+static void RenderNavSearchForInstance(InstanceInfo* inst);
+static void RenderHWBPForInstance(InstanceInfo* inst);
+static void RenderStringsForInstance(InstanceInfo* inst);
+
+// === HELPERS ===
+static void Log(const char* fmt, ...) {
+    char buf[512]; va_list a; va_start(a, fmt); vsnprintf(buf, sizeof(buf), fmt, a); va_end(a);
+    std::lock_guard<std::mutex> lk(g_logMtx);
+    g_log.push_back(buf);
+    if (g_log.size() > 500) g_log.erase(g_log.begin());
+}
+
+static bool IsAnyDialogOpen() {
+    return g_gotoOpen || g_editOpen || g_copyOpen || g_searchOpen || g_refsPopupOpen ||
+        g_displaySettingsOpen || IsFontSettingsOpen() || g_columnSettingsOpen ||
+        g_hexEditDlgOpen || g_injDlgOpen || g_freeMemDlgOpen || g_newInstanceDlgOpen ||
+        g_saveSelectDlgOpen || g_instanceManagerDlgOpen || g_addTabsDlgOpen;
+}
+
+// === SLOT HELPER ===
+static int GetSlotForInstance(const std::string& instanceId) {
+    auto ids = InstMgr.GetInstanceIds();
+    for (int i = 0; i < (int)ids.size(); i++) {
+        if (ids[i] == instanceId) return i + 1;
+    }
+    return 0;
+}
+
+// === HEX SELECTION HELPERS (instance-aware) ===
+static void GetHexSelection(InstanceInfo* inst, u64& start, u64& end) {
+    if (!inst) { start = end = 0; return; }
+    u64 anchor = g_hexAnchors[inst->id];
+    u64 cursor = g_hexCursors[inst->id];
+    if (anchor <= cursor) { start = anchor; end = cursor; }
+    else { start = cursor; end = anchor; }
+}
+
+static bool HasHexSelection(InstanceInfo* inst) {
+    if (!inst) return false;
+    return g_hexHasSelections[inst->id];
+}
+
+static u64 GetHexCursor(InstanceInfo* inst) {
+    if (!inst) return 0;
+    return g_hexCursors[inst->id];
+}
+
+static void SetHexCursor(InstanceInfo* inst, u64 addr, bool keepAnchor = false) {
+    if (!inst) return;
+    g_hexCursors[inst->id] = addr;
+    if (!keepAnchor) g_hexAnchors[inst->id] = addr;
+    g_hexHasSelections[inst->id] = true;
+}
+
+// === ADDRESS FORMATTING (instance-aware) ===
+static u64 GetDisplayBase(InstanceInfo* inst = nullptr) {
+    if (!inst) inst = InstMgr.GetActiveInstance();
+    if (!inst || !inst->loaded) return g_useCustomBase ? g_displayBase : 0;
+    return g_useCustomBase ? g_displayBase : inst->mem.base;
+}
+
+static std::string FormatDisplayAddress(u64 addr, bool is64, InstanceInfo* inst = nullptr) {
+    if (!inst) inst = InstMgr.GetActiveInstance();
+    u64 db = GetDisplayBase(inst);
+    u64 da = (g_useCustomBase && inst && inst->loaded && addr >= inst->mem.base) ?
+        (addr - inst->mem.base) + g_displayBase : addr;
+    char buf[20]; sprintf(buf, is64 ? "%016llX" : "%08llX", da); return buf;
+}
+
+static std::string FormatModuleOffset(u64 off) {
+    char buf[32]; sprintf(buf, g_showHexPrefix ? "0x%llX" : "%llX", off); return buf;
+}
+
+static std::string FormatAddressForGoto(u64 addr, InstanceInfo* inst = nullptr) {
+    if (!inst) inst = InstMgr.GetActiveInstance();
+    if (!inst || !inst->loaded) {
+        char buf[32]; sprintf(buf, g_showHexPrefix ? "0x%llX" : "%llX", addr); return buf;
+    }
+    if (g_showModuleNames && addr >= inst->mem.base && addr < inst->mem.base + inst->mem.data.size()) {
+        char buf[256]; sprintf(buf, "%s+%s", inst->shortName.c_str(), FormatModuleOffset(addr - inst->mem.base).c_str());
+        return buf;
+    }
+    char buf[32]; sprintf(buf, g_showHexPrefix ? "0x%llX" : "%llX", addr); return buf;
+}
+
+// === TOKEN PARSING ===
+static bool IsRegister(const std::string& s) {
+    std::string l = s; for (auto& c : l) c = tolower(c);
+    return g_regs32.count(l) || g_regs64.count(l) || g_regsSeg.count(l) || g_regsXmm.count(l) || g_regs8.count(l) || g_regs16.count(l);
+}
+
+static bool IsHexNumber(const std::string& s) {
+    if (s.empty()) return false;
+    size_t st = 0; if (s[0] == '-') st = 1;
+    if (s.size() > st + 2 && s[st] == '0' && (s[st + 1] == 'x' || s[st + 1] == 'X')) {
+        for (size_t i = st + 2; i < s.size(); i++) if (!isxdigit(s[i])) return false;
+        return s.size() > st + 2;
+    }
+    if (s.back() == 'h' || s.back() == 'H') {
+        for (size_t i = st; i < s.size() - 1; i++) if (!isxdigit(s[i])) return false;
+        return true;
+    }
+    for (size_t i = st; i < s.size(); i++) if (!isxdigit(s[i])) return false;
+    return !s.empty() && st < s.size();
+}
+
+static bool IsModuleOffset(const std::string& s) {
+    size_t dp = s.find('.'); if (dp == std::string::npos) return false;
+    std::string ad = s.substr(dp); for (auto& c : ad) c = tolower(c);
+    if (ad.find(".dll") != 0 && ad.find(".exe") != 0 && ad.find(".sys") != 0) return false;
+    size_t pp = s.find('+'); if (pp == std::string::npos) return true;
+    std::string op = s.substr(pp + 1); if (op.empty()) return false;
+    if (op.size() >= 2 && op[0] == '0' && (op[1] == 'x' || op[1] == 'X')) return true;
+    for (char c : op) if (!isxdigit(c)) return false;
+    return !op.empty();
+}
+
+struct OperandToken { std::string text; ImU32 color; };
+
+static std::vector<OperandToken> ParseOperandTokens(const std::string& op, bool modNames) {
+    std::vector<OperandToken> toks;
+    if (op.empty()) return toks;
+    std::string cur;
+    auto endsWithExt = [](const std::string& s) {
+        if (s.size() < 4) return false;
+        std::string l = s; for (auto& c : l) c = tolower(c);
+        std::string sf = l.substr(l.size() - 4);
+        return sf == ".exe" || sf == ".dll" || sf == ".sys";
+    };
+    auto flush = [&]() {
+        if (cur.empty()) return;
+        OperandToken t; t.text = cur;
+        std::string l = cur; for (auto& c : l) c = tolower(c);
+        if (modNames && IsModuleOffset(cur)) t.color = g_colors.Green;
+        else if (IsRegister(cur)) t.color = g_colors.Red;
+        else if (IsHexNumber(cur)) t.color = g_colors.Blue;
+        else if (l == "ptr" || l == "dword" || l == "qword" || l == "word" || l == "byte" ||
+            l == "fword" || l == "tbyte" || l == "oword" || l == "xmmword") t.color = g_colors.White;
+        else t.color = g_colors.White;
+        toks.push_back(t); cur.clear();
+    };
+    for (size_t i = 0; i < op.size(); i++) {
+        char c = op[i];
+        if (c == '[' || c == ']' || c == ',' || c == ':' || c == '*') {
+            flush(); toks.push_back({ std::string(1,c), g_colors.White });
+        }
+        else if (c == ' ' || c == '\t') { flush(); toks.push_back({ std::string(1,c), g_colors.White }); }
+        else if (c == '+' || c == '-') {
+            if (modNames && !cur.empty() && endsWithExt(cur)) cur += c;
+            else { flush(); toks.push_back({ std::string(1,c), g_colors.White }); }
+        }
+        else cur += c;
+    }
+    flush();
+    return toks;
+}
+
+// === SYMBOL RESOLUTION (instance-aware) ===
+struct SymbolResult { std::string name; u64 baseAddr, offset; bool found, isExact; };
+
+static SymbolResult FindSymbolAtAddress(u64 addr, InstanceInfo* inst = nullptr) {
+    SymbolResult r = { "",0,0,false,false };
+    if (!inst) inst = InstMgr.GetActiveInstance();
+    if (!inst || !inst->loaded) return r;
+
+    std::string es = inst->syms.Resolve(addr);
+    if (!es.empty()) { r.name = es; r.baseAddr = addr; r.found = r.isExact = true; return r; }
+
+    u64 ba = 0; std::string bn; int ps = inst->pe.is64 ? 8 : 4;
+    for (auto& p : inst->syms.addr2name) {
+        if (p.first <= addr && addr - p.first < (u64)ps && p.first > ba) {
+            ba = p.first; bn = p.second;
+        }
+    }
+    if (!bn.empty()) {
+        r.name = bn; r.baseAddr = ba; r.offset = addr - ba; r.found = true; r.isExact = (r.offset == 0);
+    }
+    return r;
+}
+
+static std::string FormatAddressWithModule(u64 addr, bool showMod, InstanceInfo* inst = nullptr) {
+    if (!inst) inst = InstMgr.GetActiveInstance();
+    if (!inst || !inst->loaded) return FormatDisplayAddress(addr, false, inst);
+
+    char buf[256];
+    if (!showMod) return FormatDisplayAddress(addr, inst->pe.is64, inst);
+
+    SymbolResult sym = FindSymbolAtAddress(addr, inst);
+    if (sym.found) {
+        if (sym.isExact) return sym.name;
+        sprintf(buf, "%s+%s", sym.name.c_str(), FormatModuleOffset(sym.offset).c_str());
+        return buf;
+    }
+    if (addr >= inst->mem.base && addr < inst->mem.base + inst->mem.data.size()) {
+        sprintf(buf, "%s+%s", inst->shortName.c_str(), FormatModuleOffset(addr - inst->mem.base).c_str());
+        return buf;
+    }
+    sprintf(buf, g_showHexPrefix ? "0x%llX" : "%llX", addr);
+    return buf;
+}
+
+static std::string FormatOperandWithModule(const std::string& orig, u64 tgt, u64 memTgt, InstanceInfo* inst = nullptr) {
+    if (!inst) inst = InstMgr.GetActiveInstance();
+    if (!g_showModuleNames || !inst || !inst->loaded) return orig;
+    u64 addr = tgt ? tgt : memTgt; if (addr < 0x1000) return orig;
+    std::regex hr("0x([0-9a-fA-F]{4,})|([0-9a-fA-F]{4,})h"); std::smatch m;
+    if (std::regex_search(orig, m, hr)) {
+        std::string fh = m[0].str(); u64 fv = 0;
+        if (fh.substr(0, 2) == "0x" || fh.substr(0, 2) == "0X") fv = strtoull(fh.c_str() + 2, nullptr, 16);
+        else fv = strtoull(fh.substr(0, fh.length() - 1).c_str(), nullptr, 16);
+        if (fv == addr) return orig.substr(0, m.position()) + FormatAddressWithModule(addr, true, inst) + orig.substr(m.position() + m.length());
+    }
+    return orig;
+}
+
+// === NAVIGATION (instance-aware) ===
+static void NavPushDisasm(u64 addr, const char* lbl = nullptr, InstanceInfo* inst = nullptr) {
+    if (!inst) inst = InstMgr.GetActiveInstance();
+    std::string instId = inst ? inst->id : "";
+
+    if (g_navIndexDisasm >= 0 && g_navIndexDisasm < (int)g_navHistoryDisasm.size() - 1)
+        g_navHistoryDisasm.erase(g_navHistoryDisasm.begin() + g_navIndexDisasm + 1, g_navHistoryDisasm.end());
+    if (!g_navHistoryDisasm.empty() && g_navHistoryDisasm.back().addr == addr && g_navHistoryDisasm.back().instanceId == instId)
+        return;
+
+    NavEntry e; e.addr = addr; e.source = FOCUS_DISASM; e.instanceId = instId;
+    if (lbl) e.label = lbl;
+    else { char b[32]; sprintf(b, g_showHexPrefix ? "0x%llX" : "%llX", addr); e.label = b; }
+
+    g_navHistoryDisasm.push_back(e);
+    g_navIndexDisasm = (int)g_navHistoryDisasm.size() - 1;
+    if (g_navHistoryDisasm.size() > 100) { g_navHistoryDisasm.erase(g_navHistoryDisasm.begin()); g_navIndexDisasm--; }
+}
+
+static void NavPushHex(u64 addr, const char* lbl = nullptr, InstanceInfo* inst = nullptr) {
+    if (!inst) inst = InstMgr.GetActiveInstance();
+    std::string instId = inst ? inst->id : "";
+
+    if (g_navIndexHex >= 0 && g_navIndexHex < (int)g_navHistoryHex.size() - 1)
+        g_navHistoryHex.erase(g_navHistoryHex.begin() + g_navIndexHex + 1, g_navHistoryHex.end());
+    if (!g_navHistoryHex.empty() && g_navHistoryHex.back().addr == addr && g_navHistoryHex.back().instanceId == instId)
+        return;
+
+    NavEntry e; e.addr = addr; e.source = FOCUS_HEXDUMP; e.instanceId = instId;
+    if (lbl) e.label = lbl;
+    else { char b[32]; sprintf(b, g_showHexPrefix ? "0x%llX" : "%llX", addr); e.label = b; }
+
+    g_navHistoryHex.push_back(e);
+    g_navIndexHex = (int)g_navHistoryHex.size() - 1;
+    if (g_navHistoryHex.size() > 100) { g_navHistoryHex.erase(g_navHistoryHex.begin()); g_navIndexHex--; }
+}
+
+static void RecordEditHistory(u64 addr, const std::vector<u8>& ob, const std::vector<u8>& nb, InstanceInfo* inst = nullptr) {
+    if (!inst) inst = InstMgr.GetActiveInstance();
+
+    EditHistoryEntry e;
+    e.startAddr = addr;
+    e.endAddr = addr + nb.size() - 1;
+    e.oldBytes = ob;
+    e.newBytes = nb;
+    e.instanceId = inst ? inst->id : "";
+
+    char buf[64];
+    if (nb.size() == 1) sprintf(buf, g_showHexPrefix ? "0x%llX: %02X->%02X" : "%llX: %02X->%02X", addr, ob[0], nb[0]);
+    else sprintf(buf, g_showHexPrefix ? "0x%llX-0x%llX (%zu B)" : "%llX-%llX (%zu B)", e.startAddr, e.endAddr, nb.size());
+    e.label = buf;
+
+    g_editHistory.push_back(e);
+    if (g_editHistory.size() > 200) g_editHistory.erase(g_editHistory.begin());
+}
+
+static bool NavBackDisasm() {
+    if (g_navIndexDisasm > 0) {
+        g_navIndexDisasm--;
+        auto& e = g_navHistoryDisasm[g_navIndexDisasm];
+        InstanceInfo* inst = InstMgr.GetInstance(e.instanceId);
+        if (inst) {
+            inst->viewAddr = e.addr;
+            if (g_gotoSelectAddress) inst->selAddr = e.addr;
+            InstMgr.SetActiveInstance(e.instanceId);
+            g_disasmCaches[e.instanceId].valid = false;
+            int slot = GetSlotForInstance(e.instanceId);
+            if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool NavForwardDisasm() {
+    if (g_navIndexDisasm < (int)g_navHistoryDisasm.size() - 1) {
+        g_navIndexDisasm++;
+        auto& e = g_navHistoryDisasm[g_navIndexDisasm];
+        InstanceInfo* inst = InstMgr.GetInstance(e.instanceId);
+        if (inst) {
+            inst->viewAddr = e.addr;
+            if (g_gotoSelectAddress) inst->selAddr = e.addr;
+            InstMgr.SetActiveInstance(e.instanceId);
+            g_disasmCaches[e.instanceId].valid = false;
+            int slot = GetSlotForInstance(e.instanceId);
+            if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool NavBackHex() {
+    if (g_navIndexHex > 0) {
+        g_navIndexHex--;
+        auto& e = g_navHistoryHex[g_navIndexHex];
+        InstanceInfo* inst = InstMgr.GetInstance(e.instanceId);
+        if (inst) {
+            inst->hexAddr = e.addr;
+            InstMgr.SetActiveInstance(e.instanceId);
+            int slot = GetSlotForInstance(e.instanceId);
+            if (slot > 0) GUI.SwitchToTab("hexdump_" + std::to_string(slot));
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool NavForwardHex() {
+    if (g_navIndexHex < (int)g_navHistoryHex.size() - 1) {
+        g_navIndexHex++;
+        auto& e = g_navHistoryHex[g_navIndexHex];
+        InstanceInfo* inst = InstMgr.GetInstance(e.instanceId);
+        if (inst) {
+            inst->hexAddr = e.addr;
+            InstMgr.SetActiveInstance(e.instanceId);
+            int slot = GetSlotForInstance(e.instanceId);
+            if (slot > 0) GUI.SwitchToTab("hexdump_" + std::to_string(slot));
+        }
+        return true;
+    }
+    return false;
+}
+
+static void NavGoto(u64 addr, const char* lbl = nullptr, bool upD = true, bool upH = true, InstanceInfo* inst = nullptr) {
+    if (!inst) inst = InstMgr.GetActiveInstance();
+    if (!inst) return;
+
+    if (upD) {
+        NavPushDisasm(addr, lbl, inst);
+        inst->viewAddr = addr;
+        if (g_gotoSelectAddress) inst->selAddr = addr;
+        g_disasmCaches[inst->id].valid = false;
+    }
+    if (upH) {
+        NavPushHex(addr, lbl, inst);
+        inst->hexAddr = addr;
+    }
+}
+
+static void NavGotoWithSwitch(u64 addr, const char* lbl = nullptr, bool upD = true, bool upH = true, InstanceInfo* inst = nullptr) {
+    NavGoto(addr, lbl, upD, upH, inst);
+    if (upD && inst) {
+        int slot = GetSlotForInstance(inst->id);
+        if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+    }
+}
+
+static void NavClearAll() {
+    g_navHistoryDisasm.clear(); g_navIndexDisasm = -1;
+    g_navHistoryHex.clear(); g_navIndexHex = -1;
+    g_editHistory.clear();
+}
+
+// === FILE DIALOGS ===
+static std::wstring OpenFileDlg() {
+    wchar_t p[MAX_PATH] = { 0 };
+    OPENFILENAMEW o = { sizeof(o),g_hwnd,0,L"Executables\0*.exe;*.dll\0All\0*.*\0",0,0,0,p,MAX_PATH,0,0,0,0,OFN_FILEMUSTEXIST };
+    return GetOpenFileNameW(&o) ? p : L"";
+}
+
+static std::wstring SaveFileDlg() {
+    wchar_t p[MAX_PATH] = { 0 };
+    OPENFILENAMEW o = { sizeof(o),g_hwnd,0,L"Executables\0*.exe;*.dll\0All\0*.*\0",0,0,0,p,MAX_PATH,0,0,0,0,OFN_OVERWRITEPROMPT };
+    return GetSaveFileNameW(&o) ? p : L"";
+}
+
+// === INPUT ===
+static bool IsKeyPressedManual(ImGuiKey k, bool rep = true) {
+    auto now = std::chrono::steady_clock::now();
+    if (ImGui::IsKeyPressed(k, false)) { g_lastKey = k; g_keyDownTime = now; g_keyRepeating = false; return true; }
+    if (rep && ImGui::IsKeyDown(k) && g_lastKey == k) {
+        auto el = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_keyDownTime).count();
+        if (!g_keyRepeating) { if (el >= KEY_REPEAT_DELAY_MS) { g_keyRepeating = true; g_keyDownTime = now; return true; } }
+        else { if (el >= KEY_REPEAT_RATE_MS) { g_keyDownTime = now; return true; } }
+    }
+    if (!ImGui::IsKeyDown(k) && g_lastKey == k) { g_lastKey = ImGuiKey_None; g_keyRepeating = false; }
+    return false;
+}
+
+static bool IsValidStringChar(u8 c) { return (c >= 32 && c < 127) || c == '\t' || c == '\n' || c == '\r'; }
+
+static std::string TryReadString(const MemImage& m, u64 a, int ml = 64) {
+    if (!m.InRange(a)) return "";
+    std::string r;
+    for (int i = 0; i < ml; i++) {
+        if (!m.InRange(a + i)) break;
+        u8 c = m.Read8(a + i);
+        if (c == 0) break;
+        if (!IsValidStringChar(c)) return "";
+        r += (char)c;
+    }
+    return r.length() >= 4 ? r : "";
+}
+
+static std::string DetectStringAtAddress(const MemImage& m, u64 a) {
+    auto it = g_stringCache.find(a);
+    if (it != g_stringCache.end()) return it->second;
+    std::string r = TryReadString(m, a);
+    g_stringCache[a] = r;
+    return r;
+}
+
+// === PARSE ADDRESS (instance-aware) ===
+struct ParsedAddress { u64 address; bool valid; std::string originalInput; };
+
+static ParsedAddress ParseAddressInput(const std::string& inp, InstanceInfo* inst = nullptr) {
+    ParsedAddress r = { 0,false,inp };
+    if (!inst) inst = InstMgr.GetActiveInstance();
+
+    std::string s = inp;
+    while (!s.empty() && (s[0] == ' ' || s[0] == '\t')) s.erase(0, 1);
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+    if (s.empty()) return r;
+
+    if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        r.address = strtoull(s.c_str(), nullptr, 16);
+        r.valid = true;
+        return r;
+    }
+
+    size_t fp = s.find('+'), fm = s.find('-'), fo = std::string::npos;
+    if (fp != std::string::npos && fm != std::string::npos) fo = std::min(fp, fm);
+    else if (fp != std::string::npos) fo = fp;
+    else if (fm != std::string::npos) fo = fm;
+
+    if (fo != std::string::npos && inst) {
+        std::string bp = s.substr(0, fo), op = s.substr(fo);
+        while (!bp.empty() && bp.back() == ' ') bp.pop_back();
+        u64 ba = 0; bool bf = false;
+        std::string lb = bp, lf = inst->shortName;
+        for (auto& x : lb) x = tolower(x);
+        for (auto& x : lf) x = tolower(x);
+        if (lb == lf || lb + ".exe" == lf || lb + ".dll" == lf) { ba = inst->mem.base; bf = true; }
+        if (!bf) { ba = inst->syms.Lookup(bp); if (ba) bf = true; }
+        if (bf) {
+            i64 to = 0; size_t pos = 0;
+            while (pos < op.size()) {
+                char o = op[pos]; if (o != '+' && o != '-') break; pos++;
+                while (pos < op.size() && op[pos] == ' ') pos++;
+                size_t ns = pos; bool hx = false;
+                if (pos + 1 < op.size() && op[pos] == '0' && (op[pos + 1] == 'x' || op[pos + 1] == 'X')) { hx = true; pos += 2; }
+                while (pos < op.size() && isxdigit(op[pos])) pos++;
+                std::string num = hx ? op.substr(ns, pos - ns) : op.substr(ns, pos - ns);
+                while (!num.empty() && isspace(num.back())) num.pop_back();
+                if (!num.empty()) {
+                    i64 v = (i64)strtoull(num.c_str() + (hx ? 2 : 0), nullptr, 16);
+                    if (o == '+') to += v; else to -= v;
+                }
+                while (pos < op.size() && op[pos] != '+' && op[pos] != '-') pos++;
+            }
+            r.address = (u64)((i64)ba + to); r.valid = true; return r;
+        }
+    }
+
+    if (inst) {
+        std::string l = s, lf = inst->shortName;
+        for (auto& x : l) x = tolower(x);
+        for (auto& x : lf) x = tolower(x);
+        if (l == lf || l + ".exe" == lf || l + ".dll" == lf) {
+            r.address = inst->mem.base; r.valid = true; return r;
+        }
+
+        u64 sa = inst->syms.Lookup(s);
+        if (sa) { r.address = sa; r.valid = true; return r; }
+
+        {
+            std::string l2 = s; for (auto& x : l2) x = tolower(x);
+            for (auto& d : inst->pe.imps) {
+                std::string dl = d.name; for (auto& x : dl) x = tolower(x);
+                std::string dn = dl;
+                if (dn.size() > 4 && dn.substr(dn.size() - 4) == ".dll") dn = dn.substr(0, dn.size() - 4);
+                if ((l2 == dl || l2 == dn) && !d.funcs.empty()) {
+                    r.address = d.funcs[0].iatAddr; r.valid = true; return r;
+                }
+            }
+        }
+    }
+
+    bool allHex = true;
+    for (char ch : s) if (!isxdigit(ch)) { allHex = false; break; }
+    if (allHex && !s.empty()) {
+        r.address = strtoull(s.c_str(), nullptr, 16);
+        r.valid = true;
+        return r;
+    }
+
+    char* ep = nullptr;
+    u64 nv = strtoull(s.c_str(), &ep, 0);
+    if (ep != s.c_str() && (*ep == '\0' || *ep == ' ')) {
+        r.address = nv; r.valid = true;
+    }
+    return r;
+}
+
+// === SCROLLBAR ===
+static bool RenderCustomScrollbar(const char* id, float x, float y, float w, float h, int* sd) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    auto now = std::chrono::steady_clock::now();
+    *sd = 0; float bh = 20; ImVec2 pos(x, y);
+
+    ImU32 bg = (g_themeMode == ThemeMode::Dark) ? IM_COL32(30, 30, 35, 255) : IM_COL32(235, 235, 238, 255);
+    ImU32 tr = (g_themeMode == ThemeMode::Dark) ? IM_COL32(45, 45, 55, 255) : IM_COL32(220, 220, 225, 255);
+    ImU32 th = (g_themeMode == ThemeMode::Dark) ? IM_COL32(80, 80, 100, 255) : IM_COL32(180, 180, 195, 255);
+    ImU32 thh = (g_themeMode == ThemeMode::Dark) ? IM_COL32(100, 100, 130, 255) : IM_COL32(160, 160, 180, 255);
+    ImU32 bt = (g_themeMode == ThemeMode::Dark) ? IM_COL32(60, 60, 75, 255) : IM_COL32(200, 200, 210, 255);
+    ImU32 bth = (g_themeMode == ThemeMode::Dark) ? IM_COL32(80, 80, 100, 255) : IM_COL32(180, 180, 200, 255);
+    ImU32 bta = (g_themeMode == ThemeMode::Dark) ? IM_COL32(100, 100, 140, 255) : IM_COL32(160, 160, 190, 255);
+    ImU32 ar = (g_themeMode == ThemeMode::Dark) ? IM_COL32(200, 200, 200, 255) : IM_COL32(80, 80, 80, 255);
+
+    dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h), bg);
+
+    ImVec2 umi = pos, uma(pos.x + w, pos.y + bh);
+    bool uh = ImGui::IsMouseHoveringRect(umi, uma), ua = uh && ImGui::IsMouseDown(0);
+    dl->AddRectFilled(umi, uma, ua ? bta : (uh ? bth : bt));
+    ImVec2 ac(pos.x + w / 2, pos.y + bh / 2);
+    dl->AddTriangleFilled(ImVec2(ac.x, ac.y - 4), ImVec2(ac.x - 5, ac.y + 3), ImVec2(ac.x + 5, ac.y + 3), ar);
+    if (uh && ImGui::IsMouseClicked(0)) { *sd = -1; g_scrollHolding = true; g_scrollHoldTime = now; g_scrollHoldDir = -1; }
+
+    ImVec2 dmi(pos.x, pos.y + h - bh), dma(pos.x + w, pos.y + h);
+    bool dh = ImGui::IsMouseHoveringRect(dmi, dma), da = dh && ImGui::IsMouseDown(0);
+    dl->AddRectFilled(dmi, dma, da ? bta : (dh ? bth : bt));
+    ac = ImVec2(pos.x + w / 2, pos.y + h - bh / 2);
+    dl->AddTriangleFilled(ImVec2(ac.x, ac.y + 4), ImVec2(ac.x - 5, ac.y - 3), ImVec2(ac.x + 5, ac.y - 3), ar);
+    if (dh && ImGui::IsMouseClicked(0)) { *sd = 1; g_scrollHolding = true; g_scrollHoldTime = now; g_scrollHoldDir = 1; }
+
+    float ty = pos.y + bh, th2 = h - bh * 2;
+    dl->AddRectFilled(ImVec2(pos.x, ty), ImVec2(pos.x + w, ty + th2), tr);
+    float tbh = 40, tby = ty + (th2 - tbh) / 2;
+    ImVec2 tbmi(pos.x + 2, tby), tbma(pos.x + w - 2, tby + tbh);
+    bool tbhv = ImGui::IsMouseHoveringRect(tbmi, tbma);
+    dl->AddRectFilled(tbmi, tbma, tbhv ? thh : th, 3);
+
+    bool ta = ImGui::IsMouseHoveringRect(ImVec2(pos.x, ty), ImVec2(pos.x + w, tby)),
+        tb = ImGui::IsMouseHoveringRect(ImVec2(pos.x, tby + tbh), ImVec2(pos.x + w, ty + th2));
+    if (ta && ImGui::IsMouseClicked(0)) { *sd = -10; g_scrollHolding = true; g_scrollHoldTime = now; g_scrollHoldDir = -10; }
+    if (tb && ImGui::IsMouseClicked(0)) { *sd = 10; g_scrollHolding = true; g_scrollHoldTime = now; g_scrollHoldDir = 10; }
+
+    if (g_scrollHolding && ImGui::IsMouseDown(0)) {
+        bool sv = (g_scrollHoldDir < 0 && (uh || ta)) || (g_scrollHoldDir > 0 && (dh || tb));
+        if (sv) {
+            auto el = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_scrollHoldTime).count();
+            if (el >= SCROLL_HOLD_DELAY_MS + SCROLL_HOLD_RATE_MS) {
+                *sd = (g_scrollHoldDir > 0) ? 1 : -1;
+                if (abs(g_scrollHoldDir) > 1) *sd *= 10;
+                g_scrollHoldTime = now - std::chrono::milliseconds(SCROLL_HOLD_DELAY_MS);
+            }
+        }
+    }
+    if (ImGui::IsMouseReleased(0)) g_scrollHolding = false;
+    return *sd != 0;
+}
+
+// === D3D ===
+static bool InitD3D(HWND h) {
+    DXGI_SWAP_CHAIN_DESC sd = {};
+    sd.BufferCount = 2;
+    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferDesc.RefreshRate = { 60,1 };
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = h;
+    sd.SampleDesc = { 1,0 };
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+    D3D_FEATURE_LEVEL fl, fls[] = { D3D_FEATURE_LEVEL_11_0,D3D_FEATURE_LEVEL_10_0 };
+    if (FAILED(D3D11CreateDeviceAndSwapChain(0, D3D_DRIVER_TYPE_HARDWARE, 0, 0, fls, 2, D3D11_SDK_VERSION, &sd, &g_swap, &g_dev, &fl, &g_ctx)))
+        return false;
+    ID3D11Texture2D* bb = nullptr;
+    g_swap->GetBuffer(0, IID_PPV_ARGS(&bb));
+    g_dev->CreateRenderTargetView(bb, 0, &g_rtv);
+    bb->Release();
+    return true;
+}
+
+static void CleanD3D() {
+    if (g_rtv) g_rtv->Release();
+    if (g_swap) g_swap->Release();
+    if (g_ctx) g_ctx->Release();
+    if (g_dev) g_dev->Release();
+}
+
+static void ResizeD3D() {
+    if (!g_swap) return;
+    if (g_rtv) { g_rtv->Release(); g_rtv = nullptr; }
+    g_swap->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
+    ID3D11Texture2D* bb = nullptr;
+    g_swap->GetBuffer(0, IID_PPV_ARGS(&bb));
+    g_dev->CreateRenderTargetView(bb, 0, &g_rtv);
+    bb->Release();
+}
+
+static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (ImGui_ImplWin32_WndProcHandler(h, m, w, l)) return true;
+    if (m == WM_SIZE && g_dev && w != SIZE_MINIMIZED) { g_w = LOWORD(l); g_h = HIWORD(l); ResizeD3D(); return 0; }
+    if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    return DefWindowProcA(h, m, w, l);
+}
+
+// === DISASM PREBUFFER HELPERS (instance-aware) ===
+static DisLine MakePlaceholderLine(u64 addr) {
+    DisLine l;
+    l.addr = addr;
+    l.len = 1;
+    l.bytes[0] = 0;
+    l.mn = "??";
+    l.op = "";
+    l.isCall = l.isJmp = l.isCond = l.isRet = false;
+    l.target = 0;
+    l.hasMemTarget = false;
+    l.memTarget = 0;
+    return l;
+}
+
+static void BuildDisasmPreBuffer(InstanceInfo* inst, u64 tgt, bool force = false) {
+    if (!inst || !inst->loaded) return;
+
+    DisasmCache& cache = g_disasmCaches[inst->id];
+
+    if (!force && cache.valid && !cache.preBuffer.empty()) {
+        int ti = -1;
+        for (size_t i = 0; i < cache.preBuffer.size(); i++)
+            if (cache.preBuffer[i].addr == tgt) { ti = (int)i; break; }
+        if (ti >= 30) return;
+    }
+
+    u64 ss = (tgt > 300) ? tgt - 300 : 0;
+    std::vector<DisLine> br;
+    u64 bsa = ss;
+    int bti = -1;
+
+    for (u64 ts = ss; ts < tgt && ts < ss + 200; ts++) {
+        auto ls = inst->dis.DisasmRange(inst->mem, ts, ts + (g_disPreBufferLines + 100) * 16);
+        int ti = -1;
+        for (size_t i = 0; i < ls.size(); i++) {
+            if (ls[i].addr == tgt) { ti = (int)i; break; }
+            if (ls[i].addr > tgt) break;
+        }
+        if (ti >= 50) { br = ls; bsa = ts; bti = ti; break; }
+        if (ti > bti) { br = ls; bsa = ts; bti = ti; }
+    }
+
+    if (!br.empty()) {
+        cache.preBuffer = br;
+        cache.preBufferStart = bsa;
+        cache.preBufferEnd = br.back().addr + br.back().len;
+        cache.valid = true;
+    }
+}
+
+static std::vector<DisLine> GetDisasmLinesWithPreBuffer(InstanceInfo* inst, u64 va, int lc) {
+    if (!inst || !inst->loaded || !inst->mem.InRange(va)) {
+        std::vector<DisLine> r;
+        for (int i = 0; i < lc; i++) r.push_back(MakePlaceholderLine(va + i));
+        return r;
+    }
+
+    DisasmCache& cache = g_disasmCaches[inst->id];
+
+    if (!cache.valid || cache.preBuffer.empty())
+        BuildDisasmPreBuffer(inst, va);
+
+    if (cache.valid && !cache.preBuffer.empty()) {
+        int vi = -1;
+        for (size_t i = 0; i < cache.preBuffer.size(); i++)
+            if (cache.preBuffer[i].addr == va) { vi = (int)i; break; }
+        if (vi >= 0 && vi < 20)
+            BuildDisasmPreBuffer(inst, va, true);
+    }
+
+    int vi = -1;
+    for (size_t i = 0; i < cache.preBuffer.size(); i++) {
+        if (cache.preBuffer[i].addr == va) { vi = (int)i; break; }
+        if (cache.preBuffer[i].addr > va) {
+            BuildDisasmPreBuffer(inst, va, true);
+            for (size_t j = 0; j < cache.preBuffer.size(); j++)
+                if (cache.preBuffer[j].addr == va) { vi = (int)j; break; }
+            break;
+        }
+    }
+
+    if (vi >= 0) {
+        std::vector<DisLine> r;
+        for (int i = vi; i < (int)cache.preBuffer.size() && (int)r.size() < lc; i++)
+            r.push_back(cache.preBuffer[i]);
+        if ((int)r.size() < lc && !r.empty()) {
+            auto m = inst->dis.DisasmRange(inst->mem, r.back().addr + r.back().len,
+                r.back().addr + r.back().len + (lc - (int)r.size()) * 16);
+            r.insert(r.end(), m.begin(), m.end());
+        }
+        return r;
+    }
+
+    return inst->dis.DisasmRange(inst->mem, va, va + lc * 16);
+}
+
+static u64 GetPreviousInstructionAddress(InstanceInfo* inst, u64 ca) {
+    if (ca == 0) return 0xFFFFFFFFFFFFFFFFULL;
+    if (!inst || !inst->loaded || !inst->mem.InRange(ca)) return ca - 1;
+
+    DisasmCache& cache = g_disasmCaches[inst->id];
+
+    if (cache.valid && !cache.preBuffer.empty())
+        for (size_t i = 1; i < cache.preBuffer.size(); i++)
+            if (cache.preBuffer[i].addr == ca)
+                return cache.preBuffer[i - 1].addr;
+
+    BuildDisasmPreBuffer(inst, ca);
+
+    if (cache.valid && !cache.preBuffer.empty())
+        for (size_t i = 1; i < cache.preBuffer.size(); i++)
+            if (cache.preBuffer[i].addr == ca)
+                return cache.preBuffer[i - 1].addr;
+
+    for (int i = 1; i <= 15; i++) {
+        if (ca < (u64)i) break;
+        auto ls = inst->dis.DisasmRange(inst->mem, ca - i, ca - i + 32);
+        if (!ls.empty() && ls[0].addr + ls[0].len == ca)
+            return ls[0].addr;
+    }
+    return ca - 1;
+}
+
+static int FindLineIndex(const std::vector<DisLine>& ls, u64 a) {
+    for (size_t i = 0; i < ls.size(); i++)
+        if (ls[i].addr == a) return (int)i;
+    return -1;
+}
+
+static void CalculateBranchLines(InstanceInfo* inst, const std::vector<DisLine>& ls, int vl) {
+    g_branchLines.clear();
+    g_maxBranchLane = 0;
+    if (ls.empty() || !inst) return;
+
+    std::unordered_map<u64, int> a2i;
+    int mx = std::min((int)ls.size(), vl);
+    for (int i = 0; i < mx; i++) a2i[ls[i].addr] = i;
+
+    std::vector<std::vector<std::pair<int, int>>> lo;
+    auto findLane = [&](int y1, int y2)->int {
+        int mi = std::min(y1, y2), ma = std::max(y1, y2);
+        for (int l = 0; l < (int)lo.size(); l++) {
+            bool oc = false;
+            for (auto& r : lo[l]) if (!(ma < r.first || mi > r.second)) { oc = true; break; }
+            if (!oc) { lo[l].push_back({ mi,ma }); return l; }
+        }
+        int nl = (int)lo.size();
+        lo.push_back({ {mi,ma} });
+        return nl;
+    };
+
+    auto& selectedAddrs = g_selectedAddrsMap[inst->id];
+
+    for (int i = 0; i < mx; i++) {
+        auto& l = ls[i];
+        if (!l.isJmp && !l.isCall && !l.isCond) continue;
+        u64 tgt = l.target ? l.target : (l.hasMemTarget ? l.memTarget : 0);
+        if (!tgt) continue;
+        auto it = a2i.find(tgt);
+        if (it == a2i.end()) continue;
+        int di = it->second;
+        if (di == i) continue;
+
+        BranchLine bl;
+        bl.srcInstrIdx = i;
+        bl.dstInstrIdx = di;
+        bl.srcAddr = l.addr;
+        bl.dstAddr = tgt;
+        bl.isCall = l.isCall;
+        bl.isConditional = l.isCond;
+        bl.isForward = (tgt > l.addr);
+        bl.isSelected = (l.addr == inst->selAddr || tgt == inst->selAddr ||
+            selectedAddrs.count(l.addr) || selectedAddrs.count(tgt));
+        bl.color = bl.isSelected ? g_colors.White : (l.isCall ? g_colors.Green : (l.isCond ? g_colors.Red : g_colors.Orange));
+        bl.lane = findLane(i, di);
+        if (bl.lane > g_maxBranchLane) g_maxBranchLane = bl.lane;
+        g_branchLines.push_back(bl);
+    }
+}
+// === AUTO CREATE TABS - Only for first instance ===
+static void AutoCreateTabsForInstance(const std::string& instanceId) {
+    if (InstMgr.GetInstanceCount() != 1) {
+        return;
+    }
+    GUIMgr.CreateDefaultTabsForSlot(1);
+    GUI.AddTabToPanel("left_bot", "log");
+    Log("Created default tabs for first instance");
+}
+
+// === COLUMN HEADERS RENDER ===
+static void RenderColumnHeaders(ImDrawList* dl, ImVec2 pos, float tw, float hh, float jw) {
+    ImGuiIO& io = ImGui::GetIO();
+    ImU32 bg = (g_themeMode == ThemeMode::Dark) ? IM_COL32(35, 35, 45, 255) : IM_COL32(225, 225, 230, 255);
+    ImU32 br = (g_themeMode == ThemeMode::Dark) ? IM_COL32(60, 60, 80, 255) : IM_COL32(200, 200, 210, 255);
+    ImU32 hv = (g_themeMode == ThemeMode::Dark) ? IM_COL32(100, 100, 130, 255) : IM_COL32(180, 180, 200, 255);
+
+    dl->AddRectFilled(pos, ImVec2(pos.x + tw, pos.y + hh), bg);
+    dl->AddLine(ImVec2(pos.x, pos.y + hh - 1), ImVec2(pos.x + tw, pos.y + hh - 1), br);
+
+    float x = pos.x;
+    for (int i = 0; i < (int)g_columnOrder.size(); i++) {
+        auto& c = g_columnOrder[i];
+        if (!c.visible) continue;
+        float cw = c.width;
+        if (c.type == DisasmColumn::Jump) cw = std::max(cw, jw);
+        dl->AddText(ImVec2(x + 6, pos.y + (hh - 14) / 2), g_colors.Text, c.name);
+        float sx = x + cw;
+        dl->AddLine(ImVec2(sx, pos.y + 2), ImVec2(sx, pos.y + hh - 2), br);
+
+        ImVec2 hmi(sx - 4, pos.y), hma(sx + 4, pos.y + hh);
+        bool hh2 = ImGui::IsMouseHoveringRect(hmi, hma);
+        if (hh2 || g_resizingColumn == i) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            dl->AddRectFilled(ImVec2(sx - 2, pos.y + 2), ImVec2(sx + 2, pos.y + hh - 2), hv);
+        }
+        if (hh2 && ImGui::IsMouseClicked(0) && !IsAnyDialogOpen()) {
+            g_resizingColumn = i;
+            g_resizeStartX = io.MousePos.x;
+            g_resizeStartWidth = c.width;
+        }
+        x += cw;
+    }
+
+    if (g_resizingColumn >= 0 && g_resizingColumn < (int)g_columnOrder.size()) {
+        if (ImGui::IsMouseDown(0)) {
+            float d = io.MousePos.x - g_resizeStartX;
+            g_columnOrder[g_resizingColumn].width = std::max(g_resizeStartWidth + d, MIN_COL_WIDTH[(int)g_columnOrder[g_resizingColumn].type]);
+        }
+        else g_resizingColumn = -1;
+    }
+}
+
+// === DISASM RENDERER (instance-aware, full featured) ===
+static void RenderDisasmForInstance(InstanceInfo* inst) {
+    if (!inst) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "No instance bound to this slot");
+        ImGui::Separator();
+        ImGui::TextWrapped("Open a file or attach a process to view disassembly.");
+        ImGui::Spacing();
+        if (ImGui::Button("Open File...", ImVec2(120, 0))) { DoOpen(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Attach Process...", ImVec2(120, 0))) { g_newInstanceDlgOpen = true; }
+        return;
+    }
+
+    if (!inst->loaded) {
+        if (inst->type == InstanceType::Process) {
+            ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1), "Process memory not readable");
+            ImGui::Text("PID: %lu", inst->pid);
+        }
+        else {
+            ImGui::Text("Load a file to view disassembly");
+        }
+        return;
+    }
+
+    ImVec2 reg = ImGui::GetContentRegionAvail();
+    float sbw = 18, cw = reg.x - sbw - 4;
+    bool dop = IsAnyDialogOpen();
+
+    ImGui::PushAllowKeyboardFocus(false);
+    ImGui::BeginChild("##dc", ImVec2(cw, 0), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav);
+
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && g_resizingColumn < 0 && !dop)
+        g_focusedPanel = FOCUS_DISASM;
+
+    bool isFoc = (g_focusedPanel == FOCUS_DISASM) && !dop;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+    ImFont* fn = GetDisasmFont();
+    ImFont* fb = GetDisasmFontBold();
+    float fs = GetDisasmFontSize();
+
+    // Info bar
+    float ibh = 24;
+    {
+        ImU32 ibg = (g_themeMode == ThemeMode::Dark) ? IM_COL32(25, 30, 40, 255) : IM_COL32(220, 225, 235, 255);
+        ImU32 ibd = (g_themeMode == ThemeMode::Dark) ? IM_COL32(50, 60, 80, 255) : IM_COL32(190, 195, 205, 255);
+        ImVec2 imi = wp, ima(wp.x + cw - 4, wp.y + ibh);
+        dl->AddRectFilled(imi, ima, ibg);
+        dl->AddLine(ImVec2(imi.x, ima.y), ImVec2(ima.x, ima.y), ibd);
+
+        std::string is = "Disasm - " + (g_showModuleNames ? FormatAddressWithModule(inst->viewAddr, true, inst) : FormatDisplayAddress(inst->viewAddr, inst->pe.is64, inst));
+        is += " [" + inst->shortName + "]";
+        dl->AddText(fn, fs, ImVec2(wp.x + 8, wp.y + (ibh - fs) / 2), g_colors.Text, is.c_str());
+    }
+
+    float hh = 26, thh = ibh + hh, lh = fs + 4, ah = reg.y - thh - 8;
+    int actualVisibleLines = std::max((int)(ah / lh), 10);
+    int bufferLines = std::max(actualVisibleLines + 10, g_disVisibleLines);
+    int vl = actualVisibleLines;
+
+    auto& selectedAddrs = g_selectedAddrsMap[inst->id];
+    auto ls = GetDisasmLinesWithPreBuffer(inst, inst->viewAddr, bufferLines);
+    CalculateBranchLines(inst, ls, vl);
+
+    float jlw = 80;
+    if (g_maxBranchLane > 0) jlw = std::max(jlw, (g_maxBranchLane + 2) * 8.0f + 10);
+    for (auto& col : g_columnOrder)
+        if (col.type == DisasmColumn::Jump) { col.width = std::max(col.width, jlw); break; }
+
+    RenderColumnHeaders(dl, ImVec2(wp.x, wp.y + ibh), cw - 4, hh, jlw);
+    ImVec2 cs(wp.x, wp.y + thh);
+
+    // Keyboard navigation
+    if (isFoc && g_resizingColumn < 0) {
+        bool sh = io.KeyShift;
+        int si = FindLineIndex(ls, inst->selAddr);
+
+        if (IsKeyPressedManual(ImGuiKey_UpArrow)) {
+            u64 pa = GetPreviousInstructionAddress(inst, inst->selAddr);
+            if (sh) {
+                if (selectedAddrs.empty()) { selectedAddrs.insert(inst->selAddr); selectedAddrs.insert(pa); }
+                else {
+                    u64 maxAddr = *selectedAddrs.rbegin();
+                    if (maxAddr == inst->selAddr && selectedAddrs.size() > 1) selectedAddrs.erase(maxAddr);
+                    else selectedAddrs.insert(pa);
+                }
+            }
+            else selectedAddrs.clear();
+            inst->selAddr = pa;
+            if (inst->selAddr < inst->viewAddr) {
+                inst->viewAddr = inst->selAddr;
+                g_disasmCaches[inst->id].valid = false;
+            }
+        }
+
+        if (IsKeyPressedManual(ImGuiKey_DownArrow)) {
+            si = FindLineIndex(ls, inst->selAddr);
+            if (si >= 0 && si + 1 < (int)ls.size()) {
+                u64 nextAddr = ls[si + 1].addr;
+                if (sh) {
+                    if (selectedAddrs.empty()) { selectedAddrs.insert(inst->selAddr); selectedAddrs.insert(nextAddr); }
+                    else {
+                        u64 minAddr = *selectedAddrs.begin();
+                        if (minAddr == inst->selAddr && selectedAddrs.size() > 1) selectedAddrs.erase(minAddr);
+                        else selectedAddrs.insert(nextAddr);
+                    }
+                }
+                else selectedAddrs.clear();
+                inst->selAddr = nextAddr;
+                int newSi = FindLineIndex(ls, inst->selAddr);
+                if (newSi >= actualVisibleLines - 2 && ls.size() > 1) {
+                    inst->viewAddr = ls[1].addr;
+                    g_disasmCaches[inst->id].valid = false;
+                }
+            }
+        }
+
+        if (ImGui::IsKeyPressed(ImGuiKey_PageUp, false)) {
+            for (int i = 0; i < actualVisibleLines - 2; i++)
+                inst->viewAddr = GetPreviousInstructionAddress(inst, inst->viewAddr);
+            inst->selAddr = inst->viewAddr;
+            selectedAddrs.clear();
+            g_disasmCaches[inst->id].valid = false;
+        }
+
+        if (ImGui::IsKeyPressed(ImGuiKey_PageDown, false)) {
+            if (ls.size() > (size_t)(actualVisibleLines - 2))
+                inst->viewAddr = ls[actualVisibleLines - 2].addr;
+            inst->selAddr = inst->viewAddr;
+            selectedAddrs.clear();
+            g_disasmCaches[inst->id].valid = false;
+        }
+
+        if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+            int i = FindLineIndex(ls, inst->selAddr);
+            if (i >= 0) {
+                auto& l = ls[i];
+                u64 t = l.target ? l.target : (l.hasMemTarget ? l.memTarget : 0);
+                if (t) {
+                    char lb[64];
+                    sprintf(lb, "%s %s%llX", l.mn.c_str(), g_showHexPrefix ? "0x" : "", t);
+                    NavGotoWithSwitch(t, lb, true, false, inst);
+                }
+            }
+        }
+
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_F2, false)) {
+            int i = FindLineIndex(ls, inst->selAddr);
+            if (i >= 0) {
+                g_editAddr = ls[i].addr;
+                sprintf(g_editBuf, "%s %s", ls[i].mn.c_str(), ls[i].op.c_str());
+                g_editOpen = true;
+            }
+        }
+
+        if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) NavBackDisasm();
+
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+            if (!selectedAddrs.empty()) {
+                g_copyFrom = *selectedAddrs.begin();
+                g_copyTo = *selectedAddrs.rbegin();
+            }
+            else {
+                g_copyFrom = g_copyTo = inst->selAddr;
+            }
+            sprintf(g_copyFromBuf, "%llX", g_copyFrom);
+            sprintf(g_copyToBuf, "%llX", g_copyTo);
+            g_copyOpen = true;
+        }
+
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X, false)) {
+            if (inst->refs.built && inst->refs.HasRefsTo(inst->selAddr)) {
+                g_refsPopupAddr = inst->selAddr;
+                g_refsPopupList = inst->refs.FindTo(inst->selAddr);
+                g_refsPopupOpen = true;
+            }
+        }
+    }
+
+    // Mouse wheel scroll
+    if (ImGui::IsWindowHovered() && g_resizingColumn < 0 && !dop) {
+        float w = io.MouseWheel;
+        if (w != 0) {
+            if (w > 0)
+                for (int i = 0; i < (int)(w * 3); i++)
+                    inst->viewAddr = GetPreviousInstructionAddress(inst, inst->viewAddr);
+            else {
+                int sl = (int)(-w * 3);
+                if (sl < (int)ls.size())
+                    inst->viewAddr = ls[sl].addr;
+            }
+            g_disasmCaches[inst->id].valid = false;
+        }
+    }
+
+    // Calculate column positions
+    g_instrYPositions.clear();
+    std::map<DisasmColumn, float> cx;
+    float x = wp.x;
+    for (auto& col : g_columnOrder) {
+        if (!col.visible) continue;
+        cx[col.type] = x;
+        float w = col.width;
+        if (col.type == DisasmColumn::Jump) w = std::max(w, jlw);
+        x += w;
+    }
+
+    // Render lines
+    int rl = 0;
+    float cy = cs.y;
+
+    for (size_t li = 0; li < ls.size() && rl < vl; li++) {
+        auto& l = ls[li];
+        bool sel = (l.addr == inst->selAddr) || selectedAddrs.count(l.addr);
+        bool va = inst->mem.InRange(l.addr);
+
+        // Refs display
+        if (inst->refs.built && inst->refs.HasRefsTo(l.addr)) {
+            auto refs = inst->refs.FindTo(l.addr);
+            int mx = 3, rs = std::min((int)refs.size(), mx);
+            float rsx = cx.count(DisasmColumn::Address) ? cx[DisasmColumn::Address] : wp.x;
+
+            for (int ri = 0; ri < rs && rl < vl; ri++) {
+                auto& r = refs[ri];
+                ImVec2 rls(rsx, cy), rle(wp.x + cw - 4, cy + lh);
+                if (rl % 2 == 1) dl->AddRectFilled(rls, rle, g_colors.BackgroundAlt);
+                char rb[128];
+                sprintf(rb, "<- %s (%s%llX)", RefInfo::TypeStr(r.type), g_showHexPrefix ? "0x" : "", r.src);
+                dl->AddText(fn, fs, ImVec2(rsx + 20, cy + (lh - fs) / 2), g_colors.Green, rb);
+
+                if (ImGui::IsMouseHoveringRect(rls, rle) && !dop) {
+                    dl->AddRectFilled(rls, rle, IM_COL32(60, 80, 60, 100));
+                    if (ImGui::IsMouseClicked(0)) {
+                        char lb[64];
+                        sprintf(lb, "%s->%s%llX", RefInfo::TypeStr(r.type), g_showHexPrefix ? "0x" : "", l.addr);
+                        NavGotoWithSwitch(r.src, lb, true, false, inst);
+                        g_focusedPanel = FOCUS_DISASM;
+                    }
+                }
+                rl++; cy += lh;
+            }
+            if (rl >= vl) break;
+        }
+
+        g_instrYPositions[l.addr] = cy + lh / 2;
+        float lsx = cx.empty() ? wp.x : cx.begin()->second;
+
+        // Selection highlight
+        if (sel) {
+            ImVec2 smi(lsx, cy), sma(wp.x + cw - 4, cy + lh);
+            dl->AddRectFilled(smi, sma, g_colors.Selection);
+            dl->AddLine(ImVec2(lsx, cy), ImVec2(lsx, cy + lh), g_colors.SelectionBorder, 2);
+        }
+        else if (rl % 2 == 1) {
+            dl->AddRectFilled(ImVec2(lsx, cy), ImVec2(wp.x + cw - 4, cy + lh), g_colors.BackgroundAlt);
+        }
+
+        float ty = cy + (lh - fs) / 2;
+
+        // Render columns
+        for (auto& cc : g_columnOrder) {
+            if (!cc.visible || cx.find(cc.type) == cx.end()) continue;
+            float xx = cx[cc.type], ww = cc.width;
+            if (cc.type == DisasmColumn::Jump) ww = std::max(ww, jlw);
+
+            switch (cc.type) {
+            case DisasmColumn::Address: {
+                std::string as = g_showModuleNames && va ? FormatAddressWithModule(l.addr, true, inst) : FormatDisplayAddress(l.addr, inst->pe.is64, inst);
+                dl->PushClipRect(ImVec2(xx, cy), ImVec2(xx + ww - 4, cy + lh), true);
+                dl->AddText(fn, fs, ImVec2(xx + 4, ty), g_colors.White, as.c_str());
+                dl->PopClipRect();
+                dl->AddLine(ImVec2(xx + ww, cy), ImVec2(xx + ww, cy + lh), g_colors.Border);
+                break;
+            }
+            case DisasmColumn::Bytes: {
+                dl->PushClipRect(ImVec2(xx, cy), ImVec2(xx + ww - 4, cy + lh), true);
+                if (!va || l.mn == "??")
+                    dl->AddText(fn, fs, ImVec2(xx + 4, ty), g_colors.Gray, "??");
+                else {
+                    char bs[40] = { 0 };
+                    for (int i = 0; i < l.len && i < 8; i++)
+                        sprintf(bs + i * 3, "%02X ", l.bytes[i]);
+                    if (l.len > 8) strcat(bs, "...");
+                    dl->AddText(fn, fs, ImVec2(xx + 4, ty), g_colors.White, bs);
+                }
+                dl->PopClipRect();
+                dl->AddLine(ImVec2(xx + ww, cy), ImVec2(xx + ww, cy + lh), g_colors.Border);
+                break;
+            }
+            case DisasmColumn::Jump: {
+                if (va && (l.isJmp || l.isCall || l.isCond)) {
+                    u64 tgt = l.target ? l.target : (l.hasMemTarget ? l.memTarget : 0);
+                    if (tgt) {
+                        bool tv = false;
+                        for (auto& bl : g_branchLines)
+                            if (bl.srcAddr == l.addr) { tv = true; break; }
+                        if (!tv) {
+                            ImU32 ac = l.isCall ? g_colors.Green : (l.isCond ? g_colors.Red : g_colors.Orange);
+                            float ax = xx + ww - 10, ay = cy + lh / 2;
+                            if (tgt > l.addr)
+                                dl->AddTriangleFilled(ImVec2(ax, ay + 5), ImVec2(ax - 5, ay - 2), ImVec2(ax + 5, ay - 2), ac);
+                            else
+                                dl->AddTriangleFilled(ImVec2(ax, ay - 5), ImVec2(ax - 5, ay + 2), ImVec2(ax + 5, ay + 2), ac);
+                        }
+                    }
+                }
+                dl->AddLine(ImVec2(xx + ww, cy), ImVec2(xx + ww, cy + lh), g_colors.Border);
+                break;
+            }
+            case DisasmColumn::Opcode: {
+                dl->PushClipRect(ImVec2(xx, cy), ImVec2(xx + ww - 4, cy + lh), true);
+                if (!va || l.mn == "??")
+                    dl->AddText(fn, fs, ImVec2(xx + 4, ty), g_colors.Gray, "??");
+                else {
+                    float ox = xx + 4;
+                    ImU32 mc = g_colors.White;
+                    if (l.mn == "??" || l.mn == "db") mc = g_colors.Gray;
+                    else if (l.isCall) mc = g_colors.White;
+                    else if (l.isJmp && !l.isCond) mc = g_colors.Green;
+                    else if (l.isCond) mc = g_colors.Red;
+                    else if (l.isRet) mc = g_colors.Red;
+                    else if (l.mn == "push" || l.mn == "pop") mc = g_colors.Cyan;
+                    else if (l.mn == "nop") mc = g_colors.Gray;
+
+                    dl->AddText(fb, fs, ImVec2(ox, ty), mc, l.mn.c_str());
+                    ImVec2 msz = fb->CalcTextSizeA(fs, FLT_MAX, 0, l.mn.c_str());
+                    float tw = 60;
+                    if (l.mn.length() > 6) tw = 80;
+                    float opx = ox + std::max(msz.x + 8, tw);
+
+                    std::string ops = g_showModuleNames ? FormatOperandWithModule(l.op, l.target, l.memTarget, inst) : l.op;
+                    if (!ops.empty()) {
+                        auto tks = ParseOperandTokens(ops, g_showModuleNames);
+                        float dx = opx;
+                        for (auto& tk : tks) {
+                            ImVec2 tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, tk.text.c_str());
+                            dl->AddText(fn, fs, ImVec2(dx, ty), tk.color, tk.text.c_str());
+                            dx += tsz.x;
+                        }
+                    }
+                }
+                dl->PopClipRect();
+                dl->AddLine(ImVec2(xx + ww, cy), ImVec2(xx + ww, cy + lh), g_colors.Border);
+                break;
+            }
+            case DisasmColumn::Comments: {
+                if (va && l.mn != "??") {
+                    std::string cs2;
+                    if ((l.mn == "mov" || l.mn == "lea" || l.mn == "push") && (l.target || l.memTarget)) {
+                        std::string s = DetectStringAtAddress(inst->mem, l.target ? l.target : l.memTarget);
+                        if (!s.empty()) {
+                            if (s.length() > 40) s = s.substr(0, 40) + "...";
+                            cs2 = "\"" + s + "\"";
+                        }
+                    }
+                    if (cs2.empty() && !l.sym.empty() && l.sym != l.op) cs2 = l.sym;
+                    if (!cs2.empty()) {
+                        dl->PushClipRect(ImVec2(xx, cy), ImVec2(wp.x + cw - 4, cy + lh), true);
+                        dl->AddText(fn, fs, ImVec2(xx + 4, ty), g_colors.White, cs2.c_str());
+                        dl->PopClipRect();
+                    }
+                }
+                break;
+            }
+            default: break;
+            }
+        }
+
+        // Click handling
+        ImVec2 lmi(lsx, cy), lma(wp.x + cw - 4, cy + lh);
+        if (ImGui::IsMouseHoveringRect(lmi, lma) && g_resizingColumn < 0 && !dop) {
+            if (ImGui::IsMouseClicked(0)) {
+                if (io.KeyShift && inst->selAddr != l.addr) {
+                    u64 st = std::min(inst->selAddr, l.addr);
+                    u64 en = std::max(inst->selAddr, l.addr);
+                    selectedAddrs.clear();
+                    auto rangeLines = inst->dis.DisasmRange(inst->mem, st, en + 32);
+                    for (auto& rl2 : rangeLines) {
+                        if (rl2.addr >= st && rl2.addr <= en) selectedAddrs.insert(rl2.addr);
+                        if (rl2.addr > en) break;
+                    }
+                }
+                else if (io.KeyCtrl) {
+                    if (selectedAddrs.count(l.addr)) selectedAddrs.erase(l.addr);
+                    else selectedAddrs.insert(l.addr);
+                    inst->selAddr = l.addr;
+                }
+                else {
+                    selectedAddrs.clear();
+                    inst->selAddr = l.addr;
+                }
+                g_focusedPanel = FOCUS_DISASM;
+            }
+            if (ImGui::IsMouseDoubleClicked(0)) {
+                g_editAddr = l.addr;
+                sprintf(g_editBuf, "%s %s", l.mn.c_str(), l.op.c_str());
+                g_editOpen = true;
+            }
+        }
+
+        rl++; cy += lh;
+    }
+
+    // Draw branch lines
+    float jcx = 0;
+    for (auto& col : g_columnOrder)
+        if (col.type == DisasmColumn::Jump && col.visible) { jcx = cx[DisasmColumn::Jump]; break; }
+
+    if (jcx > 0) {
+        float ejw = jlw;
+        for (auto& col : g_columnOrder)
+            if (col.type == DisasmColumn::Jump) { ejw = std::max(col.width, jlw); break; }
+
+        for (auto& bl : g_branchLines) {
+            auto si = g_instrYPositions.find(bl.srcAddr), di = g_instrYPositions.find(bl.dstAddr);
+            if (si == g_instrYPositions.end() || di == g_instrYPositions.end()) continue;
+            float sy = si->second, dy = di->second, ls2 = 8, as2 = 4;
+            float lx = jcx + ejw - (bl.lane + 1) * ls2 - 4, sx = jcx + ejw - 2, th = bl.isSelected ? 2.5f : 1.5f;
+            dl->AddLine(ImVec2(sx, sy), ImVec2(lx, sy), bl.color, th);
+            dl->AddLine(ImVec2(lx, sy), ImVec2(lx, dy), bl.color, th);
+            dl->AddLine(ImVec2(lx, dy), ImVec2(sx, dy), bl.color, th);
+            dl->AddTriangleFilled(ImVec2(sx, dy), ImVec2(sx - as2 * 2, dy - as2), ImVec2(sx - as2 * 2, dy + as2), bl.color);
+            dl->AddCircleFilled(ImVec2(sx, sy), bl.isSelected ? 3 : 2, bl.color);
+        }
+    }
+
+    ImGui::EndChild();
+    ImGui::PopAllowKeyboardFocus();
+
+    // Scrollbar
+    ImGui::SameLine();
+    ImVec2 sp = ImGui::GetCursorScreenPos();
+    int sd = 0;
+    RenderCustomScrollbar("##ds", sp.x, sp.y, sbw, reg.y, &sd);
+    if (sd != 0 && !dop) {
+        if (sd < 0)
+            for (int i = 0; i < abs(sd); i++)
+                inst->viewAddr = GetPreviousInstructionAddress(inst, inst->viewAddr);
+        else {
+            int av = 4;
+            if (!ls.empty()) {
+                int t = 0;
+                for (auto& ll : ls) t += ll.len;
+                av = t / (int)ls.size();
+                if (av < 1) av = 1;
+            }
+            inst->viewAddr += sd * av;
+        }
+        g_disasmCaches[inst->id].valid = false;
+    }
+    ImGui::Dummy(ImVec2(sbw, reg.y));
+}
+
+// === HEXDUMP RENDERER (instance-aware, full featured) ===
+static void RenderHexDumpForInstance(InstanceInfo* inst) {
+    if (!inst) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "No instance bound to this slot");
+        ImGui::Separator();
+        ImGui::Text("Open a file to view hex dump.");
+        return;
+    }
+
+    if (!inst->loaded) {
+        if (inst->type == InstanceType::Process) {
+            ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1), "Process memory not readable");
+            ImGui::Text("PID: %lu", inst->pid);
+        }
+        else {
+            ImGui::Text("Load a file to view hex dump");
+        }
+        return;
+    }
+
+    ImVec2 reg = ImGui::GetContentRegionAvail();
+    float sbw = 18, cw = reg.x - sbw - 4;
+    bool dop = IsAnyDialogOpen() || g_hexEditDlgOpen;
+    ImFont* ft = GetHexFont();
+    float fs = GetHexFontSize();
+
+    ImGui::PushAllowKeyboardFocus(false);
+    ImGui::BeginChild("##hc", ImVec2(cw, 0), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav);
+
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !dop)
+        g_focusedPanel = FOCUS_HEXDUMP;
+    bool isFoc = (g_focusedPanel == FOCUS_HEXDUMP) && !dop;
+
+    int elemSize = GetHexViewSize(g_hexViewType);
+    float charW = ft->CalcTextSizeA(fs, FLT_MAX, 0, "0").x;
+
+    // Auto row bytes calculation
+    if (g_hexAutoRowBytes) {
+        float addrW = charW * (inst->pe.is64 ? 18 : 10);
+        float elemW;
+        switch (g_hexViewType) {
+        case HexViewType::ByteHex: elemW = charW * 3; break;
+        case HexViewType::ByteDec: elemW = charW * 4; break;
+        case HexViewType::Word2Hex: elemW = charW * 5.5f; break;
+        case HexViewType::Word2Dec: elemW = charW * 6.5f; break;
+        case HexViewType::Word4Hex: elemW = charW * 9.5f; break;
+        case HexViewType::Word4Dec: elemW = charW * 11; break;
+        case HexViewType::Word8Hex: elemW = charW * 17.5f; break;
+        case HexViewType::Word8Dec: elemW = charW * 21; break;
+        case HexViewType::Float: elemW = charW * 12; break;
+        case HexViewType::Double: elemW = charW * 12; break;
+        default: elemW = charW * 3; break;
+        }
+        float perByteWidth = (elemW / elemSize) + charW;
+        float availW = cw - addrW - charW * 6;
+        int calcBPR = (int)(availW / perByteWidth);
+        calcBPR = (calcBPR / elemSize) * elemSize;
+        calcBPR = std::clamp(calcBPR, elemSize, 64);
+        g_hexBytesPerRow = calcBPR;
+    }
+
+    int effectiveBPR = g_hexBytesPerRow;
+    if (g_hexViewType == HexViewType::Float || g_hexViewType == HexViewType::Double) {
+        effectiveBPR = (g_hexBytesPerRow / elemSize) * elemSize;
+        if (effectiveBPR < elemSize) effectiveBPR = elemSize;
+    }
+
+    // Header
+    ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1), "HexDump - %s%llX [%s] - %s",
+        g_showHexPrefix ? "0x" : "", inst->hexAddr, GetHexViewName(g_hexViewType), inst->shortName.c_str());
+    ImGui::SameLine();
+    ImGui::Checkbox("Auto", &g_hexAutoRowBytes);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Automatically calculate bytes per row");
+    ImGui::SameLine();
+    if (g_hexAutoRowBytes) ImGui::BeginDisabled();
+    ImGui::Text("B/R:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(40);
+    if (ImGui::InputInt("##bp", &g_hexBytesPerRow, 0, 0))
+        g_hexBytesPerRow = std::clamp(g_hexBytesPerRow, 4, 64);
+    if (g_hexAutoRowBytes) ImGui::EndDisabled();
+    ImGui::SameLine();
+    const char* sm[] = { "Step","Line" };
+    ImGui::SetNextItemWidth(50);
+    ImGui::Combo("##sm", &g_hexScrollMode, sm, 2);
+    ImGui::Separator();
+
+    // Context menu for view type
+    if (ImGui::BeginPopupContextWindow("HexContextMenu")) {
+        ImGui::TextDisabled("View Type:");
+        ImGui::Separator();
+        if (ImGui::MenuItem("Byte Hex", nullptr, g_hexViewType == HexViewType::ByteHex)) g_hexViewType = HexViewType::ByteHex;
+        if (ImGui::MenuItem("Byte Decimal", nullptr, g_hexViewType == HexViewType::ByteDec)) g_hexViewType = HexViewType::ByteDec;
+        ImGui::Separator();
+        if (ImGui::MenuItem("2 Byte Hex", nullptr, g_hexViewType == HexViewType::Word2Hex)) g_hexViewType = HexViewType::Word2Hex;
+        if (ImGui::MenuItem("2 Byte Decimal", nullptr, g_hexViewType == HexViewType::Word2Dec)) g_hexViewType = HexViewType::Word2Dec;
+        ImGui::Separator();
+        if (ImGui::MenuItem("4 Byte Hex", nullptr, g_hexViewType == HexViewType::Word4Hex)) g_hexViewType = HexViewType::Word4Hex;
+        if (ImGui::MenuItem("4 Byte Decimal", nullptr, g_hexViewType == HexViewType::Word4Dec)) g_hexViewType = HexViewType::Word4Dec;
+        ImGui::Separator();
+        if (ImGui::MenuItem("8 Byte Hex", nullptr, g_hexViewType == HexViewType::Word8Hex)) g_hexViewType = HexViewType::Word8Hex;
+        if (ImGui::MenuItem("8 Byte Decimal", nullptr, g_hexViewType == HexViewType::Word8Dec)) g_hexViewType = HexViewType::Word8Dec;
+        ImGui::Separator();
+        if (ImGui::MenuItem("Float", nullptr, g_hexViewType == HexViewType::Float)) g_hexViewType = HexViewType::Float;
+        if (ImGui::MenuItem("Double", nullptr, g_hexViewType == HexViewType::Double)) g_hexViewType = HexViewType::Double;
+        ImGui::EndPopup();
+    }
+
+    float lh = fs + 4, ah = ImGui::GetContentRegionAvail().y;
+    int vr = std::max((int)(ah / lh), 5);
+    int bpr = effectiveBPR;
+    int elemsPerRow = bpr / elemSize;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Get instance-specific hex state
+    bool& hexHasSelection = g_hexHasSelections[inst->id];
+    u64& hexAnchor = g_hexAnchors[inst->id];
+    u64& hexCursor = g_hexCursors[inst->id];
+    bool& hexDragging = g_hexDraggings[inst->id];
+    bool& hexHighNibble = g_hexHighNibbles[inst->id];
+    bool& hexSelectionFromAscii = g_hexSelectionFromAsciis[inst->id];
+
+    if (ImGui::IsMouseReleased(0)) hexDragging = false;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
+
+    u64 addr = inst->hexAddr;
+    float elemW;
+    switch (g_hexViewType) {
+    case HexViewType::ByteHex: elemW = charW * 3; break;
+    case HexViewType::ByteDec: elemW = charW * 4; break;
+    case HexViewType::Word2Hex: elemW = charW * 5.5f; break;
+    case HexViewType::Word2Dec: elemW = charW * 6.5f; break;
+    case HexViewType::Word4Hex: elemW = charW * 9.5f; break;
+    case HexViewType::Word4Dec: elemW = charW * 11; break;
+    case HexViewType::Word8Hex: elemW = charW * 17.5f; break;
+    case HexViewType::Word8Dec: elemW = charW * 21; break;
+    case HexViewType::Float: elemW = charW * 12; break;
+    case HexViewType::Double: elemW = charW * 12; break;
+    default: elemW = charW * 3; break;
+    }
+
+    float elemH = lh - 2;
+    ImU32 selActive = (g_themeMode == ThemeMode::Dark) ? IM_COL32(60, 80, 150, 255) : IM_COL32(100, 140, 200, 255);
+    ImU32 selDim = (g_themeMode == ThemeMode::Dark) ? IM_COL32(80, 60, 100, 255) : IM_COL32(140, 120, 180, 180);
+    ImU32 asciiTextColor = (g_themeMode == ThemeMode::Dark) ? IM_COL32(255, 255, 255, 255) : IM_COL32(0, 0, 0, 255);
+
+    u64 selStart = 0, selEnd = 0;
+    if (hexHasSelection) {
+        if (hexAnchor <= hexCursor) { selStart = hexAnchor; selEnd = hexCursor; }
+        else { selStart = hexCursor; selEnd = hexAnchor; }
+    }
+
+    for (int row = 0; row < vr; row++) {
+        ImVec2 rs = ImGui::GetCursorScreenPos();
+        std::string as = FormatDisplayAddress(addr, inst->pe.is64, inst);
+        dl->AddText(ft, fs, rs, g_colors.White, as.c_str());
+        float addrW = ft->CalcTextSizeA(fs, FLT_MAX, 0, as.c_str()).x;
+        float dataX = rs.x + addrW + charW * 2;
+
+        u8 rowData[64] = { 0 };
+        bool rowValid[64] = { false };
+        for (int i = 0; i < bpr; i++) {
+            if (inst->mem.InRange(addr + i)) {
+                rowData[i] = inst->mem.Read8(addr + i);
+                rowValid[i] = true;
+            }
+        }
+
+        // Hex elements
+        for (int e = 0; e < elemsPerRow; e++) {
+            int byteOff = e * elemSize;
+            u64 elemAddr = addr + byteOff;
+            float xPos = dataX + e * elemW;
+            ImVec2 ep(xPos, rs.y);
+
+            bool isSelected = hexHasSelection && elemAddr >= selStart && elemAddr <= selEnd;
+            bool isCursorHere = (elemAddr == hexCursor);
+
+            if (isSelected) {
+                ImU32 highlightColor = (!hexSelectionFromAscii) ? selActive : selDim;
+                dl->AddRectFilled(ep, ImVec2(ep.x + elemW - 2, ep.y + elemH), highlightColor);
+            }
+
+            bool valid = true;
+            for (int b = 0; b < elemSize; b++) {
+                if (!rowValid[byteOff + b]) { valid = false; break; }
+            }
+
+            char valStr[32] = "??";
+            if (valid) {
+                switch (g_hexViewType) {
+                case HexViewType::ByteHex: sprintf(valStr, "%02X", rowData[byteOff]); break;
+                case HexViewType::ByteDec: sprintf(valStr, "%3d", rowData[byteOff]); break;
+                case HexViewType::Word2Hex: { u16 v = *(u16*)&rowData[byteOff]; sprintf(valStr, "%04X", v); break; }
+                case HexViewType::Word2Dec: { u16 v = *(u16*)&rowData[byteOff]; sprintf(valStr, "%5d", v); break; }
+                case HexViewType::Word4Hex: { u32 v = *(u32*)&rowData[byteOff]; sprintf(valStr, "%08X", v); break; }
+                case HexViewType::Word4Dec: { u32 v = *(u32*)&rowData[byteOff]; sprintf(valStr, "%10u", v); break; }
+                case HexViewType::Word8Hex: { u64 v = *(u64*)&rowData[byteOff]; sprintf(valStr, "%016llX", v); break; }
+                case HexViewType::Word8Dec: { u64 v = *(u64*)&rowData[byteOff]; sprintf(valStr, "%20llu", v); break; }
+                case HexViewType::Float: {
+                    float v = *(float*)&rowData[byteOff];
+                    if (std::isnan(v) || std::isinf(v)) strcpy(valStr, "NaN");
+                    else { sprintf(valStr, "%.6g", v); if (strlen(valStr) > 8) sprintf(valStr, "%.2e", v); }
+                    break;
+                }
+                case HexViewType::Double: {
+                    double v = *(double*)&rowData[byteOff];
+                    if (std::isnan(v) || std::isinf(v)) strcpy(valStr, "NaN");
+                    else { sprintf(valStr, "%.6g", v); if (strlen(valStr) > 10) sprintf(valStr, "%.2e", v); }
+                    break;
+                }
+                }
+            }
+            dl->AddText(ft, fs, ImVec2(ep.x + 2, ep.y), valid ? g_colors.White : g_colors.Gray, valStr);
+
+            // Mouse handling
+            ImVec2 elemMin = ep, elemMax(ep.x + elemW - 2, ep.y + elemH);
+            if (ImGui::IsMouseHoveringRect(elemMin, elemMax) && !dop) {
+                if (ImGui::IsMouseClicked(0)) {
+                    hexSelectionFromAscii = false;
+                    if (io.KeyShift && hexHasSelection) {
+                        hexCursor = elemAddr;
+                    }
+                    else {
+                        hexAnchor = hexCursor = elemAddr;
+                        hexHasSelection = true;
+                        hexHighNibble = true;
+                    }
+                    hexDragging = true;
+                    g_focusedPanel = FOCUS_HEXDUMP;
+                }
+                if (ImGui::IsMouseDoubleClicked(0)) {
+                    g_hexEditDlgAddr = elemAddr;
+                    g_hexEditDlgType = g_hexViewType;
+                    g_hexEditDlgInstanceId = inst->id;
+                    g_hexEditDlgOpen = true;
+                }
+                if (hexDragging && ImGui::IsMouseDown(0)) {
+                    hexCursor = elemAddr;
+                }
+            }
+        }
+
+        // ASCII column
+        float asciiX = dataX + elemsPerRow * elemW + charW * 2;
+        dl->AddText(ft, fs, ImVec2(asciiX, rs.y), g_colors.White, "|");
+        asciiX += charW * 1.5f;
+
+        for (int i = 0; i < bpr; i++) {
+            u64 ba = addr + i;
+            bool isSel = hexHasSelection && ba >= selStart && ba <= selEnd;
+            char ch = '.';
+            if (rowValid[i] && rowData[i] >= 32 && rowData[i] < 127) ch = (char)rowData[i];
+            ImVec2 cp(asciiX + i * charW, rs.y);
+
+            if (isSel) {
+                ImU32 highlightColor = hexSelectionFromAscii ? selActive : selDim;
+                dl->AddRectFilled(cp, ImVec2(cp.x + charW, cp.y + elemH), highlightColor);
+            }
+
+            char cs[2] = { ch, 0 };
+            dl->AddText(ft, fs, cp, rowValid[i] ? asciiTextColor : g_colors.Gray, cs);
+
+            ImVec2 asciiMin = cp, asciiMax(cp.x + charW, cp.y + elemH);
+            if (ImGui::IsMouseHoveringRect(asciiMin, asciiMax) && !dop) {
+                if (ImGui::IsMouseClicked(0)) {
+                    hexSelectionFromAscii = true;
+                    if (io.KeyShift && hexHasSelection) { hexCursor = ba; }
+                    else { hexAnchor = hexCursor = ba; hexHasSelection = true; }
+                    hexDragging = true;
+                    g_focusedPanel = FOCUS_HEXDUMP;
+                }
+                if (hexDragging && ImGui::IsMouseDown(0)) { hexCursor = ba; }
+            }
+        }
+        dl->AddText(ft, fs, ImVec2(asciiX + bpr * charW, rs.y), g_colors.White, "|");
+
+        ImGui::SetCursorScreenPos(ImVec2(rs.x, rs.y + lh));
+        addr += bpr;
+    }
+    ImGui::PopStyleVar();
+
+    // Keyboard navigation
+    if (isFoc && hexHasSelection) {
+        bool shift = io.KeyShift;
+        u64 viewEnd = inst->hexAddr + (u64)(vr * bpr);
+        bool cursorVisible = (hexCursor >= inst->hexAddr && hexCursor < viewEnd);
+
+        if (IsKeyPressedManual(ImGuiKey_UpArrow)) {
+            if (hexCursor >= (u64)bpr) { hexCursor -= bpr; if (!shift) hexAnchor = hexCursor; }
+            if (hexCursor < inst->hexAddr) inst->hexAddr = (hexCursor / bpr) * bpr;
+        }
+        if (IsKeyPressedManual(ImGuiKey_DownArrow)) {
+            hexCursor += bpr; if (!shift) hexAnchor = hexCursor;
+            if (hexCursor >= inst->hexAddr + (u64)(vr * bpr)) inst->hexAddr += bpr;
+        }
+        if (IsKeyPressedManual(ImGuiKey_LeftArrow)) {
+            if (hexCursor > 0) hexCursor -= 1;
+            if (!shift) hexAnchor = hexCursor;
+            if (hexCursor < inst->hexAddr) inst->hexAddr = (hexCursor / bpr) * bpr;
+        }
+        if (IsKeyPressedManual(ImGuiKey_RightArrow)) {
+            hexCursor += 1; if (!shift) hexAnchor = hexCursor;
+            if (hexCursor >= inst->hexAddr + (u64)(vr * bpr)) inst->hexAddr += bpr;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+            g_hexEditDlgAddr = hexCursor;
+            g_hexEditDlgType = g_hexViewType;
+            g_hexEditDlgInstanceId = inst->id;
+            g_hexEditDlgOpen = true;
+        }
+    }
+
+    // Mouse wheel
+    if (ImGui::IsWindowHovered() && !dop) {
+        float w = io.MouseWheel;
+        if (w != 0) {
+            i64 d = (g_hexScrollMode == 0) ? (i64)(-w * 4) : (i64)(-w) * bpr;
+            inst->hexAddr = (u64)std::max((i64)0, (i64)inst->hexAddr + d);
+        }
+    }
+
+    ImGui::EndChild();
+    ImGui::PopAllowKeyboardFocus();
+
+    // Scrollbar
+    ImGui::SameLine();
+    ImVec2 sp = ImGui::GetCursorScreenPos();
+    int sd = 0;
+    RenderCustomScrollbar("##hs", sp.x, sp.y, sbw, reg.y, &sd);
+    if (sd != 0 && !dop) {
+        inst->hexAddr = (u64)std::max((i64)0, (i64)inst->hexAddr + (g_hexScrollMode == 0 ? sd : sd * bpr));
+    }
+    ImGui::Dummy(ImVec2(sbw, reg.y));
+}
+
+// === OTHER TAB RENDERERS (instance-aware) ===
+static void RenderImportsForInstance(InstanceInfo* inst) {
+    if (!inst) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "No instance bound to this slot");
+        ImGui::Separator();
+        ImGui::TextWrapped("Open a file (Ctrl+O) or attach a process (Ctrl+N) to populate this view.");
+        if (ImGui::Button("Open File...", ImVec2(120, 0))) { DoOpen(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Attach Process...", ImVec2(120, 0))) { g_newInstanceDlgOpen = true; }
+        return;
+    }
+
+    if (!inst->loaded) {
+        ImGui::Text("Instance not loaded");
+        return;
+    }
+
+    bool dop = IsAnyDialogOpen();
+    char ms[256];
+    sprintf(ms, "%s (0x%llX-0x%llX)", inst->name.c_str(), inst->mem.base, inst->mem.base + inst->mem.data.size());
+
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1, 0.4f, 1));
+    if (ImGui::Selectable(ms, false, ImGuiSelectableFlags_AllowDoubleClick)) {
+        if (ImGui::IsMouseDoubleClicked(0) && !dop) {
+            inst->viewAddr = inst->mem.base;
+            inst->selAddr = inst->viewAddr;
+            InstMgr.SetActiveInstance(inst->id);
+            int slot = GetSlotForInstance(inst->id);
+            if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+        }
+    }
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    for (size_t di = 0; di < inst->pe.imps.size(); di++) {
+        auto& d = inst->pe.imps[di];
+        u64 ds = 0, de = 0;
+        if (!d.funcs.empty()) {
+            ds = d.funcs[0].iatAddr;
+            de = d.funcs.back().iatAddr + (inst->pe.is64 ? 8 : 4);
+        }
+
+        ImGui::PushID((int)di);
+        char dh[256];
+        sprintf(dh, "%s (IAT: 0x%llX-0x%llX)", d.name.c_str(), ds, de);
+        bool op = ImGui::TreeNodeEx(dh, ImGuiTreeNodeFlags_OpenOnArrow);
+
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0) && ds && !dop) {
+            inst->viewAddr = ds;
+            inst->selAddr = ds;
+            InstMgr.SetActiveInstance(inst->id);
+            int slot = GetSlotForInstance(inst->id);
+            if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+        }
+
+        if (op) {
+            for (size_t fi = 0; fi < d.funcs.size(); fi++) {
+                auto& f = d.funcs[fi];
+                ImGui::PushID((int)fi);
+                char b[128];
+                sprintf(b, "0x%llX: %s", f.iatAddr, f.name.c_str());
+                if (ImGui::Selectable(b) && !dop) {
+                    inst->viewAddr = f.iatAddr;
+                    inst->selAddr = f.iatAddr;
+                    InstMgr.SetActiveInstance(inst->id);
+                    int slot = GetSlotForInstance(inst->id);
+                    if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+                }
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+}
+
+static void RenderSectionsForInstance(InstanceInfo* inst) {
+    if (!inst) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "No instance bound to this slot");
+        return;
+    }
+    if (!inst->loaded) {
+        ImGui::Text("Instance not loaded");
+        return;
+    }
+
+    bool dop = IsAnyDialogOpen();
+    ImGui::Text("Instance: %s", inst->name.c_str());
+    ImGui::Separator();
+
+    for (size_t si = 0; si < inst->pe.secs.size(); si++) {
+        auto& s = inst->pe.secs[si];
+        ImGui::PushID((int)si);
+        char b[64];
+        sprintf(b, "%s 0x%X (0x%X)", s.name, s.va, s.vSz);
+        if (ImGui::Selectable(b) && !dop) {
+            inst->viewAddr = inst->mem.base + s.va;
+            inst->selAddr = inst->viewAddr;
+            InstMgr.SetActiveInstance(inst->id);
+            int slot = GetSlotForInstance(inst->id);
+            if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+        }
+        ImGui::PopID();
+    }
+}
+
+static void RenderStringsForInstance(InstanceInfo* inst) {
+    if (!inst) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "No instance bound to this slot");
+        return;
+    }
+    if (!inst->loaded) {
+        ImGui::Text("Instance not loaded");
+        return;
+    }
+
+    bool dop = IsAnyDialogOpen();
+    ImGui::Text("Strings in %s: %zu", inst->shortName.c_str(), inst->stringStorage.entries.size());
+    ImGui::Separator();
+
+    ImGui::BeginChild("##strings", ImVec2(0, 0), true);
+    for (size_t i = 0; i < inst->stringStorage.entries.size(); i++) {
+        auto& e = inst->stringStorage.entries[i];
+        if (!e.valid) continue;
+        ImGui::PushID((int)i);
+        char buf[256];
+        sprintf(buf, "0x%llX: \"%s\"", e.addr, e.content.substr(0, 50).c_str());
+        if (ImGui::Selectable(buf) && !dop) {
+            inst->viewAddr = e.addr;
+            inst->selAddr = e.addr;
+            int slot = GetSlotForInstance(inst->id);
+            if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+}
+
+static void RenderLogTab() {
+    if (ImGui::Button("Clear", ImVec2(50, 0))) {
+        std::lock_guard<std::mutex> lk(g_logMtx);
+        g_log.clear();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Copy", ImVec2(50, 0))) {
+        std::string a;
+        std::lock_guard<std::mutex> lk(g_logMtx);
+        for (auto& s : g_log) a += s + "\n";
+        ImGui::SetClipboardText(a.c_str());
+    }
+    ImGui::Separator();
+    ImGui::BeginChild("##ls", ImVec2(0, 0), false);
+    {
+        std::lock_guard<std::mutex> lk(g_logMtx);
+        for (auto& s : g_log) ImGui::TextWrapped("%s", s.c_str());
+    }
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) ImGui::SetScrollHereY(1);
+    ImGui::EndChild();
+}
+
+static void RenderNavDisasmForInstance(InstanceInfo* inst) {
+    bool dop = IsAnyDialogOpen();
+    if (ImGui::Button("<", ImVec2(25, 0)) && !dop) NavBackDisasm();
+    ImGui::SameLine();
+    if (ImGui::Button(">", ImVec2(25, 0)) && !dop) NavForwardDisasm();
+    ImGui::SameLine();
+    if (ImGui::Button("Clr", ImVec2(30, 0))) { g_navHistoryDisasm.clear(); g_navIndexDisasm = -1; }
+    ImGui::SameLine();
+    ImGui::Text("%d/%zu", g_navIndexDisasm + 1, g_navHistoryDisasm.size());
+
+    if (!inst) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "No instance - showing all history");
+    }
+
+    ImGui::BeginChild("##nd", ImVec2(0, 0), false);
+    for (int i = (int)g_navHistoryDisasm.size() - 1; i >= 0; i--) {
+        auto& e = g_navHistoryDisasm[i];
+        bool ic = (i == g_navIndexDisasm);
+        bool isThisInst = (inst && e.instanceId == inst->id);
+
+        ImGui::PushID(i);
+        char b[128];
+        sprintf(b, "%s%s%s", ic ? "> " : "  ", e.label.c_str(), isThisInst ? "" : " (other)");
+
+        if (ic) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1, 0.4f, 1));
+        else if (!isThisInst) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1));
+
+        if (ImGui::Selectable(b, ic) && !dop) {
+            g_navIndexDisasm = i;
+            InstanceInfo* targetInst = InstMgr.GetInstance(e.instanceId);
+            if (targetInst) {
+                targetInst->viewAddr = e.addr;
+                if (g_gotoSelectAddress) targetInst->selAddr = e.addr;
+                InstMgr.SetActiveInstance(e.instanceId);
+                g_disasmCaches[e.instanceId].valid = false;
+                int slot = GetSlotForInstance(e.instanceId);
+                if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+            }
+        }
+
+        if (ic || !isThisInst) ImGui::PopStyleColor();
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+}
+
+static void RenderNavHexForInstance(InstanceInfo* inst) {
+    bool dop = IsAnyDialogOpen();
+    if (ImGui::Button("<", ImVec2(25, 0)) && !dop) NavBackHex();
+    ImGui::SameLine();
+    if (ImGui::Button(">", ImVec2(25, 0)) && !dop) NavForwardHex();
+    ImGui::SameLine();
+    if (ImGui::Button("Clr", ImVec2(30, 0))) { g_navHistoryHex.clear(); g_navIndexHex = -1; }
+    ImGui::SameLine();
+    ImGui::Text("%d/%zu", g_navIndexHex + 1, g_navHistoryHex.size());
+
+    if (!inst) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "No instance - showing all history");
+    }
+
+    ImGui::BeginChild("##nh", ImVec2(0, 0), false);
+    for (int i = (int)g_navHistoryHex.size() - 1; i >= 0; i--) {
+        auto& e = g_navHistoryHex[i];
+        bool ic = (i == g_navIndexHex);
+        bool isThisInst = (inst && e.instanceId == inst->id);
+
+        ImGui::PushID(i);
+        char b[128];
+        sprintf(b, "%s%s%s", ic ? "> " : "  ", e.label.c_str(), isThisInst ? "" : " (other)");
+
+        if (ic) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.8f, 1, 1));
+        else if (!isThisInst) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1));
+
+        if (ImGui::Selectable(b, ic) && !dop) {
+            g_navIndexHex = i;
+            InstanceInfo* targetInst = InstMgr.GetInstance(e.instanceId);
+            if (targetInst) {
+                targetInst->hexAddr = e.addr;
+                InstMgr.SetActiveInstance(e.instanceId);
+                int slot = GetSlotForInstance(e.instanceId);
+                if (slot > 0) GUI.SwitchToTab("hexdump_" + std::to_string(slot));
+            }
+        }
+
+        if (ic || !isThisInst) ImGui::PopStyleColor();
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+}
+
+static void RenderNavEditsForInstance(InstanceInfo* inst) {
+    if (ImGui::Button("Clear", ImVec2(50, 0))) g_editHistory.clear();
+    ImGui::SameLine();
+    ImGui::Text("%zu edits", g_editHistory.size());
+
+    bool dop = IsAnyDialogOpen();
+    ImGui::BeginChild("##ne", ImVec2(0, 0), false);
+    for (int i = (int)g_editHistory.size() - 1; i >= 0; i--) {
+        auto& e = g_editHistory[i];
+        bool isThisInst = (inst && e.instanceId == inst->id);
+
+        ImGui::PushID(i);
+        if (!isThisInst) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1));
+
+        if (ImGui::Selectable(e.label.c_str()) && !dop) {
+            InstanceInfo* targetInst = InstMgr.GetInstance(e.instanceId);
+            if (targetInst) {
+                targetInst->viewAddr = e.startAddr;
+                targetInst->selAddr = e.startAddr;
+                InstMgr.SetActiveInstance(e.instanceId);
+                g_disasmCaches[e.instanceId].valid = false;
+                int slot = GetSlotForInstance(e.instanceId);
+                if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+            }
+        }
+
+        if (!isThisInst) ImGui::PopStyleColor();
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+}
+
+static void RenderNavSearchForInstance(InstanceInfo* inst) {
+    bool dop = IsAnyDialogOpen();
+    ImGui::Text("Search refs:");
+    ImGui::SetNextItemWidth(-60);
+    bool doSearch = ImGui::InputText("##ns", g_navSearchBuf, sizeof(g_navSearchBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+
+    if ((ImGui::Button("Find", ImVec2(50, 0)) || doSearch) && inst && inst->loaded && inst->refsBuilt) {
+        g_navSearchResults.clear();
+        ParsedAddress pa = ParseAddressInput(g_navSearchBuf, inst);
+        if (pa.valid) {
+            auto refs = inst->refs.FindTo(pa.address);
+            for (auto& ref : refs) {
+                SearchResult sr;
+                sr.srcAddr = ref.src;
+                sr.type = RefInfo::TypeStr(ref.type);
+                sr.instanceId = inst->id;
+
+                auto lines = inst->dis.DisasmRange(inst->mem, ref.src, ref.src + 16);
+                if (!lines.empty()) {
+                    auto& l = lines[0];
+                    char buf[256];
+                    sprintf(buf, "0x%llX - %s %s", l.addr, l.mn.c_str(), l.op.c_str());
+                    sr.instruction = buf;
+                }
+                g_navSearchResults.push_back(sr);
+            }
+            Log("Found %zu refs", g_navSearchResults.size());
+        }
+    }
+
+    ImGui::Separator();
+    ImGui::Text("%zu results", g_navSearchResults.size());
+
+    ImGui::BeginChild("##nsr", ImVec2(0, 0), true);
+    for (int i = 0; i < (int)g_navSearchResults.size(); i++) {
+        auto& sr = g_navSearchResults[i];
+        ImGui::PushID(i);
+        if (ImGui::Selectable(sr.instruction.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick)) {
+            if (ImGui::IsMouseDoubleClicked(0) && !dop) {
+                InstanceInfo* targetInst = InstMgr.GetInstance(sr.instanceId);
+                if (targetInst) {
+                    targetInst->viewAddr = sr.srcAddr;
+                    targetInst->selAddr = sr.srcAddr;
+                    InstMgr.SetActiveInstance(sr.instanceId);
+                    g_disasmCaches[sr.instanceId].valid = false;
+                    int slot = GetSlotForInstance(sr.instanceId);
+                    if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+                }
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+}
+
+static void RenderHWBPForInstance(InstanceInfo* inst) {
+    bool dop = IsAnyDialogOpen();
+    if (ImGui::Button("Add", ImVec2(50, 0))) {
+        HWBPEntry e;
+        e.addr = inst ? inst->selAddr : 0;
+        e.enabled = true;
+        e.instanceId = inst ? inst->id : "";
+        g_hwbps.push_back(e);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear", ImVec2(70, 0))) g_hwbps.clear();
+
+    ImGui::Separator();
+    ImGui::BeginChild("##hl", ImVec2(0, 0), false);
+    for (size_t i = 0; i < g_hwbps.size(); i++) {
+        auto& bp = g_hwbps[i];
+        bool isThisInst = (inst && bp.instanceId == inst->id);
+
+        ImGui::PushID((int)i);
+        ImGui::Checkbox("##e", &bp.enabled);
+        ImGui::SameLine();
+
+        char ab[20]; sprintf(ab, "%llX", bp.addr);
+        ImGui::SetNextItemWidth(65);
+        if (ImGui::InputText("##a", ab, sizeof(ab), ImGuiInputTextFlags_CharsHexadecimal))
+            bp.addr = strtoull(ab, nullptr, 16);
+
+        ImGui::SameLine();
+        const char* ts[] = { "X","W","RW" };
+        ImGui::SetNextItemWidth(35);
+        ImGui::Combo("##t", &bp.type, ts, 3);
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X")) {
+            g_hwbps.erase(g_hwbps.begin() + i);
+            i--;
+            ImGui::PopID();
+            continue;
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Go") && !dop) {
+            InstanceInfo* targetInst = InstMgr.GetInstance(bp.instanceId);
+            if (targetInst) {
+                targetInst->viewAddr = bp.addr;
+                targetInst->selAddr = bp.addr;
+                InstMgr.SetActiveInstance(bp.instanceId);
+                g_disasmCaches[bp.instanceId].valid = false;
+                int slot = GetSlotForInstance(bp.instanceId);
+                if (slot > 0) GUI.SwitchToTab("disasm_" + std::to_string(slot));
+            }
+        }
+
+        if (!isThisInst && !bp.instanceId.empty()) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "(%s)", InstMgr.GetShortName(bp.instanceId).c_str());
+        }
+
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+}
+
+// === DIALOGS ===
+static void RenderGoto() {
+    if (!g_gotoOpen) return;
+
+    InstanceInfo* inst = InstMgr.GetActiveInstance();
+    ImVec2 ws = GUI.GetWindowSize();
+
+    ImGui::SetNextWindowFocus();
+    ImGui::SetNextWindowSize(ImVec2(550, 280), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(ws.x / 2 - 275, ws.y / 2 - 140), ImGuiCond_Appearing);
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), ws, IM_COL32(0, 0, 0, 128));
+
+    if (ImGui::Begin("Go To", &g_gotoOpen, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove)) {
+        if (inst) ImGui::Text("Instance: %s", inst->name.c_str());
+        ImGui::Text("Enter address, symbol, or module:");
+        ImGui::SetNextItemWidth(-1);
+        bool go = ImGui::InputText("##a", g_gotoBuf, sizeof(g_gotoBuf), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
+
+        ImGui::Checkbox("Select after goto", &g_gotoSelectAddress);
+        ImGui::Checkbox("Both panels", &g_gotoBothPanels);
+        ImGui::Separator();
+
+        if (inst) ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "Formats: 0x401000 | %s+D75D0", inst->shortName.c_str());
+
+        if (ImGui::Button("Go", ImVec2(80, 0)) || go) {
+            ParsedAddress p = ParseAddressInput(g_gotoBuf, inst);
+            if (p.valid) {
+                NavGotoWithSwitch(p.address, g_gotoBuf,
+                    (g_focusedPanel == FOCUS_DISASM) || g_gotoBothPanels,
+                    (g_focusedPanel == FOCUS_HEXDUMP) || g_gotoBothPanels, inst);
+                g_gotoOpen = false;
+            }
+            else Log("Invalid: %s", g_gotoBuf);
+            g_gotoBuf[0] = 0;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(80, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+            g_gotoOpen = false;
+    }
+    ImGui::End();
+}
+
+static void RenderInstanceManagerDialog() {
+    if (!g_instanceManagerDlgOpen) return;
+
+    ImVec2 ws = GUI.GetWindowSize();
+    ImGui::SetNextWindowSize(ImVec2(550, 450), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(ws.x / 2 - 275, ws.y / 2 - 225), ImGuiCond_Appearing);
+
+    if (ImGui::Begin("Instance Manager", &g_instanceManagerDlgOpen, ImGuiWindowFlags_NoCollapse)) {
+        auto instances = InstMgr.GetAllInstances();
+
+        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1), "Loaded Instances: %zu", instances.size());
+        ImGui::Separator();
+
+        ImGui::BeginChild("##instlist", ImVec2(0, -50), true);
+
+        if (instances.empty()) {
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "No instances loaded.");
+        }
+
+        for (int i = 0; i < (int)instances.size(); i++) {
+            auto* inst = instances[i];
+            ImGui::PushID(i);
+
+            bool isSelected = (g_instanceManagerSelected == i);
+            bool isActive = (inst->id == InstMgr.GetActiveInstanceId());
+
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.2f, 1), "Slot %d:", i + 1);
+            ImGui::SameLine();
+
+            char label[512];
+            sprintf(label, " %s [%s] - %s%s", inst->name.c_str(), inst->id.c_str(),
+                inst->loaded ? "Loaded" : "Failed",
+                isActive ? " (Active)" : "");
+
+            if (ImGui::Selectable(label, isSelected, ImGuiSelectableFlags_AllowDoubleClick)) {
+                g_instanceManagerSelected = i;
+                if (ImGui::IsMouseDoubleClicked(0)) {
+                    InstMgr.SetActiveInstance(inst->id);
+                }
+            }
+            ImGui::PopID();
+        }
+
+        ImGui::EndChild();
+
+        ImGui::Separator();
+
+        if (ImGui::Button("Close Selected", ImVec2(120, 0))) {
+            if (g_instanceManagerSelected >= 0 && g_instanceManagerSelected < (int)instances.size()) {
+                std::string id = instances[g_instanceManagerSelected]->id;
+                InstMgr.RemoveInstance(id);
+                g_instanceManagerSelected = -1;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close Dialog", ImVec2(100, 0))) {
+            g_instanceManagerDlgOpen = false;
+        }
+    }
+    ImGui::End();
+}
+
+static void RenderAddTabsDialog() {
+    if (!g_addTabsDlgOpen) return;
+
+    ImVec2 ws = GUI.GetWindowSize();
+    ImGui::SetNextWindowSize(ImVec2(480, 580), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(ws.x / 2 - 240, ws.y / 2 - 290), ImGuiCond_Appearing);
+
+    if (ImGui::Begin("Add Tabs", &g_addTabsDlgOpen, ImGuiWindowFlags_NoCollapse)) {
+        struct TabOption { DynamicTabType type; const char* name; const char* defaultPanel; };
+        static TabOption options[] = {
+            { DynamicTabType::Imports,   "Imports",    "left_top" },
+            { DynamicTabType::Sections,  "Sections",   "left_top" },
+            { DynamicTabType::Strings,   "Strings",    "left_top" },
+            { DynamicTabType::Disasm,    "Disassembly","center_top" },
+            { DynamicTabType::HexDump,   "HexDump",    "center_bot" },
+            { DynamicTabType::NavDis,    "NavDisasm",  "right_top" },
+            { DynamicTabType::NavHex,    "NavHex",     "right_bot" },
+            { DynamicTabType::NavEdit,   "NavEdits",   "right_top" },
+            { DynamicTabType::NavSearch, "NavSearch",  "right_top" },
+            { DynamicTabType::HWBP,      "HWBP",       "right_bot" },
+        };
+
+        static bool checked[10] = { false };
+        static int targetSlot = 0;
+
+        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1), "Add New Tabs");
+        ImGui::Separator();
+
+        int instanceCount = (int)InstMgr.GetInstanceCount();
+        ImGui::Text("Loaded Instances: %d", instanceCount);
+
+        ImGui::Separator();
+        ImGui::Text("Target Slot:");
+        ImGui::SameLine();
+        ImGui::RadioButton("Auto", &targetSlot, 0);
+
+        int maxSlot = std::max(instanceCount, 1) + 2;
+        for (int i = 1; i <= maxSlot && i <= 5; i++) {
+            ImGui::SameLine();
+            char label[16];
+            sprintf(label, "%d", i);
+            ImGui::RadioButton(label, &targetSlot, i);
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Select tabs to add:");
+
+        ImGui::BeginChild("##tablist", ImVec2(0, -85), true);
+        for (int i = 0; i < IM_ARRAYSIZE(options); i++) {
+            ImGui::PushID(i);
+            int checkSlot = (targetSlot == 0) ? GUIMgr.GetNextSlotForType(options[i].type) : targetSlot;
+            bool alreadyExists = GUIMgr.HasTab(options[i].type, checkSlot);
+
+            if (alreadyExists) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1));
+                bool dummy = false;
+                ImGui::Checkbox(options[i].name, &dummy);
+                ImGui::PopStyleColor();
+                checked[i] = false;
+            }
+            else {
+                ImGui::Checkbox(options[i].name, &checked[i]);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.2f, 1));
+        if (ImGui::Button("Add Selected Tabs", ImVec2(150, 0))) {
+            int addedCount = 0;
+            for (int i = 0; i < IM_ARRAYSIZE(options); i++) {
+                if (checked[i]) {
+                    int slot = (targetSlot == 0) ? 0 : targetSlot;
+                    GUIMgr.CreateSlotTab(options[i].type, slot, options[i].defaultPanel);
+                    checked[i] = false;
+                    addedCount++;
+                }
+            }
+            if (addedCount > 0) Log("Added %d tabs", addedCount);
+            g_addTabsDlgOpen = false;
+        }
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(80, 0))) {
+            g_addTabsDlgOpen = false;
+        }
+    }
+    ImGui::End();
+}
+
+static void RenderNewInstanceDialog() {
+    if (!g_newInstanceDlgOpen) return;
+
+    ImVec2 ws = GUI.GetWindowSize();
+    ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(ws.x / 2 - 200, ws.y / 2 - 100), ImGuiCond_Appearing);
+
+    if (ImGui::Begin("New Instance", &g_newInstanceDlgOpen, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::Text("Select instance type:");
+        ImGui::RadioButton("File", &g_newInstanceType, 0);
+        ImGui::RadioButton("Process", &g_newInstanceType, 1);
+        ImGui::Separator();
+
+        if (g_newInstanceType == 0) {
+            if (ImGui::Button("Browse...", ImVec2(-1, 0))) {
+                auto path = OpenFileDlg();
+                if (!path.empty()) {
+                    std::string id = InstMgr.CreateFileInstance(path);
+                    if (!id.empty()) {
+                        Log("Created instance %s", InstMgr.GetDisplayName(id).c_str());
+                        g_newInstanceDlgOpen = false;
+                    }
+                }
+            }
+        }
+        else {
+            ImGui::Text("Process ID:");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##pid", g_newInstancePidBuf, sizeof(g_newInstancePidBuf), ImGuiInputTextFlags_CharsDecimal);
+            if (ImGui::Button("Attach", ImVec2(-1, 0))) {
+                DWORD pid = (DWORD)atoi(g_newInstancePidBuf);
+                if (pid > 0) {
+                    std::string id = InstMgr.CreateProcessInstance(pid);
+                    if (!id.empty()) {
+                        Log("Created process instance: pid:%lu", pid);
+                        g_newInstanceDlgOpen = false;
+                    }
+                }
+            }
+        }
+
+        ImGui::Separator();
+        if (ImGui::Button("Cancel", ImVec2(-1, 0))) g_newInstanceDlgOpen = false;
+    }
+    ImGui::End();
+}
+
+static void RenderDisplaySettings() {
+    if (!g_displaySettingsOpen) return;
+    ImVec2 ws = GUI.GetWindowSize();
+    ImGui::SetNextWindowSize(ImVec2(420, 350), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(ws.x / 2 - 210, ws.y / 2 - 175), ImGuiCond_Appearing);
+    if (ImGui::Begin("Display Settings", &g_displaySettingsOpen, ImGuiWindowFlags_NoCollapse)) {
+        InstanceInfo* inst = InstMgr.GetActiveInstance();
+        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1), "Address");
+        ImGui::Separator();
+        ImGui::Checkbox("Show 0x prefix", &g_showHexPrefix);
+        ImGui::Checkbox("Custom Base", &g_useCustomBase);
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1), "HexDump");
+        ImGui::Separator();
+        ImGui::Text("Bytes/Row:"); ImGui::SameLine(); ImGui::SetNextItemWidth(80);
+        if (ImGui::InputInt("##bpr", &g_hexBytesPerRow, 0, 0))
+            g_hexBytesPerRow = std::clamp(g_hexBytesPerRow, 4, 64);
+        ImGui::Spacing(); ImGui::Separator();
+        if (ImGui::Button("Close", ImVec2(100, 0))) g_displaySettingsOpen = false;
+    }
+    ImGui::End();
+}
+
+static void RenderColumnSettings() {
+    if (!g_columnSettingsOpen) return;
+    ImVec2 ws = GUI.GetWindowSize();
+    ImGui::SetNextWindowSize(ImVec2(400, 350), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(ws.x / 2 - 200, ws.y / 2 - 175), ImGuiCond_Appearing);
+    if (ImGui::Begin("Column Settings", &g_columnSettingsOpen, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1), "Drag to reorder");
+        ImGui::Separator();
+        ImGui::BeginChild("##cl", ImVec2(0, 200), true);
+        for (int i = 0; i < (int)g_columnOrder.size(); i++) {
+            auto& c = g_columnOrder[i];
+            ImGui::PushID(i);
+            ImGui::Checkbox("##v", &c.visible);
+            ImGui::SameLine();
+            ImGui::Button("::", ImVec2(20, 0));
+            if (ImGui::IsItemActive() && !ImGui::IsItemHovered()) {
+                int ni = i + (ImGui::GetMouseDragDelta(0).y < 0 ? -1 : 1);
+                if (ni >= 0 && ni < (int)g_columnOrder.size()) {
+                    std::swap(g_columnOrder[i], g_columnOrder[ni]);
+                    ImGui::ResetMouseDragDelta();
+                }
+            }
+            ImGui::SameLine(); ImGui::Text("%s", c.name);
+            ImGui::SameLine(200);
+            ImGui::SetNextItemWidth(80);
+            ImGui::DragFloat("##w", &c.width, 1, MIN_COL_WIDTH[(int)c.type], 500, "%.0f");
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        ImGui::Separator();
+        if (ImGui::Button("Close", ImVec2(80, 0))) g_columnSettingsOpen = false;
+    }
+    ImGui::End();
+}
+
+// === CONFIG SAVE/LOAD ===
+static void SaveConfig() {
+    std::ofstream f(CONFIG_FILE);
+    if (!f) return;
+    SaveThemeConfig(f);
+    g_fonts.SaveConfig(f);
+    f << "\n[Display]\n";
+    f << "showModuleNames=" << (g_showModuleNames ? 1 : 0) << "\n";
+    f << "showHexPrefix=" << (g_showHexPrefix ? 1 : 0) << "\n";
+    f << "hexBytesPerRow=" << g_hexBytesPerRow << "\n";
+    f << "hexScrollMode=" << g_hexScrollMode << "\n";
+    f << "hexViewType=" << (int)g_hexViewType << "\n";
+    f << "hexAutoRowBytes=" << (g_hexAutoRowBytes ? 1 : 0) << "\n";
+    f << "useCustomBase=" << (g_useCustomBase ? 1 : 0) << "\n";
+    f << "displayBase=" << g_displayBase << "\n";
+    f << "disVisibleLines=" << g_disVisibleLines << "\n";
+
+    InstMgr.SaveSession(f);
+    GUIMgr.SaveSession(f);
+    f.close();
+    GUI.SaveLayout("layout.cfg");
+}
+
+static void LoadConfig() {
+    std::ifstream f(CONFIG_FILE);
+    if (!f) return;
+    std::map<std::string, std::string> cfg;
+    std::string ln;
+    while (std::getline(f, ln)) {
+        if (ln.empty() || ln[0] == '[' || ln[0] == '#') continue;
+        size_t eq = ln.find('=');
+        if (eq != std::string::npos) {
+            std::string k = ln.substr(0, eq), v = ln.substr(eq + 1);
+            while (!k.empty() && k.back() == ' ') k.pop_back();
+            while (!v.empty() && v[0] == ' ') v.erase(0, 1);
+            cfg[k] = v;
+        }
+    }
+    f.close();
+    LoadThemeConfig(cfg);
+    g_fonts.LoadConfig(cfg);
+    try {
+        if (cfg.count("showModuleNames")) g_showModuleNames = (cfg["showModuleNames"] == "1");
+        if (cfg.count("showHexPrefix")) g_showHexPrefix = (cfg["showHexPrefix"] == "1");
+        if (cfg.count("hexBytesPerRow")) g_hexBytesPerRow = std::stoi(cfg["hexBytesPerRow"]);
+        if (cfg.count("hexScrollMode")) g_hexScrollMode = std::stoi(cfg["hexScrollMode"]);
+        if (cfg.count("hexViewType")) g_hexViewType = (HexViewType)std::stoi(cfg["hexViewType"]);
+        if (cfg.count("hexAutoRowBytes")) g_hexAutoRowBytes = (cfg["hexAutoRowBytes"] == "1");
+        if (cfg.count("useCustomBase")) g_useCustomBase = (cfg["useCustomBase"] == "1");
+        if (cfg.count("displayBase")) g_displayBase = std::stoull(cfg["displayBase"]);
+        if (cfg.count("disVisibleLines")) g_disVisibleLines = std::stoi(cfg["disVisibleLines"]);
+
+        InstMgr.LoadSession(cfg);
+        GUIMgr.LoadSession(cfg);
+    }
+    catch (...) {}
+    g_hexBytesPerRow = std::clamp(g_hexBytesPerRow, 4, 64);
+}
+
+// === ACTIONS ===
+static void DoOpen() {
+    auto path = OpenFileDlg();
+    if (!path.empty()) {
+        std::string id = InstMgr.CreateFileInstance(path);
+        if (!id.empty()) {
+            Log("Loaded: %s", InstMgr.GetDisplayName(id).c_str());
+            InstanceInfo* inst = InstMgr.GetInstance(id);
+            if (inst) {
+                NavPushDisasm(inst->viewAddr, "Entry Point", inst);
+                NavPushHex(inst->hexAddr, "Base", inst);
+            }
+            g_focusedPanel = FOCUS_DISASM;
+        }
+    }
+}
+
+static void DoSave() {
+    if (InstMgr.GetInstanceCount() == 0) { Log("No instances to save"); return; }
+    if (InstMgr.GetInstanceCount() == 1) {
+        auto ids = InstMgr.GetInstanceIds();
+        auto path = SaveFileDlg();
+        if (!path.empty()) {
+            if (InstMgr.SaveInstance(ids[0], path.c_str()))
+                Log("Saved %s", InstMgr.GetDisplayName(ids[0]).c_str());
+        }
+    }
+    else {
+        g_saveSelectDlgOpen = true;
+    }
+}
+
+static void DoBuildRefs() {
+    InstanceInfo* inst = InstMgr.GetActiveInstance();
+    if (inst && inst->loaded && !g_refBuilding) {
+        g_refBuilding = true;
+        g_refProg = 0;
+        g_refBuildingInstanceId = inst->id;
+        std::string instId = inst->id;
+        std::thread([instId]() {
+            InstanceInfo* i = InstMgr.GetInstance(instId);
+            if (i) {
+                i->refs.Build(i->mem, i->dis, [](int p) { g_refProg = p; });
+                i->refsBuilt = true;
+            }
+            g_refBuilding = false;
+            Log("Refs built: %zu", i ? i->refs.refs.size() : 0);
+            }).detach();
+    }
+}
+
+static void DoUndo() {
+    InstanceInfo* inst = InstMgr.GetActiveInstance();
+    if (inst && inst->undo.Undo(inst->mem)) {
+        Log("Undo");
+        g_disasmCaches[inst->id].valid = false;
+    }
+}
+
+static void DoRedo() {
+    InstanceInfo* inst = InstMgr.GetActiveInstance();
+    if (inst && inst->undo.Redo(inst->mem)) {
+        Log("Redo");
+        g_disasmCaches[inst->id].valid = false;
+    }
+}
+
+static void DoNavBack() {
+    if (g_focusedPanel == FOCUS_HEXDUMP) NavBackHex();
+    else NavBackDisasm();
+}
+
+static void DoNavForward() {
+    if (g_focusedPanel == FOCUS_HEXDUMP) NavForwardHex();
+    else NavForwardDisasm();
+}
+
+static void DoGoto() {
+    g_gotoOpen = true;
+    InstanceInfo* inst = InstMgr.GetActiveInstance();
+    u64 a = 0;
+    if (inst) {
+        if (g_focusedPanel == FOCUS_HEXDUMP) a = inst->hexAddr;
+        else if (inst->selAddr) a = inst->selAddr;
+        else a = inst->viewAddr;
+    }
+    std::string f = FormatAddressForGoto(a, inst);
+    strncpy(g_gotoBuf, f.c_str(), sizeof(g_gotoBuf) - 1);
+}
+
+static void DoToggleModuleNames() {
+    g_showModuleNames = !g_showModuleNames;
+    Log("Module names: %s", g_showModuleNames ? "ON" : "OFF");
+}
+
+// === SETUP ===
+static void Setup() {
+    GUI.Init(g_hwnd, "Ultra Analyzer Pro");
+
+    // Register tab renderers
+    GUIMgr.RegisterTabRenderer(DynamicTabType::Imports, RenderImportsForInstance);
+    GUIMgr.RegisterTabRenderer(DynamicTabType::Sections, RenderSectionsForInstance);
+    GUIMgr.RegisterTabRenderer(DynamicTabType::Strings, RenderStringsForInstance);
+    GUIMgr.RegisterTabRenderer(DynamicTabType::Disasm, RenderDisasmForInstance);
+    GUIMgr.RegisterTabRenderer(DynamicTabType::HexDump, RenderHexDumpForInstance);
+    GUIMgr.RegisterTabRenderer(DynamicTabType::NavDis, RenderNavDisasmForInstance);
+    GUIMgr.RegisterTabRenderer(DynamicTabType::NavHex, RenderNavHexForInstance);
+    GUIMgr.RegisterTabRenderer(DynamicTabType::NavEdit, RenderNavEditsForInstance);
+    GUIMgr.RegisterTabRenderer(DynamicTabType::NavSearch, RenderNavSearchForInstance);
+    GUIMgr.RegisterTabRenderer(DynamicTabType::HWBP, RenderHWBPForInstance);
+
+    GUIMgr.InitDefaultLayout();
+
+    // Log tab (instance-independent)
+    GUI.CreateTab("log", "Log", RenderLogTab);
+
+    // Default panels
+    GUI.CreatePanel(PanelSlot::LeftTop, {});
+    GUI.CreatePanel(PanelSlot::LeftBot, { "log" });
+    GUI.CreatePanel(PanelSlot::CenterTop, {});
+    GUI.CreatePanel(PanelSlot::CenterBot, {});
+    GUI.CreatePanel(PanelSlot::RightTop, {});
+    GUI.CreatePanel(PanelSlot::RightBot, {});
+
+    LoadConfig();
+    GUI.LoadLayout("layout.cfg");
+    UpdateThemeColors();
+    ApplyThemeToGUI();
+
+    // Auto-tab callback
+    InstMgr.OnInstanceCreated = [](const std::string& id) {
+        AutoCreateTabsForInstance(id);
+    };
+
+    // Cleanup on instance removal
+    InstMgr.OnInstanceRemoved = [](const std::string& id) {
+        g_navHistoryDisasm.erase(
+            std::remove_if(g_navHistoryDisasm.begin(), g_navHistoryDisasm.end(),
+                [&id](const NavEntry& e) { return e.instanceId == id; }),
+            g_navHistoryDisasm.end());
+        g_navHistoryHex.erase(
+            std::remove_if(g_navHistoryHex.begin(), g_navHistoryHex.end(),
+                [&id](const NavEntry& e) { return e.instanceId == id; }),
+            g_navHistoryHex.end());
+        g_editHistory.erase(
+            std::remove_if(g_editHistory.begin(), g_editHistory.end(),
+                [&id](const EditHistoryEntry& e) { return e.instanceId == id; }),
+            g_editHistory.end());
+        g_hwbps.erase(
+            std::remove_if(g_hwbps.begin(), g_hwbps.end(),
+                [&id](const HWBPEntry& e) { return e.instanceId == id; }),
+            g_hwbps.end());
+        g_disasmCaches.erase(id);
+        g_hexAnchors.erase(id);
+        g_hexCursors.erase(id);
+        g_hexHasSelections.erase(id);
+        g_selectedAddrsMap.erase(id);
+        g_navIndexDisasm = std::min(g_navIndexDisasm, (int)g_navHistoryDisasm.size() - 1);
+        g_navIndexHex = std::min(g_navIndexHex, (int)g_navHistoryHex.size() - 1);
+    };
+
+    // === MENUS ===
+    GUI.AddMenuItem("File", "Open", DoOpen, "Ctrl+O");
+    GUI.AddMenuItem("File", "Attach Process...", []() { g_newInstanceDlgOpen = true; }, "Ctrl+N");
+    GUI.AddMenuItem("File", "Save", DoSave, "Ctrl+S");
+    GUI.AddMenuSeparator("File");
+    GUI.AddMenuItem("File", "Manage Instances...", []() { g_instanceManagerDlgOpen = true; }, "Ctrl+I");
+    GUI.AddMenuSeparator("File");
+    GUI.AddMenuItem("File", "Exit", []() { GUI.RequestClose(); }, "Alt+F4");
+
+    GUI.AddMenuItem("Edit", "Undo", DoUndo, "Ctrl+Z");
+    GUI.AddMenuItem("Edit", "Redo", DoRedo, "Ctrl+Y");
+    GUI.AddMenuSeparator("Edit");
+    GUI.AddMenuItem("Edit", "Go to", DoGoto, "Ctrl+G");
+
+    GUI.AddMenuItem("View", "Add Tabs...", []() { g_addTabsDlgOpen = true; }, "Ctrl+T");
+    GUI.AddMenuSeparator("View");
+    GUI.AddMenuItem("View", "Fonts", OpenFontSettings);
+    GUI.AddMenuItem("View", "Display", []() { g_displaySettingsOpen = true; });
+    GUI.AddMenuItem("View", "Columns", []() { g_columnSettingsOpen = true; });
+    GUI.AddMenuSeparator("View");
+    GUI.AddMenuItem("View", "Module Names", DoToggleModuleNames, "Ctrl+M");
+
+    GUI.AddMenuItem("Analysis", "Build Refs", DoBuildRefs, "Ctrl+Shift+R");
+    GUI.AddMenuItem("Analysis", "Code Injection...", []() { g_injDlgOpen = true; }, "Ctrl+I");
+    GUI.AddMenuSeparator("Analysis");
+    GUI.AddMenuItem("Analysis", "Allocate Memory...", []() { g_freeMemDlgOpen = true; }, "Ctrl+Alt+A");
+
+    // === TOOLBAR ===
+    GUI.AddToolbarButton("Open", DoOpen, "Open (Ctrl+O)");
+    GUI.AddToolbarButton("Attach", []() { g_newInstanceDlgOpen = true; }, "Attach Process");
+    GUI.AddToolbarButton("Save", DoSave, "Save (Ctrl+S)");
+    GUI.AddToolbarSeparator();
+    GUI.AddToolbarButton("Inst", []() { g_instanceManagerDlgOpen = true; }, "Manage Instances");
+    GUI.AddToolbarButton("+Tabs", []() { g_addTabsDlgOpen = true; }, "Add Tabs");
+    GUI.AddToolbarSeparator();
+    GUI.AddToolbarButton("+Col", []() { if (GUI.AddColumn()) Log("Added column"); }, "Add Column");
+    GUI.AddToolbarButton("-Col", []() { if (GUI.RemoveColumn()) Log("Removed column"); }, "Remove Column");
+    GUI.AddToolbarSeparator();
+    GUI.AddToolbarButton("Refs", DoBuildRefs, "Build Refs");
+    GUI.AddToolbarSeparator();
+    GUI.AddToolbarButton("<", DoNavBack, "Back");
+    GUI.AddToolbarButton(">", DoNavForward, "Forward");
+    GUI.AddToolbarSeparator();
+    GUI.AddToolbarButton("Undo", DoUndo, "Undo");
+    GUI.AddToolbarButton("Redo", DoRedo, "Redo");
+    GUI.AddToolbarSeparator();
+
+    // Instance selector
+    GUI.AddToolbarWidget([]() {
+        auto instances = InstMgr.GetAllInstances();
+        if (instances.empty()) { ImGui::Text("No files"); return; }
+        std::string activeId = InstMgr.GetActiveInstanceId();
+        InstanceInfo* active = InstMgr.GetInstance(activeId);
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::BeginCombo("##inst", active ? active->shortName.c_str() : "Select")) {
+            for (auto* inst : instances) {
+                bool selected = (inst->id == activeId);
+                int slot = GetSlotForInstance(inst->id);
+                char label[256];
+                sprintf(label, "[%d] %s", slot, inst->name.c_str());
+                if (ImGui::Selectable(label, selected)) {
+                    InstMgr.SetActiveInstance(inst->id);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        });
+    GUI.AddToolbarSeparator();
+
+    GUI.AddToolbarWidget([]() {
+        ImGui::Text("Lines:"); ImGui::SameLine(); ImGui::SetNextItemWidth(50);
+        if (ImGui::InputInt("##vl", &g_disVisibleLines, 0, 0))
+            g_disVisibleLines = std::clamp(g_disVisibleLines, 10, 200);
+        });
+    GUI.AddToolbarSeparator();
+
+    GUI.AddToolbarWidget([]() {
+        if (ImGui::Checkbox("Mod", &g_showModuleNames)) {}
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Module names");
+        });
+    GUI.AddToolbarSeparator();
+
+    GUI.AddToolbarWidget([]() {
+        ImGui::Checkbox("0x", &g_showHexPrefix);
+        });
+    GUI.AddToolbarSeparator();
+
+    GUI.AddToolbarWidget([]() {
+        const char* th[] = { "Dark","Light" };
+        int ti = (g_themeMode == ThemeMode::Dark) ? 0 : 1;
+        ImGui::SetNextItemWidth(60);
+        if (ImGui::Combo("##th", &ti, th, 2)) {
+            g_themeMode = (ti == 0) ? ThemeMode::Dark : ThemeMode::Light;
+            UpdateThemeColors();
+            ApplyThemeToGUI();
+        }
+        });
+    GUI.AddToolbarSeparator();
+
+    GUI.AddToolbarWidget([]() {
+        if (g_refBuilding) ImGui::Text("Refs: %d%%", (int)g_refProg);
+        else ImGui::Text("Inst: %zu", InstMgr.GetInstanceCount());
+        });
+    GUI.AddToolbarSeparator();
+
+    GUI.AddToolbarWidget([]() {
+        InstanceInfo* inst = InstMgr.GetActiveInstance();
+        if (!inst || !inst->loaded) return;
+        bool aslr = (inst->pe.dllCharacteristics & 0x40) != 0;
+        ImGui::PushStyleColor(ImGuiCol_Text, aslr ? ImVec4(1, 0.5f, 0.5f, 1) : ImVec4(0.5f, 1, 0.5f, 1));
+        if (ImGui::Button(aslr ? "ASLR:ON" : "ASLR:OFF", ImVec2(70, 0))) {
+            if (aslr) { inst->pe.DisableASLR(); Log("ASLR disabled"); }
+        }
+        ImGui::PopStyleColor();
+        });
+
+    Log("Ultra Analyzer Pro - Slot-Based System");
+    Log("Ctrl+O: Open | Ctrl+N: Attach | Ctrl+T: Add Tabs | Ctrl+I: Instances");
+}
+
+// === SHORTCUTS ===
+static void HandleGlobalShortcuts() {
+    if (IsAnyDialogOpen()) return;
+    ImGuiIO& io = ImGui::GetIO();
+
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) DoOpen();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_N, false)) g_newInstanceDlgOpen = true;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) DoSave();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_G, false)) DoGoto();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_M, false)) DoToggleModuleNames();
+    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R, false)) DoBuildRefs();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) DoUndo();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) DoRedo();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I, false)) g_instanceManagerDlgOpen = true;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T, false)) g_addTabsDlgOpen = true;
+    if (io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false)) DoNavBack();
+    if (io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_RightArrow, false)) DoNavForward();
+}
+
+// === MAIN ===
+int WINAPI wWinMain(HINSTANCE hI, HINSTANCE, LPWSTR, int) {
+    WNDCLASSEXA wc = { sizeof(wc),CS_CLASSDC,WndProc,0,0,hI,0,LoadCursor(0,IDC_ARROW),0,0,"UAP",0 };
+    RegisterClassExA(&wc);
+    int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
+    g_hwnd = CreateWindowExA(0, "UAP", "Ultra Analyzer Pro", WS_POPUP | WS_VISIBLE,
+        (sx - g_w) / 2, (sy - g_h) / 2, g_w, g_h, 0, 0, hI, 0);
+    if (!InitD3D(g_hwnd)) return 1;
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+    io.IniFilename = nullptr;
+    ImGui_ImplWin32_Init(g_hwnd);
+    ImGui_ImplDX11_Init(g_dev, g_ctx);
+    g_fonts.Load();
+    Setup();
+
+    while (!GUI.WantClose()) {
+        MSG m;
+        while (PeekMessage(&m, 0, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&m);
+            DispatchMessage(&m);
+            if (m.message == WM_QUIT) GUI.RequestClose();
+        }
+        if (GUI.WantClose()) break;
+        if (g_fonts.NeedRebuild) g_fonts.Rebuild();
+
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        GUI.RenderFullFrame();
+        HandleGlobalShortcuts();
+
+        // Dialogs
+        RenderGoto();
+        RenderNewInstanceDialog();
+        RenderDisplaySettings();
+        RenderFontDialog();
+        RenderColumnSettings();
+        RenderInstanceManagerDialog();
+        RenderAddTabsDialog();
+
+        ImGui::Render();
+        float cl[4];
+        if (g_themeMode == ThemeMode::Dark) { cl[0] = 0.03f; cl[1] = 0.03f; cl[2] = 0.05f; cl[3] = 1; }
+        else { cl[0] = 0.94f; cl[1] = 0.94f; cl[2] = 0.94f; cl[3] = 1; }
+        g_ctx->OMSetRenderTargets(1, &g_rtv, 0);
+        g_ctx->ClearRenderTargetView(g_rtv, cl);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        g_swap->Present(1, 0);
+    }
+
+    GUI.SaveLayout("layout.cfg");
+    SaveConfig();
+    GUI.Shutdown();
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    CleanD3D();
+    DestroyWindow(g_hwnd);
+    UnregisterClassA("UAP", hI);
+    return 0;
+}
