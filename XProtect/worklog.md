@@ -285,3 +285,62 @@ Stage Summary:
   netlestirilmis hali).
 - Siradaki adim: 0.2.0 mutation cekirdegi (A5-A8) — yol haritasinin ilk sutunu;
   her surumde matris guncellenip repo'ya pushlanacak.
+
+---
+Task ID: 9 — Config_info v2.0 (148 ozellik) — KAYIP OTURUM
+Agent: main (Z.ai)
+Task: Kullanicinin "ustunkoru" elestirisi uzerine HER dosya + satir
+taranarak derin ozellik listesi + port % raporu uretmek.
+
+Work Log:
+- Derin tarama: 235 enum / 1.536 define / 1.178 class / 4.599 metot /
+  577 IntelCommandType / 123 FACE_ / 110 GUI Faces; 148 ozellik x 22
+  modul matris; M1 %1,4 / M2 %17,9 / M3 %65.
+- Rapor 82,8KB / 1.641 satir (md5 8b3ecf4d...) + CSV uretildi.
+- ReverseALL push 403 (token gecerli ama Contents:write yok sanildi;
+  commit 3839f3c lokalde bekledi).
+- KADER: sandbox sifirlanmasi raporu sildi (bu sandbox'ta Config_info.md
+  hala v1.0 / md5 5e5c39cc). DERS: kritik cikti ANINDA diske + GitHub.
+
+Stage Summary:
+- Kullaniciya rapor + port yuzdeleri iletildi; push 403 yuzunden repo
+  guncellenemedi; sonraki oturumda telafi edilecek.
+
+---
+Task ID: 10 — xiangu kalici ev + XProtectUI (Win32 UI replikasi) + v2.0-r regenerasyon
+Agent: main (Z.ai)
+Task: Kullanici: token push izni VAR; xiangu'da klasor ac, her seyi
+GitHub'a pushla (kalici garanti); tum ozellikleri UI ile yap
+(universalObfusPublicSrc UI'si varsa birebir, ama win32api ile); UI
+exe + zip; her oturumda port raporu.
+
+Work Log:
+- Token dogrulama: xiangu + ReverseALL perms push:true (eski 403 asildi).
+- xiangu klon -> XProtect/ klasoru (worklog + Config_info + releases/
+  0.1.0.zip + source/) -> commit f6515e7 -> PUSH BASARILI.
+- GUI envanteri: mainwindow.cc (3.712) + 6 dialog + en.lng etiketleri.
+- XProtectUI yazildi (xprotect_ui.cpp 2.391 satir; saf Win32):
+  menu/toolbar/tab seridi/tree/functions/property grid(cp* TAMAMI)/
+  log/status/welcome/splitter + Add Function/Go To/Add License/
+  Export Key Pair/Watermarks/Settings(EN-TR)/About + motor in-process
+  protect() worker thread + .xproj + PE mini-cozumleyici.
+- Derleme (zig c++): XProtectUI.exe x64 823.808 bayt (63a9dc9f...) +
+  XProtectUI32.exe x86 871.424 bayt (d24cfb08...); import tablolari temiz.
+- Wine yeniden kurulum: wine64 10.0~repack-6 deb-extract; nssetup.c ile
+  namespace /usr takasi (usrmerge ld-linux dosya-bind, wineserver
+  script->binary). Kalici: scripts/wrun_gui2.sh + nssetup.c.
+- SELFTEST: Xvfb+wine64 "SELFTEST OK" (+ --open C:\Test.exe smoke).
+- Paket: XProtect_0.2.0.zip (47 dosya) md5 1c48166def29f9bd11b58d18e4a0d8f7
+  (download/XProtect/ + versions/). Zip ici MD5 teyidi tamam
+  (63a9dc9f / d24cfb08 / 3d43965c / 583ccc15).
+- Config_info v2.0-r: scan_vmp_deep.py — 584 dosya / 896.428 satir;
+  106 enum / 1.471 define / 961 class / 24.717 metot / 1.178 Lua;
+  56/56 kanit; FACE_ 123. Matris: 100 ozellik/22 modul
+  (VAR 13 / KISMEN 14 / UI 19 / YOK 54).
+  Yuzdeler: M1 %0,6 / M2 %20,5 / M2+UI %24,5 / M3 %65,0 / UI %90+.
+  Cikti: download/Config_info.md + Config_info_ozellik_matrisi.csv
+  + download/WORKLOG.txt (kronolojik).
+
+Stage Summary:
+- 0.2.0 teslim; UI yuzeyi birebir, motor kredisi ayri tutuldu
+  (UI-hazir != port). Sonraki: 0.3.0 mutation cekirdegi.

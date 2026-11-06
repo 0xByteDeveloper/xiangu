@@ -18,7 +18,7 @@ karşı her şey burada tutulur.
 | Sürüm | Tarih | Özet |
 | --- | --- | --- |
 | 0.1.0 | 2026-10-20 | İlk resmi sürüm: sanallaştırma zinciri (x64+x86), CPlusPort.exe/32 GUI, VMPHelper v1.3, Test oyunu + korumalı çıktılar, wine64 birebir doğrulama |
-| 0.2.0 | (bu oturum) | Win32 API UI (universalObfusPublicSrc GUI'sinin birebir Win32 muadili) + derlenmiş exe'ler |
+| 0.2.0 | 2026-11-07 | Win32 API UI (XProtectUI x64+x86, universalObfusPublicSrc GUI birebir replika) + motor gömülü derleme + wine64/Xvfb selftest |
 
 ## Referanslar
 

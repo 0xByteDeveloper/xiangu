@@ -1,0 +1,101 @@
+﻿id,kat,modul,ozellik,kanit,durum,motor_pct
+1,A,disasm,x86/x64 cozucu (disasm alt-kumesi),engine_disasm.cpp:1,VAR,85
+2,A,disasm,VMProtect intel.cc tam cozucu (577 komut),core/intel.h:4,YOK,0
+3,A,lifter,Lifter: makine kodu -> VM bytecode,engine_lift.cpp:1,VAR,60
+4,A,lifter,IL ara temsili (il.cc 7.8K satir),core/il.cc,KISMEN,20
+5,A,vm,VM ISA + stub uretimi (x64/x86),engine_stub.cpp:1,VAR,70
+6,A,vm,fetch-time bytecode sifreleme (vmenc),scripts/vm_core.c:60,VAR,80
+7,A,vm,.vmp0 bolum ureteci,engine_main.cpp,VAR,75
+8,A,mutation,Mutate() ~60 talimat-sablon motoru,core/intel.cc:16039,KISMEN,25
+9,A,mutation,mutation garbage enjeksiyonu (0-3/talimat),core/intel.cc:16379,KISMEN,30
+10,A,mutation,"talimat ikamesi (xor->sub, call->push/lea/xchg)",core/intel.cc:16039,YOK,0
+11,A,mutation,canli-register analizi (GetFreeRegisters),core/intel.cc,YOK,0
+12,A,mutation,JMP kapilari (CreateBlocks/AddGate/AddShortGate),core/intel.cc:15627,YOK,0
+13,A,mutation,komut-basina crypt_command/crypt_key,core/intel.h:443,YOK,0
+14,A,mutation,SectionCryptor (bolum sifreleyici),core/intel.h:515,YOK,0
+15,A,mutation,can_merge birlestirme,core/intel.h:461,YOK,0
+16,A,ultra,Ultra zinciri (Mutate + CompileToVM),core/files.h:311,KISMEN,50
+17,A,ultra,polymorphic handler uretimi,core/intel.cc,YOK,0
+18,A,ultra,BreakpointSection,core/intel.cc:9305,YOK,0
+19,A,ultra,Parse*SEH ailesi (SEH tarama),core/intel.cc:13149,YOK,0
+20,B,pe,PE32/PE32+ okuma-yazma,engine_pe.cpp:1,VAR,85
+21,B,pe,COFF/PDB'siz sembol taramasi,core/pefile.cc:4078,VAR,90
+22,B,pe,export tablosu cozumu,engine_pe.cpp,VAR,90
+23,B,pe,.reloc filtreleme (BUGFIX #13),engine_pe.cpp,VAR,80
+24,B,pe,16 PE directory loader kapsami,core/pefile.cc:348,YOK,0
+25,B,pe,bolum ekleme (add_section),engine_pe.cpp,KISMEN,40
+26,B,pe,checksum duzeltme (GetCheckSum/fix),core/pefile.cc:3771,VAR,70
+27,B,pe,x64 reloc HIGHLOW/DIR64,engine_pe.cpp,KISMEN,50
+28,B,pe,import protection,core/intel.cc:20412,YOK,0
+29,B,pe,resource protection,core/core.cc:876,YOK,0
+30,B,pe,strip fixups,core/pefile.cc:3760,YOK,0
+31,B,pe,strip debug info,core/core.h:7,YOK,0
+32,B,pe,Mach-O (Mac PE) destegi,core/macfile.cc:2,YOK,0
+33,B,pe,ELF destegi,core/elffile.cc:2,YOK,0
+34,B,pe,DotNet metadata (dotnetfile),core/dotnetfile.cc:9,YOK,0
+35,B,loader,Loader 16 directory isleme,core/pefile.cc:348,YOK,0
+36,C,loader,SetupImage (taze map + CRC),runtime/loader.cc:879,YOK,0
+37,C,loader,Loader CRC (mtFileCorrupted),runtime/loader.cc:508,YOK,0
+38,C,loader,LoaderProcessFixups,runtime/loader.cc:840,YOK,0
+39,C,loader,LoaderGetProcAddress (gecikmeli import),runtime/loader.cc:277,YOK,0
+40,C,loader,LOADER_OPTION (runtime/common.h),runtime/common.h:111,YOK,0
+41,C,prot,anti-debug hook ailesi,runtime/core.cc:149,KISMEN,30
+42,C,prot,gecici RWX->RX->VirtualFree,runtime/hook_manager.cc:662,YOK,0
+43,C,prot,taze ntdll map (anti-hook),runtime/loader.cc:879,YOK,0
+44,C,prot,memory protection (bolum korumalari),runtime/VMProtect.Runtime/CpuId.cs:54,YOK,0
+45,C,prot,string sifreleme (RC5 CipherRC5),runtime/crypto.cc:19,KISMEN,40
+46,C,prot,HWID (donanim izi),runtime/VMProtect.Runtime/Core.cs:333,YOK,0
+47,C,prot,watermark motoru,core/core.cc:161,YOK,0
+48,C,prot,C# runtime (VMProtect.Runtime),runtime/VMProtect.Runtime/Core.cs:1,YOK,0
+49,C,prot,DDK/driver yuzeyi,runtime/common.h:10,YOK,0
+50,C,prot,registry manager (trial),runtime/registry_manager.cc:10,YOK,0
+51,C,prot,activation server istemcisi,runtime/VMProtect.Runtime/Core.cs:123,YOK,0
+52,C,prot,lisans yonetimi (licensing_manager),runtime/licensing_manager.cc:20,YOK,0
+53,C,prot,internal memory protection,core/core.h:7,YOK,0
+54,C,prot,check virtual machine,core/core.h:7,YOK,0
+55,C,prot,check kernel debugger,core/core.h:7,YOK,0
+56,C,prot,loader CRC secenegi,core/core.h:7,YOK,0
+57,C,prot,crypt values (deger sifreleme),core/core.h:7,KISMEN,30
+58,C,prot,encrypt registers,core/core.h:7,YOK,0
+59,C,prot,runner CRC,core/core.h:7,YOK,0
+60,C,prot,virtual files,core/core.h:27,YOK,0
+61,C,prot,SDK runtime yuzeyi (sdk.cc karsiligi),sdk/VMProtectDDK.h:18,YOK,0
+62,D,lic,RSA anahtar uretimi (keygen),core/core.h:65,YOK,0
+63,D,lic,serial number uretimi/dogrulama,runtime/licensing_manager.cc:20,YOK,0
+64,D,lic,key pair export,VMProtect/export_key_pair_dialog.cc:11,YOK,0
+65,D,lic,Lock To Serial Number (coLockToKey),core/processors.h:632,YOK,0
+66,D,lic,SDK 40 API (APIType yuzeyi),core/files.h:239,YOK,0
+67,D,lic,VMProtectDecryptStringA karsiligi,scripts/vm_core.c:60,KISMEN,30
+68,E,gui,"MainWindow menu seti (5 menu, birebir)",VMProtect/mainwindow.cc:337,UI,100
+69,E,gui,Toolbar + Execute/Templates dropdown,VMProtect/mainwindow.cc:447,UI,100
+70,E,gui,Sol dikey tab seridi (Project/Functions/Details),VMProtect/mainwindow.cc:551,UI,100
+71,E,gui,Project agaci + V/M/U ikonlari,VMProtect/models.cc,UI,100
+72,E,gui,Functions listesi (PDB'siz tarama),VMProtect/models.cc,UI,100
+73,E,gui,Property editor (core/function/license),VMProtect/property_editor.cc:564,UI,90
+74,E,gui,Add Function / Go To dialogu,VMProtect/function_dialog.cc:20,UI,100
+75,E,gui,Add License dialogu (serial contents),VMProtect/license_dialog.cc:20,UI,100
+76,E,gui,Watermark dialog + Watermarks penceresi,VMProtect/watermark_dialog.cc:17,UI,100
+77,E,gui,Settings dialog (Language/AutoSave),VMProtect/settings_dialog.cc:16,UI,100
+78,E,gui,About dialog (edition/version/build),VMProtect/about_dialog.cc:17,UI,100
+79,E,gui,Log paneli + status bar (line/col),VMProtect/mainwindow.cc:881,UI,90
+80,E,gui,Welcome boot paneli,VMProtect/mainwindow.cc:921,UI,90
+81,E,gui,Execute menu (Original/Protected/Params),VMProtect/mainwindow.cc:439,UI,100
+82,E,gui,Export Key Pair dialogu,VMProtect/export_key_pair_dialog.cc,UI,90
+83,E,gui,Import License / Import Project,VMProtect/import_license_dialog.cc,UI,80
+84,E,gui,Derleme entegrasyonu (in-process protect),CPlusPort_Source/cplport_gui.cpp:190,UI,90
+85,E,gui,Undo/Redo yigini,VMProtect/mainwindow.cc:150,UI,60
+86,E,gui,Lua script editoru,VMProtect/mainwindow.cc:649,YOK,0
+87,E,gui,Dump/Disasm gorunumleri,VMProtect/mainwindow.cc:616,YOK,0
+88,E,gui,Templates window,VMProtect/templates_window.cc,YOK,0
+89,E,gui,Dil paketleri (en/fr/ru/zh),langs/en.lng,KISMEN,40
+90,E,gui,RemoteControl yuzeyi,VMProtect/remotecontrol.cc,YOK,0
+91,E,gui,Help browser,VMProtect/help_browser.cc,YOK,0
+92,F,tool,CLI (--list/--in/--funcs/--level/--opt),CPlusPort_Source/cplport_cli.cpp:51,VAR,70
+93,F,tool,VMPHelper canli analiz (VMP'de YOK — ekstra),XProtect (bu proje),VAR,100
+94,F,tool,Unicorn/wine dogrulama hatti (ekstra),scripts/uc*_test.py,VAR,100
+95,F,tool,gtest unit testler,unit-tests/arm_tests.cpp:6,KISMEN,20
+96,F,tool,shellext (sag-tik menu),shellext/context_menu.cc:30,YOK,0
+97,F,tool,minidump fixer,minidumpfixer/main.cpp:5,YOK,0
+98,F,tool,build sistemi (mak/sln -> zig),CPlusPort_Source/build_all.sh,KISMEN,60
+99,F,tool,i18n altyapisi,core/lang.h,KISMEN,50
+100,F,tool,.xproj proje dosyasi (VMP .vmp karsiligi),XProtectUI_Source/xprotect_ui.cpp,UI,90

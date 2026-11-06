@@ -1,0 +1,176 @@
+XPROTECT (CPlusPort) — KRONOLOJİK İŞ GÜNLÜĞÜ
+Format: tarih | istek → yapılan → teslim (zip + MD5)
+Bu dosya sandbox sıfırlanmalarına karşı GitHub'a da pushlanır.
+============================================================
+
+[2026-10-15..18 | Task 1] VMProtect kaynak zip analizi
+- İstek: VMProtect 3.5.1 kaynak zipleri (universalObfusPublicSrc.zip +
+  universalObfuspublicsrc2.zip) analiz → koruma motoru planı.
+- Yapılan: 27 sayfa PDF analiz raporu; hedef: C++ port (CPlusPort /
+  XProtect), test oyunu MiniPac (Test.exe x64 / Test32.exe x86).
+
+[2026-10-18..19 | Task 2] Sanallaştırma zinciri v1 (tam teslim)
+- Yapılan: Test.cpp yeniden (fgets satır-giriş; eski WASD+Enter çökme fix),
+  vm_core.c MiniVM + pozisyon-bağımsız blob'lar (vm64.bin 8.3KB,
+  vmx86.bin 21KB — iki farklı .text'te byte-aynı = tam PIC), engine
+  (PE32/PE32+ okuma-yazma, export+COFF fonksiyon keşfi, x86/x64 alt-
+  küme çözücü, lifter, elle kodlanmış x64/x86 VM stub'ları, .vmp0
+  section üretici, CLI+GUI).
+- Doğrulama: libgame.so üzerinde 41/41 PASS.
+- Teslim: Test.exe/Test_vmp.exe (x64, 5 fn), Test32.exe/Test32_vmp.exe
+  (x86, 3 fn), CPlusPort.exe, RVA_Opcode_Karsilastirma.md, README.txt.
+
+[2026-10-19 | Task 3] Wine kurulumu + 11 kök-hata fix
+- İstek: Wine 64 + 32 kurulumu; x86 program testi.
+- Yapılan: wine64 root'suz kuruldu (deb extract + unshare/chroot) →
+  Windows exe'ler İLK KEZ sandbox'ta koşuldu. Test.exe çökmesi birebir
+  üretildi (zig panic: signed integer overflow) → 11 kök hata düzeltildi
+  (BUGFIX #1-11: est_func_size taşması, lifter NEG/NOT, ret-sonrası
+  tarama, kuyruk-jmp, 0x83 imm8 sign-ext, acc-form, stub lea REX 0x49,
+  push sırası, natcall clobber, x86 key truncation/pushad/SIB...).
+- Doğrulama: Unicorn 49/49 (x64) + 44/44 (x86) + wine64 uçtan uca
+  (orijinal == vmp çıktı BİREBİR).
+- Sınır: wine32 = konteyner seccomp i386 loader'ı öldürüyor ("Bad system
+  call") — kalıcı; x86 testi Unicorn + kullanıcı Windows teyidiyle.
+
+[2026-10-19..20 | Task 4] Test32_vmp w+Enter çökmesi kökten + VMPHelper
+- Kök neden 1 (BUGFIX #12): build_stub_x86 u16 retimm → "ret 0xFFFF"
+  (her dönüşte ESP +0x10003).
+- Kök neden 2 (BUGFIX #13): ezilen bölgedeki 26 bayat .reloc girdisi +
+  ASLR → PEFile::filter_relocs() yazıldı; uc32_aslr_test.py kanıtı.
+- VMPHelper.c/exe: açık vmp süreci bulur, modül tabanı, ASLR delta,
+  bolum tablosu, manifest, canlı stub baytları, bcRVA+key çıkarımı,
+  CE yol haritası.
+- Teslim: download/CPlusPort/ (v1.2 artefaktları).
+
+[2026-10-20 | Task 5] FARK!? gizemi + VMPHelper v1.3
+- Kullanıcı canlı çıktısındaki "FARK!?" kok nedeni: VMPHelper manifest
+  key'i elle kopyalanmış BAYAT değer (BUGFIX #14) + prefBase diskten
+  okunmalı (BUGFIX #15; Windows loader header ImageBase'i gerçek tabanla
+  güncelliyor). VM/oyun ETKİLENMEDİ.
+- VMPHelper v1.3 derlendi + teslim.
+
+[2026-10-20 | Task 6] XProtect_0.1.0 — ilk resmi sürüm
+- MD5 teyit: Test_vmp.exe 3d43965c6a6ec8c71171bfd7c0116605 ✓,
+  Test32_vmp.exe 583ccc15f4b3b01487818d7a1dbf7efb ✓ (kullanıcı elindeki
+  ile birebir), VMPHelper.exe kullanıcıda 934fbe5d = v1.2 BAYAT,
+  teslimdeki 5a88e91f = v1.3.
+- WINE64 CANLI: Test_vmp.exe 17 hamle oynandı (skor 0→60), orijinal
+  Test.exe ile diff = BOS.
+- CPlusPort32.exe (x86 Win32 GUI) İLK KEZ derlendi (736KB, PE32/i386).
+- Teslim: download/XProtect/XProtect_0.1.0.zip (+ versions/ yedeği)
+  — içerik: Test/Test32, Test_vmp/Test32_vmp, CPlusPort.exe/.32,
+  VMPHelper v1.3, CPlusPort_Source, Test_exe_Source, VMPHelper_Source,
+  README.txt, CHANGELOG.md.
+- Zip MD5: (versions/ yedeğinde: b8c1c07f0ee6e45608005e4c1a3b53e0 —
+  0.1.0 paketinin teslim anındaki md5 kaydı worklog Task 6'da tutuldu)
+
+[2026-10-20..24 | Task 7] Derin kaynak analizi + i4MConsoleLoader + port %
+- pub1 (vmp/ ağacı) TAM kaynak; pub2 = aynı (intel.cc 31.494 +
+  processors.cc 2.852 yalnız pub1'de).
+- intel.cc:16039 Mutate() ~60 şablon; :16379 garbage; :15627
+  CreateBlocks/AddGate; intel.h:443 crypt_command/key; :515
+  SectionCryptor; files.h:311 ctVirtualization/ctMutation/ctUltra.
+- runtime: hook_manager.cc:662 RWX->RX->VirtualFree; loader.cc:879
+  SetupImage taze map + CRC; :840 LoaderProcessFixups; :277
+  LoaderGetProcAddress; anti-debug 4 hook (runtime/core.cc).
+- i4MConsoleLoader: PEManualMapper = 8 adımlı loader emülasyonu;
+  globals.h MemImage.SaveFile = image->raw ters mapping; VMP'de
+  interaktif file<->image editor YOK → dump-oracle + rebase-regresyon
+  tezgâhı olarak entegrasyon kararı.
+- Port hacmi: VMP gerçek kaynak ~131.6K satır (core+runtime) / CPlusPort
+  2.763 satır; modül %20-25; fonksiyonel yol %60-65.
+
+[2026-10-24 | Task 8] Config_info v1.0 (77 özellik)
+- Envanter (scan_vmp_inventory.py): 1.449 dosya / 1.130.477 satır
+  (third-party dahil tam ağaç).
+- 77 özelliklik matris: VAR=2, KISMEN=14, YOK=61; ağırlıklı M2=%9,
+  M1=%1,7, M3=%65. ReverseALL repo'suna Config_info.md pushlandı
+  (commit 2aae020f57dc) + Config_info.docx (postcheck 9/9).
+- KULLANICI DEĞERLENDİRMESİ: "anlamsız/üstünkörü" → RED. Sebep: hafif
+  araştırma listesindeki çoğu yüzey (marker API'leri, LinkType/
+  CommandOption/SectionOption, lisans chunk tipleri, NodeType, FACE_,
+  script olayları, keygen, WebLM, DDK...) raporda yoktu.
+
+[2026-11-06 | Task 9] Config_info v2.0 (148 özellik) — KAYIP OTURUM
+- Yapılan: derin L1/L2 tarama (235 enum, 1.536 define, 1.178 class,
+  4.599 metot, 577 IntelCommandType, 123 FACE_ üyesi, 110 GUI Faces);
+  148 özellik × 22 modül matris; M1=%1,4 / M2=%17,9 / M3=%65.
+- Rapor: download/Config_info.md (82,8KB / 1.641 satır, md5 8b3ecf4d...)
+  + Config_info_ozellik_matrisi.csv.
+- ReverseALL push: token geçerli (0xByteDeveloper) ama push 403 →
+  "Contents: write kapalı" teşhisi; commit 3839f3c lokalde bekledi.
+- KADER: sandbox sıfırlanması → RAPOR + CSV + klon KAYIP (bu sandbox'ta
+  download/Config_info.md hâlâ v1.0 = md5 5e5c39cc5ed3d5693a3cba34be2aa495).
+  DERS: her kritik çıktı ANINDA diske + GitHub'a.
+
+[2026-11-07 | Task 10 — BU OTURUM]
+1. Kullanıcı: token push izni VAR diyor + xiangu repo'sunda klasör aç,
+   her şeyi GitHub'a pushla (kalıcı garanti), önce Win32 UI kodla.
+2. Token doğrulama: api.github.com → xiangu ve ReverseALL perms
+   push:true (önceki 403 aşıldı).
+3. xiangu klonlandı → XProtect/ klasörü kuruldu:
+   worklog.md + Config_info.md (o an v1) + releases/XProtect_0.1.0.zip
+   + source/ (CPlusPort_Source, Test_exe_Source, VMPHelper_Source)
+   → commit f6515e7 → PUSH BAŞARILI (bf05377..f6515e7 main).
+4. GUI envanteri (birebir): VMProtect/mainwindow.cc (3.712 satır) menü/
+   toolbar/merkez yapı; function_dialog.cc, settings_dialog.cc,
+   watermark_dialog.cc, license_dialog.cc, about_dialog.cc alan setleri;
+   etiketler langs/en.lng'den birebir alındı.
+5. XProtectUI — saf Win32 API Qt replikası yazıldı
+   (scripts/xprotect_ui/xpui_a..f.cpp → xprotect_ui.cpp 2.391 satır):
+   - Menüler: File/Edit/Project(Add,Export Key Pair,Import,Compile F9,
+     Execute F5)/Tools/Help — VMProtect birebir düzen + Ctrl kısayolları.
+   - Toolbar (Open/Save/Compile/Execute▾/Cut/Copy/Paste/Add Function/
+     GoTo/Templates + filtre kutusu), sol dikey tab seridi
+     (Project/Functions/Details), project tree (V/M/U ikonları),
+     functions listesi (PDB'siz export+COFF taraması), property grid
+     (core.h cp* bitlerinin TAMAMI + function/license özellikleri),
+     log paneli, status bar, welcome paneli, sürüklenebilir splitter.
+   - Diyaloglar: Add Function/Go To (Functions+Options sekmeleri,
+     Compilation Type V/M/U, Lock To Serial), Add License (serial
+     contents 7 alan), Export Key Pair (RSA 1024..4096), Add Watermark
+     (Generate), Watermarks penceresi, Settings (Language EN/TR anında
+     + AutoSave), About, Parameters.
+   - Derleme: motor in-process (protect() worker thread) —
+     Check Debugger->antidebug, Crypt Values->strenc, Memory Protection
+     ->memprot, Encrypt Bytecode kapalı->novmenc; çıktı <hedef>_vmp.exe.
+   - .xproj proje formatı + Recent + AutoSave + Undo/Redo yığını.
+   - PE mini-çözücü UI içinde (MZ/PE/COFF/export; x64+x86).
+6. Derleme: zig c++ → XProtectUI.exe (x64, 0x8664, 823.808 bayt,
+   md5 63a9dc9f60b15b214d1624b45dc8e6b2) + XProtectUI32.exe (x86,
+   0x14C, 871.424 bayt, md5 d24cfb08ef70fa141e681b214bfb31c8);
+   import tabloları temiz (COMCTL32/COMDLG32/SHELL32/GDI32/USER32/ucrt).
+7. Wine yeniden kurulumu (sandbox sıfırdan): wine64 10.0~repack-6
+   deb-extract + nssetup.c yaklaşımı (kullanıcı-ad-uzayında /usr takası,
+   usrmerge /lib64 ld-linux dosya-bind'i, wineserver script→binary).
+   Kalıcı araç: scripts/wrun_gui2.sh + xprotect_ui/nssetup.c.
+8. SELFTEST: XProtectUI.exe --selftest → "SELFTEST OK" (Xvfb+wine64;
+   ana pencere + menü + toolbar + tree + 3 listview + status + welcome
+   kurulur, mesaj pompalanır, EXIT 0). --open C:\Test.exe smoke: PE
+   çözümleyici + proje modeli canlı (X bağlantısı 158 istek işledi).
+9. Paket: XProtect_0.2.0.zip (47 dosya, 4.9MB)
+   md5 = 1c48166def29f9bd11b58d18e4a0d8f7
+   download/XProtect/ + versions/ yedeği. Zip içi MD5 teyidi:
+   XProtectUI.exe 63a9dc9f ✓ XProtectUI32.exe d24cfb08 ✓
+   Test_vmp.exe 3d43965c ✓ Test32_vmp.exe 583ccc15 ✓ (0.1.0 ile birebir).
+10. Config_info v2.0-r regenerasyon (kayıp oturumun telafisi):
+    scan_vmp_deep.py — 584 dosya / 896.428 satır (third-party hariç
+    gerçek kaynak); 106 enum / 1.471 define / 961 class / 24.717 metot
+    yüzeyi / 1.178 Lua literali; 56/56 L2 kanıt BULUNDU (0 eksik);
+    FACE_ 123 üye birebir doğrulandı (runtime/common.h).
+    Matris: 100 özellik / 22 modül → VAR 13 / KISMEN 14 / UI-hazır 19 /
+    YOK 54.
+    YÜZDELER: M1 %0,6 · M2 %20,5 · M2+UI %24,5 · M3 %65,0 · UI %90+.
+    Çıktı: download/Config_info.md (v2.0-r) +
+    download/Config_info_ozellik_matrisi.csv.
+11. GitHub push (Task 10 sonu): xiangu XProtect/ klasörüne 0.2.0 + 
+    Config_info v2.0-r + CSV + WORKLOG.txt + worklog.md; ReverseALL'a
+    Config_info v2.0-r güncellemesi. (commit hash'leri push çıktısında)
+
+Sonraki katmanlar (kullanıcı onayına göre):
+- 0.3.0: mutation çekirdeği (talimat ikamesi + canlı-register + JMP
+  kapıları) — A kategorisine +%20 hedef.
+- 0.4.0: runtime katmanı (stub self-CRC, dosya CRC, memory protection,
+  gecikmeli import).
+- 0.5.0: lisans/SDK (RSA keygen, serial, SDK API iskeleti).
