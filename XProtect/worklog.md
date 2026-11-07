@@ -344,3 +344,21 @@ Work Log:
 Stage Summary:
 - 0.2.0 teslim; UI yuzeyi birebir, motor kredisi ayri tutuldu
   (UI-hazir != port). Sonraki: 0.3.0 mutation cekirdegi.
+---
+Task ID: 11 — 0.3.0 MUTASYON CEKIRDEGI
+Agent: main (Z.ai)
+Task: VMProtect "Mutation" katmaninin yerli uygulamasi — talimat ikamesi + canli-register analizi + JMP kapilari; V/M/U derleme tip sevkı; UI CLI modu; Unicorn diferansiyel dogrulama.
+
+Work Log:
+- engine_mut.cpp (~650 satir) yeni: tarama (lifter politikasiyla birebir) -> temel-blok CFG -> liveness (16 GPR + FLAGS sozu-register, geriye dogru sabit nokta) -> ikame katalogu + junk + JMP kapilari -> kodlayici + fixuplar (dahili jmp/jcc rel32, dis cagri rel32, rip-goreceli disp yamasi).
+- engine_main.cpp: tip sevkı V (saf V) / M (native mutasyon: .vmp0 govde + E9 giris kapisi) / U (mutasyon -> lifter -> VM); ftypes + default_type; 0.2.0 CLI uyumu korundu.
+- 7 kok-neden hata avciligi: (1) CMP/TEST ud_of okur-yazilisi, (2) riprel disp konumu len-4-immsz + capa talimat sonu, (3) ALU hedefi ayni zamanda kaynak, (4) CFG dusme kenari blok indeksi (ASan yakaladi), (5) junk yalniz VOLATILE yazmaclar (ABI), (6) SHIFT/IMUL hedefi okur, (7) VM natcall RSP kaydi r10 -> rbx (gizli-bekleme hatasi; bloblar yeniden uretildi).
+- UI: --cli modu (tam bayrak seti) + start_compile ftypes aktarimi (V/M/U gercek).
+- verify_mut.py: Unicorn tam-goruntu diferansiyeli (export RVA cozumu, x64+x86) — wine32'nin konteynerde imkansiz olmasina cozum.
+- Dogrulama: M/U/V x x64/x86 = 6 senaryo x 5 fonksiyon 5/5 ESIT (rax + bellek); wine64 oyun ciktisi BIREBIR (M/U/V + karisik guc3 + antidebug/strenc); UI selftest OK; ASan/UBSan 0; determinizm 3->1 md5.
+- Paket XProtect_0.3.0.zip (53 dosya, md5 6136c1d9...): UI ikilileri + tam kaynaklar (engine_mut.cpp, GUNCEL vm_core.c + bloblar, muttest.cpp, verify_mut.py) + ULTRA vitrin Test_vmp'ler + README/CHANGELOG.
+- GitHub push BEKLEMEDE: token bu oturumda mevcut degil (guvenlik geregi dosyaya yazilmamisti).
+
+Stage Summary:
+- 0.3.0 mutasyon cekirdegi teslim: M tipi native hizda koruma, U tipi M+V zinciri, liveness tabanli guvenli junk/ikame, JMP kapilari.
+- Kalan: 0.4.0 runtime katmani (self-CRC, dosya CRC, gecikmeli import), 0.5.0 lisans/SDK.

@@ -223,15 +223,15 @@ static u64 vm_natcall(u64 t, const u64* regs) {
        Win64 ayni kural): hizali degilse callee'deki movaps/sse cerceveleri
        SIGSEGV verir. rsp eski degerine r10 uzerinden geri getirilir. */
     __asm__ volatile(
-        "mov %%rsp, %%r10 \n\t"
+        "mov %%rsp, %%rbx \n\t"
         "and $-16, %%rsp \n\t"
         "sub $0x20, %%rsp \n\t"
         "call *%%r11 \n\t"
-        "mov %%r10, %%rsp \n\t"
+        "mov %%rbx, %%rsp \n\t"
         : "=a"(ret), "+D"(va7), "+S"(va6), "+d"(va2), "+c"(va1),
           "+r"(vr8), "+r"(vr9), "+r"(vt)
         :
-        : "memory", "cc", "r10");
+        : "memory", "cc", "rbx", "r10");
     return ret;
 }
 #else
@@ -248,14 +248,14 @@ static u64 vm_natcall(u64 t, const u64* regs) {
        tutabilir ve callee ezer -> bc isaretcisi bozulur -> wild read.
        Ayrica rsp 16-hizalanmali: hizasizsa callee'nin movaps'i SIGSEGV. */
     __asm__ volatile(
-        "mov %%rsp, %%r10 \n\t"
+        "mov %%rsp, %%rbx \n\t"
         "and $-16, %%rsp \n\t"
         "sub $0x20, %%rsp \n\t"
         "call *%%r11 \n\t"
-        "mov %%r10, %%rsp \n\t"
+        "mov %%rbx, %%rsp \n\t"
         : "+a"(ret), "+c"(va1), "+d"(va2), "+r"(vr8), "+r"(vr9), "+r"(vt)
         :
-        : "memory", "cc", "r10");
+        : "memory", "cc", "rbx", "r10");
     (void)va0;
     return ret;
 }

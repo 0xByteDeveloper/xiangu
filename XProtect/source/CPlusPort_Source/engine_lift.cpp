@@ -148,6 +148,12 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
 
         if (!F.plain.empty() && I.op != XP_RET) emit_junk();
         pc2ic[pc] = (u32)F.plain.size();
+        if (getenv("CPL_LIFTDBG"))
+            fprintf(stderr, "[lift] pc=%06x len=%d op=%d bytes=%02x %02x %02x %02x\n",
+                    pc, (int)I.len, (int)I.op,
+                    code[pc - rva], code[pc - rva + 1],
+                    (I.len > 2 ? code[pc - rva + 2] : 0),
+                    (I.len > 3 ? code[pc - rva + 3] : 0));
         char buf[96];
 
         switch (I.op) {

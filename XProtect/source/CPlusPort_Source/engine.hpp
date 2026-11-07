@@ -105,6 +105,33 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                   u64 imagebase, u32 imagesize, bool allow_call,
                   u32 rdata_rva, u32 rdata_size, int junk_level, u32 junk_seed);
 
+// ---------------- Mutasyon cekirdegi (0.3.0) ----------------
+// VMProtect "Mutation" tipinin yerli uygulaması: fonksiyon makine
+// kodunda kalir; talimat ikamesi + canlı-register analizi + JMP kapıları
+// ile yeniden uretilir. Tum ikame/junk formlari aynı anda lifter-guvenli
+// tutulur (Ultra = mutasyon + sanallastirma aynı akistan beslenir).
+struct MutStats {
+    u32 subst = 0, junk = 0, gates = 0;
+    u32 orig_bytes = 0, new_bytes = 0;
+    u32 nblocks = 0, ninsn = 0;
+    u32 dead_spots = 0;    // junk sikistirilan olumlu nokta
+};
+
+struct MutFn {
+    bool ok = false;
+    std::string why;
+    std::vector<u8> code;      // mutasyonlu native kod (base_rva tabanli)
+    MutStats st;
+    std::vector<std::string> notes;
+};
+
+// strength: 1=hafif 2=normal 3=agir (ikame/junk/kapi olasiliklari)
+// base_rva: uretilen kodun yerleştirileceği RVA (dis cagri/riprel görecleri
+// buna göre hesaplanir; M modunda iki geçişte çağrılır: ölçüm + gerçek)
+MutFn mutate_function(const u8* code, u32 rva, u32 size, bool is64,
+                      u64 imagebase, u32 imagesize, bool allow_call,
+                      int strength, u32 seed, u32 base_rva);
+
 // ---------------- Stub ureteci ----------------
 // x64: 15 reg push + ctx + call vm_entry(RDI) + geri
 // x86: pushad + ctx + push ctxptr + call vm_entry(cdecl) + popad + ret[imm16]
@@ -115,7 +142,10 @@ std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva,
 
 // ---------------- Orkestrasyon ----------------
 struct Options {
-    int  level = 2;            // 1=Virt, 2=UltraVirt+Mutation
+    int  level = 1;            // LEGACY 0.2.0: 1=Virt 2=UltraVirt+VMjunk (ftypes yoksa U fallback)
+    int  default_type = 0;     // 0.3.0: 0=Virtualization 1=Mutation 2=Ultra (ftypes disi varsayilan)
+    std::map<std::string,int> ftypes;  // 0.3.0: fonksiyon -> tip (anahtar opt.funcs formatıyla aynı)
+    int  mut_strength = 2;     // 0.3.0: mutasyon gucu 1..3
     bool antidebug = false;
     bool strenc = false;
     bool memprot = false;

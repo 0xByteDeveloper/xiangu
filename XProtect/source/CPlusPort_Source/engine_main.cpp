@@ -1,13 +1,18 @@
 // ============================================================
 // engine_main.cpp — koruma orkestrasyonu
-// Akis: PE yukle -> fonksiyonlari bul (export+COFF, PDB YOK) ->
-//       sec -> lift (+mutation junk) -> STRDEC/state planla ->
-//       sifrele -> .vmp0 kur (blob+bc+stub+state) -> .text yamala ->
+// Akis: PE yukle -> fonksiyonlari bul (export+COFF+PDB/MAP) ->
+//       sec -> TIP SEVKI (0.3.0: V=sanallastirma, M=mutasyon,
+//       U=mutasyon+sanallastirma) -> STRDEC/state planla ->
+//       sifrele -> .vmp0 kur (blob+bc+stub+mut+state) -> .text yamala ->
 //       secenekler (antidebug/strenc/memprot) -> checksum -> kaydet
 // ============================================================
 #include "engine.hpp"
+#include "engine_sym.hpp"
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
 
 struct RStr { u32 rva, len; };
 
@@ -82,14 +87,89 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         L(b);
     }
 
-    // --- fonksiyon kesfi: export + COFF sembolleri (PDB GEREKMEZ) ---
+    // --- fonksiyon kesfi: export + COFF sembolleri ---
     std::map<u32, std::string> fnames;
     std::vector<std::pair<std::string, u32>> ex, cs;
     pe.exports(ex);
     pe.coff_symbols(cs);
     for (auto& e : ex) fnames[e.second] = e.first;
     for (auto& c : cs) if (!fnames.count(c.second)) fnames[c.second] = c.first;
-    L("[KESIF] export=" + std::to_string(ex.size()) + " coff-fonksiyon=" + std::to_string(cs.size()) + " (PDB kullanilmadi)");
+    L("[KESIF] export=" + std::to_string(ex.size()) + " coff-fonksiyon=" + std::to_string(cs.size()));
+
+    // --- 0.3.0: PDB / MAP fonksiyon isimleri (VMProtect davranisi) ---
+    // Hedefin yaninda <ad>.pdb/.map varsa veya debug dizini gecerli bir PDB
+    // gosteriyorsa isimler keşfe eklenir. HICBIRI yoksa bu blogun hicbir
+    // etkisi yoktur — 0.2.0'nin kullanici-dogrulanmis cikti davranisi
+    // bayt bayt korunur (Test.exe pakette pdb'siz birlikte gelir).
+    size_t sym_added = 0;
+    {
+        SymSections ss;
+        for (auto& s : pe.secs)
+            ss.secs.push_back({s.va, s.vsz, s.rawsz, s.rawoff, s.chars, std::string(s.name)});
+        auto slurp_n = [](const std::string& p, std::vector<u8>& out) -> bool {
+            FILE* f = fopen(p.c_str(), "rb");
+            if (!f) return false;
+            fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+            if (n <= 0) { fclose(f); return false; }
+            out.resize((size_t)n);
+            size_t rd = fread(out.data(), 1, (size_t)n, f);
+            fclose(f);
+            return rd == (size_t)n;
+        };
+        // hedef klasoru + ad (dar yol)
+        std::string dir = ".", base;
+        {
+            size_t q = in.find_last_of("\\/");
+            if (q != std::string::npos) { dir = in.substr(0, q); base = in.substr(q + 1); }
+            else base = in;
+            size_t d = base.find_last_of('.');
+            if (d != std::string::npos && d > 0) base.resize(d);
+        }
+        std::vector<std::string> cands;
+        cands.push_back(dir + "\\" + base + ".pdb");
+        std::vector<DbgPdbRef> dbg_names;
+        pe_debug_pdb_names(pe.buf.data(), pe.buf.size(), ss, dbg_names);
+        const su8* want_guid = NULL; su32 want_age = 0;
+        if (!dbg_names.empty() && dbg_names[0].has_guid) {
+            want_guid = dbg_names[0].guid; want_age = dbg_names[0].age;
+        }
+        for (auto& r : dbg_names) {
+            const std::string& n = r.name;
+            bool abs_ = (n.size() > 1 && (n[1] == ':' || n[0] == '\\' || n[0] == '/'));
+            if (abs_) cands.push_back(n);
+            size_t q = n.find_last_of("\\/");
+            cands.push_back(dir + "\\" + (q != std::string::npos ? n.substr(q + 1) : n));
+        }
+        // dedupe
+        for (size_t i = 0; i < cands.size(); i++)
+            for (size_t j = i + 1; j < cands.size(); )
+                if (cands[j] == cands[i]) cands.erase(cands.begin() + j); else j++;
+        std::vector<SymEntry> sfns; std::string serr;
+        for (auto& c : cands) {
+            std::vector<u8> pd;
+            if (!slurp_n(c, pd)) continue;
+            if (want_guid && !pdb_matches(pd.data(), pd.size(), want_guid, want_age))
+                continue;   // bayat/eslesmeyen PDB — ele
+            if (pdb_parse(pd.data(), pd.size(), ss, sfns, serr)) break;
+            sfns.clear();
+        }
+        // MAP
+        {
+            std::vector<u8> md;
+            if (slurp_n(dir + "\\" + base + ".map", md)) {
+                std::vector<SymEntry> mfns;
+                if (map_parse((const char*)md.data(), md.size(), ss, pe.imagebase, mfns, serr))
+                    for (auto& e : mfns) sfns.push_back(e);
+            }
+        }
+        for (auto& e : sfns) {
+            if (fnames.count(e.rva)) continue;
+            fnames[e.rva] = e.name;
+            sym_added++;
+        }
+        if (sym_added)
+            L("[KESIF] +PDB/MAP=" + std::to_string(sym_added) + " (pdb/map yaninda/hata-ayiklama dizininde)");
+    }
 
     std::vector<FnInfo> fns;
     {
@@ -140,6 +220,17 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         }
     }
 
+    // --- 0.3.0: TIP SEVKI (V/M/U) — ftypes anahtarlari opt.funcs
+    // ile ayni formattadir (isim ya da buyuk-harf RVA-hex) ---
+    auto ftype_of = [&](const FnInfo& f) -> int {
+        auto it = opt.ftypes.find(f.name);
+        if (it != opt.ftypes.end()) return it->second;
+        char rb[24]; snprintf(rb, sizeof rb, "%X", f.rva);
+        it = opt.ftypes.find(rb);
+        if (it != opt.ftypes.end()) return it->second;
+        return opt.default_type;
+    };
+
     Section* text = pe.secbyname(".text");
     Section* rdata = pe.secbyname(".rdata");
     u32 rdata_rva = rdata ? rdata->va : 0;
@@ -151,29 +242,74 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         L(b);
     }
 
-    // --- lift ---
+    // --- lift / mutasyon ---
     struct Compiled {
         FnInfo* f; VFn v; std::vector<u8> plain, enc;
         u64 key = 0; u32 bc_rva = 0, stub_rva = 0;
         bool tramp = false;
+        int  ty = 0;                          // 0=V 1=M 2=U
+        MutFn mut;                           // M: olcum gecisi; U: kaynak mutasyon
+        u32  mut_rva = 0;                    // M: .vmp0 icindeki yerlesim
         std::vector<u32> state_sites;         // plain icinde state rva u32 pozisyonlari
         std::vector<u32> state_strva;         // sirasiyla string rva'lari
     };
     std::vector<Compiled> comps;
+    int nV = 0, nM = 0, nU = 0, nUf = 0;
     for (auto& f : fns) {
         if (!f.selected) continue;
         bool okraw; u32 raw = pe.rva2raw(f.rva, &okraw);
         if (!okraw || raw + f.size > pe.buf.size()) { f.note = "ham veri yok"; continue; }
-        VFn v = lift_function(&pe.buf[raw], f.rva, f.size, pe.is64,
+        int ty = ftype_of(f);
+        if (ty == 1) {
+            // --- MUTASYON (native): makine kodu kalir, yeniden uretilir ---
+            MutFn m = mutate_function(&pe.buf[raw], f.rva, f.size, pe.is64,
+                                      pe.imagebase, pe.sizeofimage,
+                                      pe.is64 /*allow_call*/, opt.mut_strength,
+                                      f.rva ^ 0x9E3779B9u, 0 /*olcum gecisi*/);
+            if (!m.ok) { f.note = "RED: mutasyon " + m.why; continue; }
+            Compiled c; c.f = &f; c.ty = 1; c.mut = m;
+            comps.push_back(c);
+            nM++;
+            continue;
+        }
+        // --- V / U: lifter kaynagi (U'da mutasyon on gecisi) ---
+        std::vector<u8> mbuf;
+        const u8* lcode = &pe.buf[raw];
+        u32 lsize = f.size;
+        int jl;
+        MutFn mkeep;                            // U: istatistik/kayit tut
+        if (ty == 2) {
+            MutFn m = mutate_function(&pe.buf[raw], f.rva, f.size, pe.is64,
+                                      pe.imagebase, pe.sizeofimage,
+                                      pe.is64, opt.mut_strength,
+                                      f.rva ^ 0x9E3779B9u, f.rva /*base=fonksiyon RVA*/);
+            if (m.ok) {
+                mbuf = m.code; lcode = mbuf.data(); lsize = (u32)mbuf.size();
+                mkeep = m;
+                nU++;
+            } else {
+                // mutasyon mumkun degil: 0.2.0 U davranisina dus (VM junk)
+                ty = 0; nUf++;
+            }
+            jl = 2;
+        } else {
+            // V: acik tip 0 => saf sanallastirma (junk yok).
+            // ftypes yoksa 0.2.0 CLI uyumu: level>=2 -> VM junk
+            jl = opt.ftypes.empty() ? (opt.level >= 2 ? 2 : 0) : 0;
+            nV++;
+        }
+        VFn v = lift_function(lcode, f.rva, lsize, pe.is64,
                               pe.imagebase, pe.sizeofimage,
                               pe.is64 /* x86: call iceren red */,
                               rdata_rva, rdata_sz,
-                              opt.level >= 2 ? 2 : 0, f.rva ^ 0x9E3779B9u);
+                              jl, f.rva ^ 0x9E3779B9u);
         if (!v.ok) { f.note = "RED: " + v.why; continue; }
-        Compiled c; c.f = &f; c.v = v;
+        Compiled c; c.f = &f; c.ty = ty; c.v = v;
+        if (ty == 2) c.mut = mkeep;
         comps.push_back(c);
     }
-    snprintf(b, sizeof b, "[LIFT] %zu/%zu fonksiyon bayt-koda cevrildi", comps.size(), fns.size());
+    snprintf(b, sizeof b, "[LIFT] %zu/%zu fonksiyon | V=%d M=%d U=%d (U-mutdus=%d)",
+             comps.size(), fns.size(), nV, nM, nU, nUf);
     L(b);
     for (auto& f : fns) {
         if (f.selected && !f.virtualized && !f.note.empty() && f.note.rfind("RED", 0) == 0)
@@ -193,6 +329,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     }
 
     for (auto& c : comps) {
+        if (c.ty == 1) continue;              // M: bayt-kod yok
         std::vector<u8> plain;
         if (opt.strenc) {
             std::vector<RStr> used;
@@ -219,12 +356,14 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     // --- section icinde RVAlari planla ---
     u32 cur = (u32)blob_len;
     for (auto& c : comps) {
+        if (c.ty == 1) continue;              // M: bc yerlesimi yok
         cur = (cur + 7) & ~7u;
         c.bc_rva = newva_guess + cur;
         cur += (u32)c.plain.size();
     }
     u32 vent_guess = newva_guess + (pe.is64 ? VM_BLOB64_ENTRY_OFF : VM_BLOBX86_ENTRY_OFF);
     for (auto& c : comps) {
+        if (c.ty == 1) continue;              // M: stub yok (native govde)
         cur = (cur + 15) & ~15u;
         c.stub_rva = newva_guess + cur;
         std::vector<u8> st;
@@ -232,6 +371,12 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         else         st = build_stub_x86(c.stub_rva, vent_guess, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm);
         c.tramp = st.size() > c.f->size;
         cur += (u32)st.size();
+    }
+    // --- mutasyon bloklari (tip M): olcum gecisi boyutu kadar yer ---
+    for (auto& c : comps) if (c.ty == 1) {
+        cur = (cur + 15) & ~15u;
+        c.mut_rva = newva_guess + cur;
+        cur += (u32)c.mut.code.size();
     }
     u32 state_off = cur;
     u32 nstate = 0;
@@ -250,6 +395,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
 
     // --- sifrele ---
     for (auto& c : comps) {
+        if (c.ty == 1) continue;              // M: sifreleme yok (native kod)
         u64 key = 0;
         if (opt.vmenc) {
             key = ((u64)(u32)(c.f->rva * 2654435761u + 0x9E3779B9u) << 32)
@@ -267,6 +413,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     while (secimg.size() < (size_t)state_off - (nstate ? 0 : 0)) secimg.push_back(0);
     secimg.resize(state_off + nstate, 0);
     for (auto& c : comps) {
+        if (c.ty == 1) continue;              // M: bc/stub kopyasi yok
         u32 o = c.bc_rva - newva_guess;
         memcpy(&secimg[o], c.enc.data(), c.enc.size());
         u32 so = c.stub_rva - newva_guess;
@@ -275,6 +422,21 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         if (pe.is64) st = build_stub_x64(c.stub_rva, vent, c.key, c.bc_rva, (u32)c.plain.size());
         else         st = build_stub_x86(c.stub_rva, vent, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm);
         memcpy(&secimg[so], st.data(), st.size());
+    }
+    // mutasyon bloklari: GERCEK base_rva ile yeniden uret (deterministik LCG
+    // ayni seed'i verir; boyutlar bayt bayt eslesmeli)
+    for (auto& c : comps) if (c.ty == 1) {
+        bool okraw2; u32 raw2 = pe.rva2raw(c.f->rva, &okraw2);
+        if (!okraw2) { L("[HATA] mutasyon yeniden uretim raw yok"); return 1; }
+        MutFn m2 = mutate_function(&pe.buf[raw2], c.f->rva, c.f->size, pe.is64,
+                                   pe.imagebase, pe.sizeofimage, pe.is64,
+                                   opt.mut_strength, c.f->rva ^ 0x9E3779B9u,
+                                   c.mut_rva /* GERCEK base */);
+        if (!m2.ok || m2.code.size() != c.mut.code.size()) {
+            { FILE* f1 = fopen("/tmp/mutpass1.bin","wb"); if(f1){fwrite(c.mut.code.data(),1,c.mut.code.size(),f1);fclose(f1);} FILE* f2 = fopen("/tmp/mutpass2.bin","wb"); if(f2){fwrite(m2.code.data(),1,m2.code.size(),f2);fclose(f2);} L("[HATA] mutasyon tutarsiz: " + c.f->name + " neden=" + m2.why + " " + std::to_string(m2.code.size()) + " vs " + std::to_string(c.mut.code.size())); return 1; }
+        }
+        u32 o = c.mut_rva - newva_guess;
+        memcpy(&secimg[o], m2.code.data(), m2.code.size());
     }
     // state baytlari 0 (VM ilk calismada 1 yapar)
 
@@ -291,6 +453,24 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         FnInfo& f = *c.f;
         bool okraw; u32 raw = pe.rva2raw(f.rva, &okraw);
         if (!okraw) { f.note += " | yama raw yok"; continue; }
+        if (c.ty == 1) {
+            // MUTASYON: giris kapisi E9 -> .vmp0'taki mutasyonlu govde.
+            // Govde native x86/x64 kodu olarak calisir (VM YOK, tam hiz).
+            i32 rel = (i32)(c.mut_rva - (f.rva + 5));
+            u8 j[5] = { 0xE9, (u8)(u32)rel, (u8)((u32)rel >> 8), (u8)((u32)rel >> 16), (u8)((u32)rel >> 24) };
+            memcpy(&pe.buf[raw], j, 5);
+            for (u32 i = 5; i < f.size; i++) pe.buf[raw + i] = 0xCC;
+            f.virtualized = true;
+            snprintf(b, sizeof b, "[MUT] %s @RVA=0x%06X boyut=0x%X | ikame=%u junk=%u kapi=%u (blok=%u) | %uB->%uB (x%.2f) | govde=0x%06X",
+                     f.name.c_str(), f.rva, f.size,
+                     c.mut.st.subst, c.mut.st.junk, c.mut.st.gates, c.mut.st.nblocks,
+                     c.mut.st.orig_bytes, c.mut.st.new_bytes,
+                     c.mut.st.orig_bytes ? (double)c.mut.st.new_bytes / (double)c.mut.st.orig_bytes : 0.0,
+                     c.mut_rva);
+            L(b);
+            for (auto& n : c.mut.notes) L(n);
+            continue;
+        }
         if (c.tramp) {
             i32 rel = (i32)(c.stub_rva - (f.rva + 5));
             u8 j[5] = { 0xE9, (u8)(u32)rel, (u8)((u32)rel >> 8), (u8)((u32)rel >> 16), (u8)((u32)rel >> 24) };
@@ -310,8 +490,19 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                  f.name.c_str(), f.rva, f.size, (u32)c.enc.size(),
                  (unsigned long long)c.key, c.stub_rva, c.tramp ? "(trampoline)" : "(yerinde)");
         L(b);
+        if (c.ty == 2 && c.mut.ok) {
+            snprintf(b, sizeof b, "  [ULTRA] on-mutasyon: ikame=%u junk=%u kapi=%u | %uB->%uB (x%.2f)",
+                     c.mut.st.subst, c.mut.st.junk, c.mut.st.gates,
+                     c.mut.st.orig_bytes, c.mut.st.new_bytes,
+                     c.mut.st.orig_bytes ? (double)c.mut.st.new_bytes / (double)c.mut.st.orig_bytes : 0.0);
+            L(b);
+        }
         for (auto& n : c.v.notes) L(n);
     }
+
+    if (nM && pe.is64)
+        L("[MUT] Not: x64 .pdata unwind kayitlari eski govde araligina isaret eder "
+          "(mutasyonlu fonksiyonlarda istisna isleme kapali — VMProtect davranisi)");
 
     // --- BUGFIX #13: ezilen bolgelerin eski reloc girdilerini temizle ---
     // Yerinde stub + trampoline .text yamasi fonksiyonun TUM govdesini
@@ -356,10 +547,12 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     if (!pe.save(out)) { L("[HATA] kaydedilemedi: " + out); return 1; }
     snprintf(b, sizeof b, "[KAYIT] %s (%zu bayt)", out.c_str(), pe.buf.size());
     L(b);
-    L("[OZET] level=" + std::to_string(opt.level) + (opt.level >= 2 ? " (UltraVirt+Mutation)" : " (Virt)")
+    L("[OZET] tipler: V=" + std::to_string(nV) + " M=" + std::to_string(nM) + " U=" + std::to_string(nU)
+      + (nUf ? " (U->V dusus=" + std::to_string(nUf) + ")" : "")
       + " | antidebug=" + (opt.antidebug ? "ACIK" : "kapali")
       + " | strenc=" + (opt.strenc ? "ACIK" : "kapali")
       + " | memprot=" + (opt.memprot ? "ACIK" : "kapali")
-      + " | vmenc=" + (opt.vmenc ? "ACIK" : "KAPALI"));
+      + " | vmenc=" + (opt.vmenc ? "ACIK" : "KAPALI")
+      + " | mutasyon-gucu=" + std::to_string(opt.mut_strength));
     return 0;
 }

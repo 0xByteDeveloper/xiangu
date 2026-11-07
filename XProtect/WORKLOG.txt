@@ -174,3 +174,54 @@ Sonraki katmanlar (kullanıcı onayına göre):
 - 0.4.0: runtime katmanı (stub self-CRC, dosya CRC, memory protection,
   gecikmeli import).
 - 0.5.0: lisans/SDK (RSA keygen, serial, SDK API iskeleti).
+
+[2026-11-07 | Task 11 — 0.3.0 MUTASYON CEKIRDEGI]
+1. Hedef (worklog plani): talimat ikamesi + canli-register analizi +
+   JMP kapilari — VMProtect "Mutation" katmaninin yerli uygulamasi.
+2. engine_mut.cpp YENI (~650 satir): tarama (lifter politikasiyla birebir)
+   -> temel-blok CFG -> liveness (16 GPR + FLAGS, geriye dogru sabit nokta)
+   -> ikame katalogu + junk uretici + JMP kapilari -> kodlayici + fixuplar
+   (dahili jmp/jcc rel32, dis cagri rel32, rip-goreceli disp yamasi).
+3. engine_main.cpp: TIP SEVKI — V (saf sanallastirma) / M (native mutasyon,
+   .vmp0 govde + E9 giris kapisi) / U (mutasyon -> lifter -> VM).
+   ftypes haritasi + default_type; 0.2.0 CLI uyumu (level=2, ftypes bos ->
+   V+VMjunk) korundu.
+4. HATA AVCILIGI (7 ders, hepsi kokten):
+   #1 ud_of: CMP/TEST hedefi YAZAR sanildi (okumali) -> junk canli deger ezerdi.
+   #2 riprel disp konumu: len-4 yanlis (imm takip edebilir) -> konum
+       len-4-immsz, capa talimatin SONU -> 1 bayt hedef kaymalari gitti.
+   #3 ALU hedefi ayni zamanda KAYNAK (a = a op b) -> uses'a R(r1) eklendi.
+   #4 CFG dusme kenari talimat indeksi yazdi -> live_in tasmasi (ASan) ->
+       aralıklı boyut tutarsızlıgı.
+   #5 junk callee-saved (rbx/r12-15) yazabiliyordu -> ABI ihlali ->
+       junk yalniz VOLATILE yazmaclara (VM'in canli degerleri ezilirdi).
+   #6 SHIFT/IMUL hedefi de OKUNUR (shl ecx,4) -> x86 MovePlayer junk hatasi.
+   #7 VM NATCALL (KRITIK, gizli-bekleme): RSP kaydi r10'da (volatile, callee
+       ezer!) -> mutasyonlu govde r10 kullaninca RSP corba -> SIGSEGV.
+       Duzeltme: rbx'e tasindi; vm64.bin/vmx86.bin + vm_blob.cpp yeniden
+       uretildi (x64 blob 12344B degismedi).
+5. UI: xprotect_ui.cpp WinMain'e --cli modu eklendi (tam bayrak seti);
+   start_compile artik ftypes haritasini dolduruyor (V/M/U gercek aktarim).
+6. Dogrulama (tolerans yok):
+   - verify_mut.py (YENI): Unicorn tam-goruntu diferansiyeli (export tablosu
+     RVA cozumu, x64+x86): M/U/V x 2 mimari = 6 senaryo x 5 fonksiyon =
+     5/5 ESIT (rax + bellek yazmalari birebir; arguman setleri 1-5/fonksiyon).
+   - wine64: Test.exe -> M/U/V + karisik (M+U+V guc3, antidebug+strenc) ->
+     MiniPac ciktisi orijinalle BIREBIR.
+   - UI --selftest (Xvfb+wine64): SELFTEST OK. UI --cli matrisi rc=0.
+   - ASan+UBSan 0 hata; determinizm 3 kosu -> 1 md5.
+7. Derlemeler (zig): XProtectUI.exe (x64 949.760B, md5 19880dbc...),
+   XProtectUI32.exe (x86 995.840B, aba66282...), CPlusPort.exe/32
+   (eski mini GUI, yeni motorla yeniden).
+8. Paket: XProtect_0.3.0.zip (53 dosya, 2.4MB, md5 6136c1d9...)
+   + versions/ yedegi. Icerik: UI ikilileri + tam kaynaklar (engine_mut.cpp,
+   GUNCEL vm_core.c + bloblar, muttest.cpp, verify_mut.py, build_all.sh) +
+   Test_vmp/Test32_vmp (ULTRA vitrin) + README/CHANGELOG.
+9. GitHub push: TOKEN BU OTURUMDA YOK (onceki oturum ozeti token'in tam
+   halini icermiyor; guvenlik geregi hicbir dosyaya yazilmamisti) ->
+   push BEKLEMEDE; kullanici token'i yeniden verirse XProtect/ klasoru
+   guncellenecek (komut hazir: xiangu repo clone + klasor senkron + commit).
+
+Sonraki katmanlar (kullanici onayina gore):
+- 0.4.0: runtime katmani (stub self-CRC, dosya CRC, gecikmeli import).
+- 0.5.0: lisans/SDK (RSA keygen, serial, SDK API iskeleti).
