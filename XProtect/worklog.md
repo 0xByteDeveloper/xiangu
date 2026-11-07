@@ -362,3 +362,50 @@ Work Log:
 Stage Summary:
 - 0.3.0 mutasyon cekirdegi teslim: M tipi native hizda koruma, U tipi M+V zinciri, liveness tabanli guvenli junk/ikame, JMP kapilari.
 - Kalan: 0.4.0 runtime katmani (self-CRC, dosya CRC, gecikmeli import), 0.5.0 lisans/SDK.
+
+---
+Task ID: 12 — 0.4.0 UI TAM KAPSAM PORTU + PDBScope entegrasyonu
+Agent: main (Z.ai)
+Task: Kullanici raporu: (a) Fonksiyon Ekle tum fonksiyonlari gostermiyor -> PDBScope-2.0.0
+aracini projeye ekle; (b) Manual Address Base/End + liste-secim adres dolumu; (c) open
+file/open project butonlari; (d) sag panel bos; (e) VMP UI kaynaklarini satir satir tara,
+tam kapsamli Win32 portu.
+
+Work Log:
+- Dogrulama: 0.3.0 zip md5 kullanici kopyasiyla birebir (6136c1d9); git'te 0.3.0 commit'i
+  (c3fe0d4) lokalde bekliyor; chat API'si aktif IM oturumunu listelemiyor (worklog yeterli).
+- PDBScope analizi: pdbless/semboller komutlari, --format csv, CSV basligi
+  rva,va,size,confidence,percent,class,kind,callers,sources,name; wine'da Test.exe ->
+  560 fonksiyon kanitlandi.
+- VMP GUI taramasi (2 subagent, satir bazli): mainwindow/models/property_editor/widgets +
+  11 dialog -> tam davranis spesifikasyonu (tree->page esleme tablosu, dizin gorunum
+  kolonlari, menu enable kurallari, loadFile/compile akislari, dialog kontrol listeleri).
+- XProtectUI 0.4.0 (xprotect_ui.cpp ~3900 satir):
+  * pdbscope_find/pdbscope_scan (pipe+CreateProcess+CSV parser) + merge_pdbscope +
+    fill_neighbor_sizes; acilista otomatik tarama; Ekle diyaloguna Tara dugmesi.
+  * dlg_addfunction yeniden: Manual Address (Base/End) grubu; secim -> Base/End dolumu;
+    End -> brk kaydi; cift-tik OK; coklu secim add modunda.
+  * Boot sayfasi VMP birebir (Recent Files 10 + Quick Start 4 dugme + ayiricilar).
+  * Sag panel: g_dir (dizin gorunumu) + right_show modu; Functions/Licenses klasoru ->
+    dizin kolonlari; cift-tik -> ozellikler; kok -> Core Properties.
+  * .vmp XML ici aktarma (xml_tag_attrs dongulu on-ek cozumu, xml_num 0x/ondalik,
+    Procedures: MapAddress|Address+CompilationType+Options(coLockToKey)+IncludedInCompilation).
+  * Lisans: Blocked + duzenleme + VMP varsayilanlari (+1ay/+1yil/30) + .xproj alan-11.
+  * Derleme: marquee progress + tamam istemi; surkle-birak; VMP filtre; (N) sayaclari;
+    [Blocked] etiket; baslik * ; recent 10.
+  * Fix: --funcs Isim:Tip (0.3.0 bug); cok satirli EDIT Enter; layout yeniden-giris korumasi.
+- Wine ortami taze sandbox'ta yeniden kuruldu (wine-root deb'lerden; nssetup yeniden
+  derlendi; Xvfb dogrudan yonetim; xprobe.py XTEST tiklama/ekran araci yazildi).
+- GUI kanitlari (XTEST gercek tiklama): boot sayfasi render OK; Open File butonu ->
+  dosya diyalogu (3. top-level pencere); Functions klasoru -> dizin gorunumu gecisi;
+  calisma alani (tree + Core Properties + toolbar + status) render OK.
+- Test suitesi (final ikililer): SELFTEST OK funcs=0 / funcs=568 / funcs=568 proj=5;
+  --cli --funcs WrapPos:V,GameTick:U -> rc=0 (V=1 U=1); korumali T40.exe temiz cikis.
+- Ikililer: XProtectUI.exe 999.424B (725d6136), XProtectUI32.exe 1.050.112B (23b8a5be).
+- Paket: XProtect_0.4.0.zip (61 dosya, 3.78MB, e63113b9) + versions/ yedek;
+  PDBScope gomulu (kok + bin/win64 + bin/win32 + src + README/LICENSE).
+
+Stage Summary:
+- 0.4.0: UI tam kapsamli port + PDBScope entegrasyonu + .vmp uyumlulugu teslim.
+- Sonraki: 0.5.0 runtime katmani (self-CRC, dosya CRC, gecikmeli import) ve/veya
+  lisans/SDK — kullanici onem siralamasina gore.

@@ -225,3 +225,40 @@ Sonraki katmanlar (kullanıcı onayına göre):
 Sonraki katmanlar (kullanici onayina gore):
 - 0.4.0: runtime katmani (stub self-CRC, dosya CRC, gecikmeli import).
 - 0.5.0: lisans/SDK (RSA keygen, serial, SDK API iskeleti).
+
+[2026-11-08 | Task 12] XProtect 0.4.0 — UI TAM KAPSAM PORTU + PDBScope entegrasyonu
+- İstek: "fonksiyon ekle kısmında tüm fonksiyonlar gözükmüyordu, PDBScope-2.0.0-win.zip
+  aracımı projeye ekle; Manual Address (Base/End) ekle; open file/open project butonları
+  çalışmıyor; solda exe→Functions/Licenses var sağda bir şey çıkmıyor; tam kapsamlı
+  Win32API portu yap; universalObfusPublicSrc UI taramasını satır satır yap."
+- VMP GUI satır-satır tarama: mainwindow.cc (3711) + models.cc (3943) + 11 dialog +
+  property_editor.cc (2764) + widgets.cc (1621) → iki spesifikasyon raporu (bölüm 1-15:
+  layout, tree→page eşleme, functions/licenses dizin görünümü, menu/toolbar kuralları,
+  loadFile akışı, compile akışı, tüm dialoglar birebir).
+- PDBScope entegrasyonu: `pdbless --format csv` subprocess (CreatePipe/CreateProcess,
+  quoting, 90 sn sınır), CSV parser (rva,va,size,...,name; quote-aware), rva bazlı
+  birleştirme + boyut/isim zenginleştirme. Kesif sırası: exe dizini → bin\win64 →
+  bin\win32 → PATH. Test.exe: 13 → 568 fonksiyon (CERTAIN/HIGH: 549).
+- Fonksiyon Ekle: Manual Address grubu (Base+End), liste→Base/End otomatik dolum,
+  cift tik=OK, Tara düğmesi; add modu çoklu seçim.
+- Boot sayfası VMP birebir: Recent Files (10) + Quick Start (Open/Open Project/
+  Examples/Contents). Open File butonu wine'da GERÇEK XTEST tıklamasıyla doğrulandı
+  (t → GetOpenFileName penceresi açılıyor — 3. top-level window kanıtı).
+- Sağ panel: Functions (N)/Licenses (N) klasör seçimi → dizin görünümü
+  (Name|Address|Protection|Size|Source / Customer|Email|Date|Blocked), çift tık → özellikler.
+- .vmp proje içe aktarma: tolerant XML tarayıcı (Protection@InputFileName/Options,
+  Procedures: MapAddress|Address, CompilationType, Options 0x2000=lock,
+  IncludedInCompilation). test_proj.vmp → proj=5 doğrulandı.
+- Lisanslar: Blocked bayrağı + düzenleme diyaloğu + VMP varsayılanları (+1 ay/+1 yıl/30).
+- Derleme: marquee ilerleme penceresi + "korumalı çalıştırılsın mı?" istemi; başlıkta
+  * göstergesi; sürükle-bırak; VMP open filtresi; (N) sayaçları; [Blocked] etiketi.
+- CLI bug fix: --funcs İsim:Tip (0.3.0'da 0 eşleşme) → tip ayrıştırılıyor (V=1 U=1 kanıt).
+- Cok satirli EDIT'te Enter = yeni satır; layout() yeniden-giriş koruması.
+- Doğrulama (wine64, final ikililer): SELFTEST OK funcs=0 / funcs=568 / funcs=568 proj=5;
+  --cli rc=0; korumalı T40.exe wine'da temiz çıkış. Görsel: boot + çalışma alanı +
+  dizin görünümü ekran görüntüleriyle doğrulandı.
+- İkililer: XProtectUI.exe x64 999.424B (725d6136...), XProtectUI32.exe x86
+  1.050.112B (23b8a5be...).
+- Paket: XProtect_0.4.0.zip (61 dosya, 3.78MB, md5 e63113b9...) — PDBScope gömülü
+  (kok + bin/win64 + bin/win32 + kaynak) + README_0.4.0 + CHANGELOG_0.4.0 + örnek .vmp.
+- GitHub: 0.3.0 bekleyen commit (c3fe0d4) + 0.4.0 commit birlikte pushlandı.

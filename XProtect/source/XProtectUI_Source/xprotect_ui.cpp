@@ -32,7 +32,7 @@
 
 // ---------------- surum ----------------
 #define XPROTECT_EDITION  L"XProtect Ultimate"
-#define XPROTECT_VERSION  L"0.3.0"
+#define XPROTECT_VERSION  L"0.4.0"
 #define XPROTECT_BUILD    L"2026-11-07"
 
 // ---------------- dil tablosu (en.lng birebir + TR) ----------------
@@ -60,6 +60,9 @@ enum LS {
     LS_CDFILTER, LS_WM_PROPS,
     // 0.3.0 ekleri — sona eklenir (tablo sirasi korunur)
     LS_SOURCE, LS_DISASM, LS_TPL_LOAD, LS_EXEC_SEL, LS_SYMINFO,
+    // 0.4.0 ekleri (LS_BLOCKED zaten yukarida — yeni eklenmez)
+    LS_MANUAL, LS_BASE, LS_END, LS_SCAN, LS_SEARCHRES,
+    LS_EXAMPLES, LS_QUICKSTART, LS_RECENTFILES, LS_COMPILE_DONE_Q, LS_SCANNING,
     LS_COUNT
 };
 
@@ -89,7 +92,10 @@ static const wchar_t* g_lang_en[LS_COUNT] = {
     L"Select Target File", L"Target", L"Function added.", L"This address is already used by function.",
     L"No target file. Open a file first.", L"Executable files\0*.exe;*.dll\0All Files\0*.*\0",
     L"Watermark Properties",
-    L"Source", L"Disassembly", L"Load Template", L"Execute selected", L"Symbol info"
+    L"Source", L"Disassembly", L"Load Template", L"Execute selected", L"Symbol info",
+    L"Manual Address", L"Base", L"End", L"Scan", L"Search Result",
+    L"Examples...", L"Quick Start", L"Recent Files",
+    L"Compilation completed. Execute the protected file?", L"Scanning (pdbscope)..."
 };
 static const wchar_t* g_lang_tr[LS_COUNT] = {
     L"Dosya", L"Düzen", L"Proje", L"Araçlar", L"Yardım",
@@ -117,7 +123,10 @@ static const wchar_t* g_lang_tr[LS_COUNT] = {
     L"Hedef Dosya Seç", L"Hedef", L"Fonksiyon eklendi.", L"Bu adres zaten bir fonksiyon tarafından kullanılıyor.",
     L"Hedef dosya yok. Önce dosya açın.", L"Çalıştırılabilir dosyalar\0*.exe;*.dll\0Tüm Dosyalar\0*.*\0",
     L"Filigran Özellikleri",
-    L"Kaynak", L"Söküm (Disassembly)", L"Şablonu Yükle", L"Seçiliyi çalıştır", L"Sembol bilgisi"
+    L"Kaynak", L"Söküm (Disassembly)", L"Şablonu Yükle", L"Seçiliyi çalıştır", L"Sembol bilgisi",
+    L"Manuel Adres", L"Başlangıç (Base)", L"Bitiş (End)", L"Tara", L"Arama Sonucu",
+    L"Örnekler...", L"Hızlı Başlangıç", L"Son Açılanlar",
+    L"Derleme tamamlandı. Korumalı dosya çalıştırılsın mı?", L"Taranıyor (pdbscope)..."
 };
 static bool g_tr = false;
 static const wchar_t* L(int id) { return (g_tr ? g_lang_tr : g_lang_en)[id]; }
@@ -138,7 +147,7 @@ enum {
     IDM_TPL_BASE = 0x2100,
     IDC_MAIN_TOOLBAR = 101, IDC_MAIN_TREE, IDC_MAIN_FUNC, IDC_MAIN_PROP,
     IDC_MAIN_LOG, IDC_MAIN_STATUS, IDC_MAIN_TABSTRIP, IDC_MAIN_WELCOME,
-    IDC_MAIN_FILTER, IDC_SPLIT_V,
+    IDC_MAIN_FILTER, IDC_SPLIT_V, IDC_MAIN_DIR,
     IDC_TBB_PROJECT = 300, IDC_TBB_FUNCS, IDC_TBB_DETAILS
 };
 
@@ -161,6 +170,7 @@ struct ProjLicense {
     bool s_name = false, s_email = false, s_hwid = false, s_expire = false,
          s_time = false, s_maxbuild = false, s_userdata = false;
     std::wstring s_expire_d, s_maxbuild_d, s_time_v, s_userdata_v;
+    bool blocked = false;   // 0.4.0 — VMP license->blocked()
 };
 struct Project {
     bool open = false, modified = false;
@@ -561,7 +571,7 @@ static void make_imagelist(HDC dc) {
 
 static HWND g_main = NULL, g_toolbar = NULL, g_tree = NULL, g_func = NULL,
             g_prop = NULL, g_log = NULL, g_status = NULL, g_tabstrip = NULL,
-            g_welcome = NULL, g_filter = NULL, g_split = NULL;
+            g_welcome = NULL, g_filter = NULL, g_split = NULL, g_dir = NULL;
 static HIMAGELIST g_il2 = NULL;
 static HMENU g_menu = NULL;
 static HACCEL g_accel = NULL;
@@ -575,6 +585,10 @@ static HANDLE g_cancel_event = NULL;
 static std::vector<std::wstring> g_recent;
 static bool g_autosave = false;
 static std::vector<std::vector<ProjFunc> > g_undo, g_redo;
+// 0.4.0: sag panel modu — 0=ozellik izgarasi, 1=dizin gorunumu (Functions/
+// Licenses klasoru seciliyken VMP directory_tree_ muadili)
+static int g_rightmode = 0;
+static int g_dir_kind = 0;         // 1=functions klasoru, 2=licenses klasoru
 
 static wchar_t g_ini[MAX_PATH] = L"";
 
@@ -599,7 +613,7 @@ static std::wstring protected_path() {
 static std::wstring numhex(unsigned long long v) {
     wchar_t b[32]; _snwprintf(b, 32, L"0x%08llX", v); return b;
 }
-// keşif kaynağı adı (Export/COFF/PDB/MAP/Stub)
+// keşif kaynağı adı (Export/COFF/PDB/MAP/Stub/PDBScope/VMP)
 static const wchar_t* src_name(int source) {
     switch (source) {
     case SYM_EXPORT: return L"Export";
@@ -607,8 +621,139 @@ static const wchar_t* src_name(int source) {
     case SYM_PDB: return L"PDB";
     case SYM_MAP: return L"MAP";
     case SYM_STUB: return L"Stub";
+    case 5: return L"PDBScope";
+    case 6: return L"VMP project";
     }
     return L"-";
+}
+
+// ============================================================
+// 0.4.0 — PDBScope entegrasyonu (kullanıcı aracı; TÜM fonksiyonlar)
+// pdbscope.exe pdbless <hedef> --format csv
+//   CSV başlık: rva,va,size,confidence,percent,class,kind,callers,sources,name
+// pdbscope.exe kendi dizininde / bin\win64|win32 / PATH içinde aranır.
+// ============================================================
+static bool pdbscope_find(std::wstring* out) {
+    static std::wstring cached;
+    if (!cached.empty()) { *out = cached; return true; }
+    std::wstring d = exe_dir();
+    std::vector<std::wstring> cands;
+    cands.push_back(d + L"\\pdbscope.exe");
+    cands.push_back(d + L"\\bin\\win64\\pdbscope.exe");
+    cands.push_back(d + L"\\bin\\win32\\pdbscope.exe");
+    for (size_t i = 0; i < cands.size(); i++) {
+        if (GetFileAttributesW(cands[i].c_str()) != INVALID_FILE_ATTRIBUTES) {
+            cached = cands[i]; *out = cached; return true;
+        }
+    }
+    wchar_t pbuf[MAX_PATH];
+    DWORD n = SearchPathW(NULL, L"pdbscope.exe", NULL, MAX_PATH, pbuf, NULL);
+    if (n && n < MAX_PATH) { cached = pbuf; *out = cached; return true; }
+    return false;
+}
+// csvEscape ile üretilmiş alanları çözer (tırnaklı, "" = literal tırnak)
+static std::vector<std::string> pdbscope_csv_line(const std::string& line) {
+    std::vector<std::string> out;
+    std::string cur;
+    bool q = false;
+    for (size_t i = 0; i < line.size(); i++) {
+        char c = line[i];
+        if (q) {
+            if (c == '"') {
+                if (i + 1 < line.size() && line[i + 1] == '"') { cur += '"'; i++; }
+                else q = false;
+            } else cur += c;
+        } else {
+            if (c == '"') q = true;
+            else if (c == ',') { out.push_back(cur); cur.clear(); }
+            else cur += c;
+        }
+    }
+    out.push_back(cur);
+    return out;
+}
+// pdbscope.exe'yi subprocess olarak koşar; stdout'u CSV olarak çözer.
+static void fill_neighbor_sizes(PeInfo& pi);          // 0.4.0 ileri bildirim
+static void merge_pdbscope(PeInfo& pi, const std::wstring& path, std::wstring* note_out);
+static bool pdbscope_scan(const std::wstring& target, std::vector<PeFunc>& out,
+                          std::wstring* note) {
+    std::wstring tool;
+    if (!pdbscope_find(&tool)) return false;
+    std::wstring cl = L"\"" + tool + L"\" pdbless \"" + target + L"\" --format csv";
+    SECURITY_ATTRIBUTES sa; memset(&sa, 0, sizeof(sa));
+    sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
+    HANDLE rd = NULL, wr = NULL;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si; memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr; si.hStdError = wr; si.hStdInput = NULL;
+    PROCESS_INFORMATION pinfo; memset(&pinfo, 0, sizeof(pinfo));
+    std::vector<wchar_t> cmd(cl.begin(), cl.end()); cmd.push_back(0);
+    BOOL ok = CreateProcessW(NULL, cmd.data(), NULL, NULL, TRUE,
+                             CREATE_NO_WINDOW, NULL, NULL, &si, &pinfo);
+    CloseHandle(wr);   // yazan tek taraf child olsun (EOF için şart)
+    if (!ok) { CloseHandle(rd); return false; }
+    std::string data;
+    char buf[4096];
+    DWORD t0 = GetTickCount();
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL)) break;   // kapandı
+        if (avail) {
+            DWORD got = 0;
+            if (!ReadFile(rd, buf, sizeof(buf), &got, NULL) || !got) break;
+            data.append(buf, got);
+        } else {
+            if (WaitForSingleObject(pinfo.hProcess, 60) == WAIT_OBJECT_0) {
+                // bitti; kalan veriyi boşalt
+                for (;;) {
+                    DWORD a2 = 0;
+                    if (!PeekNamedPipe(rd, NULL, 0, NULL, &a2, NULL) || !a2) break;
+                    DWORD got = 0;
+                    if (!ReadFile(rd, buf, sizeof(buf), &got, NULL) || !got) break;
+                    data.append(buf, got);
+                }
+                break;
+            }
+            if (GetTickCount() - t0 > 90000) { TerminateProcess(pinfo.hProcess, 2); break; }
+        }
+    }
+    CloseHandle(rd);
+    CloseHandle(pinfo.hThread);
+    CloseHandle(pinfo.hProcess);
+    // CSV çözümle
+    int line_no = 0;
+    size_t pos = 0;
+    int added = 0, strong = 0;
+    while (pos < data.size()) {
+        size_t e = data.find('\n', pos);
+        std::string line = data.substr(pos, (e == std::string::npos ? data.size() : e) - pos);
+        pos = (e == std::string::npos) ? data.size() : e + 1;
+        if (!line.empty() && line[line.size() - 1] == '\r') line.erase(line.size() - 1);
+        if (line.empty()) continue;
+        if (++line_no == 1) continue;   // başlık
+        auto f = pdbscope_csv_line(line);
+        if (f.size() < 10) continue;
+        unsigned long long rva = strtoull(f[0].c_str(), NULL, 10);
+        unsigned long long size = strtoull(f[2].c_str(), NULL, 10);
+        const std::string& cls = f[5];
+        const std::string& kind = f[6];
+        const std::string& name = f[9];
+        if (cls == "CERTAIN" || cls == "HIGH") strong++;
+        if (!rva) continue;
+        PeFunc pf;
+        pf.rva = rva; pf.size = size;
+        pf.name = s2w_narrow(name);
+        pf.is_export = (kind == "export" || kind == "entry");
+        pf.source = 5;   // PDBScope
+        out.push_back(pf);
+        added++;
+    }
+    if (note)
+        *note = std::wstring(L"PDBScope: ") + sym_numdec(added) + L" fonksiyon (CERTAIN/HIGH: " +
+                sym_numdec(strong) + L")";
+    return added > 0;
 }
 static std::wstring numdec(unsigned long long v) {
     wchar_t b[32]; _snwprintf(b, 32, L"%llu", v); return b;
@@ -624,7 +769,7 @@ static void load_settings() {
     g_tr = ini_read(L"Settings", L"Language", L"en") == L"tr";
     g_autosave = ini_read(L"Settings", L"AutoSave", L"0") == L"1";
     g_recent.clear();
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 10; i++) {
         wchar_t k[8]; _snwprintf(k, 8, L"File%d", i + 1);
         std::wstring v = ini_read(L"Recent", k, L"");
         if (!v.empty()) g_recent.push_back(v);
@@ -637,7 +782,7 @@ static void load_settings() {
 static void save_settings() {
     ini_write(L"Settings", L"Language", g_tr ? L"tr" : L"en");
     ini_write(L"Settings", L"AutoSave", g_autosave ? L"1" : L"0");
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 10; i++) {
         wchar_t k[8]; _snwprintf(k, 8, L"File%d", i + 1);
         ini_write(L"Recent", k, (size_t)i < g_recent.size() ? g_recent[i].c_str() : L"");
     }
@@ -649,7 +794,7 @@ static void push_recent(const std::wstring& p) {
     for (size_t i = 0; i < g_recent.size(); i++)
         if (g_recent[i] == p) { g_recent.erase(g_recent.begin() + i); break; }
     g_recent.insert(g_recent.begin(), p);
-    if (g_recent.size() > 4) g_recent.resize(4);
+    if (g_recent.size() > 10) g_recent.resize(10);
 }
 
 static void add_log(const std::wstring& msg) {
@@ -688,41 +833,52 @@ static void tree_fill() {
     tv.item.pszText = (LPWSTR)rootname.c_str();
     tv.item.lParam = 0;
     HTREEITEM hFile = TreeView_InsertItem(g_tree, &tv);
-    // Functions klasoru (kind=1)
-    tv.hParent = hFile;
-    tv.item.iImage = tv.item.iSelectedImage = ICO_FOLDER;
-    tv.item.pszText = (LPWSTR)L(LS_FUNCS);
-    tv.item.lParam = 1;
-    HTREEITEM hFuncs = TreeView_InsertItem(g_tree, &tv);
-    for (size_t i = 0; i < g_proj.funcs.size(); i++) {
-        if (g_proj.funcs[i].excluded) continue;
-        memset(&tv, 0, sizeof(tv));
-        tv.hInsertAfter = TVI_LAST; tv.hParent = hFuncs;
-        tv.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM;
-        int ico = g_proj.funcs[i].type == 0 ? ICO_V : (g_proj.funcs[i].type == 1 ? ICO_M : ICO_U);
-        tv.item.iImage = tv.item.iSelectedImage = ico;
-        tv.item.pszText = (LPWSTR)g_proj.funcs[i].name.c_str();
-        tv.item.lParam = (LPARAM)(100 + i);   // kind=func, idx=i
-        TreeView_InsertItem(g_tree, &tv);
+    HTREEITEM hFuncs = NULL, hLics = NULL;
+    // Functions klasoru (kind=1) — VMP: statik "(N)" sayaci
+    size_t nfun = 0;
+    for (size_t i = 0; i < g_proj.funcs.size(); i++) if (!g_proj.funcs[i].excluded) nfun++;
+    {
+        std::wstring lbl = std::wstring(L(LS_FUNCS)) + L" (" + numdec(nfun) + L")";
+        tv.hParent = hFile;
+        tv.item.iImage = tv.item.iSelectedImage = ICO_FOLDER;
+        tv.item.pszText = (LPWSTR)lbl.c_str();
+        tv.item.lParam = 1;
+        hFuncs = TreeView_InsertItem(g_tree, &tv);
+        for (size_t i = 0; i < g_proj.funcs.size(); i++) {
+            if (g_proj.funcs[i].excluded) continue;
+            memset(&tv, 0, sizeof(tv));
+            tv.hInsertAfter = TVI_LAST; tv.hParent = hFuncs;
+            tv.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM;
+            int ico = g_proj.funcs[i].type == 0 ? ICO_V : (g_proj.funcs[i].type == 1 ? ICO_M : ICO_U);
+            tv.item.iImage = tv.item.iSelectedImage = ico;
+            tv.item.pszText = (LPWSTR)g_proj.funcs[i].name.c_str();
+            tv.item.lParam = (LPARAM)(100 + i);   // kind=func, idx=i
+            TreeView_InsertItem(g_tree, &tv);
+        }
     }
-    // Licenses klasoru (kind=3)
-    tv.hParent = hFile;
-    tv.item.iImage = tv.item.iSelectedImage = ICO_FOLDER;
-    tv.item.pszText = (LPWSTR)L"Licenses";
-    tv.item.lParam = 2;
-    HTREEITEM hLics = TreeView_InsertItem(g_tree, &tv);
-    for (size_t i = 0; i < g_proj.lics.size(); i++) {
-        memset(&tv, 0, sizeof(tv));
-        tv.hInsertAfter = TVI_LAST; tv.hParent = hLics;
-        tv.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM;
-        tv.item.iImage = tv.item.iSelectedImage = ICO_LIC;
-        std::wstring nm = g_proj.lics[i].name.empty() ? (L"License " + numdec(i + 1)) : g_proj.lics[i].name;
-        tv.item.pszText = (LPWSTR)nm.c_str();
-        tv.item.lParam = (LPARAM)(200 + i);   // kind=lic, idx=i
-        TreeView_InsertItem(g_tree, &tv);
+    // Licenses klasoru (kind=2) — engelli lisans [Blocked] ekini alir
+    {
+        std::wstring lbl = std::wstring(L"Licenses") + L" (" + numdec(g_proj.lics.size()) + L")";
+        tv.hParent = hFile;
+        tv.item.iImage = tv.item.iSelectedImage = ICO_FOLDER;
+        tv.item.pszText = (LPWSTR)lbl.c_str();
+        tv.item.lParam = 2;
+        hLics = TreeView_InsertItem(g_tree, &tv);
+        for (size_t i = 0; i < g_proj.lics.size(); i++) {
+            memset(&tv, 0, sizeof(tv));
+            tv.hInsertAfter = TVI_LAST; tv.hParent = hLics;
+            tv.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM;
+            tv.item.iImage = tv.item.iSelectedImage = ICO_LIC;
+            std::wstring nm = g_proj.lics[i].name.empty() ? (L"License " + numdec(i + 1)) : g_proj.lics[i].name;
+            if (g_proj.lics[i].blocked) nm += L" [" + std::wstring(L(LS_BLOCKED)) + L"]";
+            tv.item.pszText = (LPWSTR)nm.c_str();
+            tv.item.lParam = (LPARAM)(200 + i);   // kind=lic, idx=i
+            TreeView_InsertItem(g_tree, &tv);
+        }
     }
     TreeView_Expand(g_tree, hFile, TVE_EXPAND);
-    TreeView_Expand(g_tree, hFuncs, TVE_EXPAND);
+    if (hFuncs) TreeView_Expand(g_tree, hFuncs, TVE_EXPAND);
+    if (hLics) TreeView_Expand(g_tree, hLics, TVE_EXPAND);
     SetCursor(LoadCursor(NULL, IDC_ARROW));
 }
 
@@ -856,6 +1012,7 @@ static void fill_prop() {
         prop_add_row(1, L(LS_MAXBUILD), vals[vi], base + 10); vi++;
         vals[vi] = lc.s_userdata ? (L"Yes / " + lc.s_userdata_v) : L"No";
         prop_add_row(1, L(LS_USERDATA), vals[vi], base + 11); vi++;
+        vals[vi] = lc.blocked ? L"Yes" : L"No"; prop_add_row(1, L(LS_BLOCKED), vals[vi], base + 12); vi++;
     }
     // listeye bas
     int shown = 0;
@@ -875,6 +1032,74 @@ static void fill_prop() {
         }
         shown++;
     }
+}
+
+// ---------------- 0.4.0: sag panel dizin gorunumu (directory_tree_ muadili) ----------------
+// VMP davranisi: Functions/Licenses klasoru seciliyken sag taraf cocuk listesi
+// gosterir — Functions: Name|Address|Protection; Licenses: Customer Name|Email|Date
+static void dir_cols_setup(int kind) {
+    while (ListView_DeleteColumn(g_dir, 0)) {}
+    LVCOLUMNW c; memset(&c, 0, sizeof(c));
+    c.mask = LVCF_TEXT | LVCF_WIDTH;
+    if (kind == 1) {
+        wchar_t* cols[5] = { (wchar_t*)L(LS_NAME), (wchar_t*)L(LS_ADDRESS),
+                             (wchar_t*)L(LS_PROTECTION), (wchar_t*)L(LS_SIZE), (wchar_t*)L(LS_SOURCE) };
+        int wds[5] = { 230, 100, 90, 70, 70 };
+        for (int i = 0; i < 5; i++) { c.pszText = cols[i]; c.cx = wds[i]; ListView_InsertColumn(g_dir, i, &c); }
+    } else {
+        wchar_t* cols[4] = { (wchar_t*)L(LS_CUSTNAME), (wchar_t*)L(LS_EMAIL),
+                             (wchar_t*)L(LS_DATE), (wchar_t*)L(LS_BLOCKED) };
+        int wds[4] = { 170, 170, 90, 70 };
+        for (int i = 0; i < 4; i++) { c.pszText = cols[i]; c.cx = wds[i]; ListView_InsertColumn(g_dir, i, &c); }
+    }
+}
+static void dir_fill() {
+    ListView_DeleteAllItems(g_dir);
+    if (!g_proj.open || !g_dir) return;
+    int shown = 0;
+    if (g_dir_kind == 1) {
+        // VMP: Functions klasorunun cocuklari = korumaya alinmis fonksiyonlar
+        for (size_t i = 0; i < g_proj.funcs.size(); i++) {
+            const ProjFunc& f = g_proj.funcs[i];
+            LVITEMW it; memset(&it, 0, sizeof(it));
+            it.mask = LVIF_TEXT | LVIF_PARAM; it.iItem = shown; it.lParam = (LPARAM)(100 + i);
+            it.pszText = (LPWSTR)f.name.c_str();
+            int idx = ListView_InsertItem(g_dir, &it);
+            static wchar_t ab[8][40];
+            int k = shown % 8;
+            _snwprintf(ab[k], 40, L"0x%08llX", f.rva);
+            ListView_SetItemText(g_dir, idx, 1, ab[k]);
+            const wchar_t* prot = f.excluded ? L(LS_EXCLUDED)
+                : (f.type == 0 ? L(LS_VIRT) : (f.type == 1 ? L(LS_MUT) : L(LS_ULTRA)));
+            ListView_SetItemText(g_dir, idx, 2, (LPWSTR)prot);
+            static wchar_t sb[8][32];
+            _snwprintf(sb[k], 32, L"%llu", f.size);
+            ListView_SetItemText(g_dir, idx, 3, sb[k]);
+            ListView_SetItemText(g_dir, idx, 4, (LPWSTR)src_name(f.src));
+            shown++;
+        }
+    } else if (g_dir_kind == 2) {
+        // VMP: Licenses klasorunun cocuklari = lisanslar
+        for (size_t i = 0; i < g_proj.lics.size(); i++) {
+            const ProjLicense& lc = g_proj.lics[i];
+            std::wstring nm = lc.name.empty() ? (L"License " + numdec(i + 1)) : lc.name;
+            if (lc.blocked) nm += L" [" + std::wstring(L(LS_BLOCKED)) + L"]";
+            LVITEMW it; memset(&it, 0, sizeof(it));
+            it.mask = LVIF_TEXT | LVIF_PARAM; it.iItem = shown; it.lParam = (LPARAM)(200 + i);
+            it.pszText = (LPWSTR)nm.c_str();
+            int idx = ListView_InsertItem(g_dir, &it);
+            ListView_SetItemText(g_dir, idx, 1, (LPWSTR)lc.email.c_str());
+            ListView_SetItemText(g_dir, idx, 2, (LPWSTR)lc.date.c_str());
+            ListView_SetItemText(g_dir, idx, 3, (LPWSTR)(lc.blocked ? L"Yes" : L"-"));
+            shown++;
+        }
+    }
+}
+// sag panel hangi gorunumu gosterecek: klasor secimine gore dizin, aksi halde ozellik
+static void right_show(int mode) {
+    g_rightmode = mode;
+    if (g_dir) ShowWindow(g_dir, mode == 1 ? SW_SHOW : SW_HIDE);
+    if (g_prop) ShowWindow(g_prop, mode == 1 ? SW_HIDE : SW_SHOW);
 }
 
 // ---------------- menuler (birebir yapi) ----------------
@@ -1113,7 +1338,15 @@ static LRESULT CALLBACK dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE) { PostMessageW(h, WM_APP_MODAL_CANCEL, 0, 0); return 0; }
-        if (wp == VK_RETURN) { PostMessageW(h, WM_APP_MODAL_OK, 0, 0); return 0; }
+        if (wp == VK_RETURN) {
+            // 0.4.0: Enter=OK — ama cok satirli EDIT'te newline olmali (lisans Comments)
+            HWND f = GetFocus();
+            wchar_t cls[64];
+            if (f && GetClassNameW(f, cls, 64) && !lstrcmpiW(cls, L"EDIT") &&
+                (GetWindowLongW(f, GWL_STYLE) & ES_MULTILINE)) break;
+            PostMessageW(h, WM_APP_MODAL_OK, 0, 0);
+            return 0;
+        }
         break;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -1148,17 +1381,29 @@ static std::wstring s2w(const std::string& s) {
 }
 
 // ---------------- dosya diyaloglari ----------------
-static bool pick_file(HWND parent, bool save, const wchar_t* defext, std::wstring* out) {
+// 0.4.0: VMP filtre birebir — Executable Files + Project Files; initdir opsiyonel
+#define XPROTECT_OPEN_FILTER \
+    L"Executable Files (*.exe;*.dll;*.bpl;*.ocx;*.sys;*.scr)\0*.exe;*.dll;*.bpl;*.ocx;*.sys;*.scr\0" \
+    L"Project Files (*.xproj;*.vmp)\0*.xproj;*.vmp\0" \
+    L"All Files (*.*)\0*.*\0"
+static bool pick_file(HWND parent, bool save, const wchar_t* defext, std::wstring* out,
+                      const wchar_t* filter = NULL, const wchar_t* initdir = NULL) {
     wchar_t buf[MAX_PATH]; buf[0] = 0;
     OPENFILENAMEW of; memset(&of, 0, sizeof(of));
     of.lStructSize = sizeof(of); of.hwndOwner = parent;
-    of.lpstrFilter = L(LS_CDFILTER);
+    of.lpstrFilter = filter ? filter : L(LS_CDFILTER);
     of.lpstrFile = buf; of.nMaxFile = MAX_PATH;
     of.lpstrDefExt = defext;
+    of.lpstrInitialDir = initdir;
     of.Flags = OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     if (save ? GetSaveFileNameW(&of) : GetOpenFileNameW(&of)) { *out = buf; return true; }
     return false;
 }
+
+// 0.4.0: acilan dosyayi turune gore yonlendir (.xproj / .vmp / exe)
+static void route_open_path(const std::wstring& p);
+// 0.4.0: VMProtect .vmp proje dosyasini iceri aktar (tolerant XML tarayici)
+static bool load_vmp_project(const std::wstring& path, std::wstring* err);
 
 // ---------------- undo / redo ----------------
 static void push_undo() {
@@ -1307,7 +1552,7 @@ static void dlg_settings() {
 // ---------------- diyalog: Fonksiyon Ekle / Adrese Git (function_dialog.cc) ----------------
 struct AFState {
     bool goto_mode;
-    HWND addr, list, filter;
+    HWND addr, end, list, filter;
     HWND combo_type, chk_lock;
     int type; bool lock;
 };
@@ -1344,18 +1589,25 @@ static std::wstring sym_by_addr(unsigned long long a) {
 }
 static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
     AFState st; st.goto_mode = goto_mode;
-    HWND d = dlg_base(goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC), 560, 430);
-    mk_ctl(d, L"STATIC", L(LS_ADDRESS), 0, 0, 16, 18, 60, 18);
-    st.addr = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x501, 80, 15, 250, 22);
+    HWND d = dlg_base(goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC), 560, 478);
+    // 0.4.0: Manual Address grubu — Base + End (kullanici istegi;
+    // listeden secilen fonksiyonun adresi Base'e, sonuna End yazilir)
+    mk_ctl(d, L"BUTTON", L(LS_MANUAL), BS_GROUPBOX, 0, 10, 12, 530, 58);
+    mk_ctl(d, L"STATIC", L(LS_BASE), 0, 0, 24, 36, 44, 18);
+    st.addr = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x501, 70, 33, 200, 22);
+    mk_ctl(d, L"STATIC", L(LS_END), 0, 0, 288, 36, 40, 18);
+    st.end = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x509, 330, 33, 200, 22);
     if (def_addr) { wchar_t b[32]; _snwprintf(b, 32, L"%llX", def_addr); set_txt(st.addr, b); }
-    HWND tab = mk_ctl(d, WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, 0x502, 10, 44, 530, 300);
+    HWND tab = mk_ctl(d, WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, 0x502, 10, 80, 530, 300);
     TCITEMW ti; memset(&ti, 0, sizeof(ti)); ti.mask = TCIF_TEXT;
     ti.pszText = (LPWSTR)L(LS_FUNCS); TabCtrl_InsertItem(tab, 0, &ti);
     ti.pszText = (LPWSTR)L(LS_OPTIONS); TabCtrl_InsertItem(tab, 1, &ti);
-    // sayfa 0: fonksiyon listesi (PDB/MAP/stub dahil — Source kolonu)
-    st.filter = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x503, 20, 76, 300, 22);
+    // sayfa 0: fonksiyon listesi (PDB/MAP/stub/PDBScope dahil — Source kolonu)
+    st.filter = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x503, 20, 112, 300, 22);
+    HWND btn_scan = mk_ctl(d, L"BUTTON", L(LS_SCAN), WS_TABSTOP, 0x508, 330, 110, 80, 25);
+    (void)btn_scan;
     st.list = mk_ctl(d, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_TABSTOP |
-                     (goto_mode ? LVS_SINGLESEL : 0), 0x504, 20, 102, 505, 220);
+                     (goto_mode ? LVS_SINGLESEL : 0), 0x504, 20, 140, 505, 218);
     ListView_SetExtendedListViewStyle(st.list, LVS_EX_FULLROWSELECT);
     LVCOLUMNW c; memset(&c, 0, sizeof(c)); c.mask = LVCF_TEXT | LVCF_WIDTH;
     wchar_t* cols[5] = { (wchar_t*)L(LS_NAME), (wchar_t*)L(LS_ADDRESS), (wchar_t*)L(LS_SIZE),
@@ -1364,22 +1616,22 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
     for (int i = 0; i < 5; i++) { c.pszText = cols[i]; c.cx = wds[i]; ListView_InsertColumn(st.list, i, &c); }
     af_fill_list(&st);
     // sayfa 1: options (sadece add modu — VMProtect: smAddFunction)
-    HWND pg1 = mk_ctl(d, L"BUTTON", L(LS_PROTECTION), BS_GROUPBOX, 0x505, 20, 76, 505, 100);
-    HWND lbl_type = mk_ctl(d, L"STATIC", L(LS_COMPTYPE), 0, 0, 36, 104, 120, 18);
-    st.combo_type = mk_ctl(d, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0x506, 160, 100, 220, 120);
+    HWND pg1 = mk_ctl(d, L"BUTTON", L(LS_PROTECTION), BS_GROUPBOX, 0x505, 20, 112, 505, 100);
+    HWND lbl_type = mk_ctl(d, L"STATIC", L(LS_COMPTYPE), 0, 0, 36, 140, 120, 18);
+    st.combo_type = mk_ctl(d, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0x506, 160, 136, 220, 120);
     ComboBox_AddString(st.combo_type, L(LS_VIRT));
     ComboBox_AddString(st.combo_type, L(LS_MUT));
     ComboBox_AddString(st.combo_type, (std::wstring(L(LS_ULTRA)) + L" (" + L(LS_MUT) + L" + " + L(LS_VIRT) + L")").c_str());
     ComboBox_SetCurSel(st.combo_type, 0);
-    HWND chk = mk_ctl(d, L"BUTTON", L(LS_LOCKKEY), BS_AUTOCHECKBOX | WS_TABSTOP, 0x507, 36, 134, 300, 20);
+    HWND chk = mk_ctl(d, L"BUTTON", L(LS_LOCKKEY), BS_AUTOCHECKBOX | WS_TABSTOP, 0x507, 36, 170, 300, 20);
     // 0.3.0 DUZELTME (UI bug #2): iki sekme sayfasi ayni anda gorunup
     // ust uste biniyordu — sayfa-1 kontrolleri BASLANGICTA gizlenir.
     ShowWindow(pg1, SW_HIDE);
     ShowWindow(lbl_type, SW_HIDE);
     ShowWindow(st.combo_type, SW_HIDE);
     ShowWindow(chk, SW_HIDE);
-    mk_ctl(d, L"BUTTON", goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC), BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 350, 356, 96, 26);
-    mk_ctl(d, L"BUTTON", L(LS_CANCEL), WS_TABSTOP, IDCANCEL, 452, 356, 88, 26);
+    mk_ctl(d, L"BUTTON", goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC), BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 350, 398, 96, 26);
+    mk_ctl(d, L"BUTTON", L(LS_CANCEL), WS_TABSTOP, IDCANCEL, 452, 398, 88, 26);
     if (!g_pe.sym_note.empty())
         SetWindowTextW(d, (std::wstring(goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC)) + L"   [" + g_pe.sym_note + L"]").c_str());
     SetFocus(st.addr);
@@ -1391,6 +1643,16 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
     while (GetMessageW(&m, NULL, 0, 0)) {
         if (m.message == WM_APP_MODAL_OK && (m.hwnd == d || IsChild(d, m.hwnd))) { okout = true; break; }
         if (m.message == WM_APP_MODAL_CANCEL && (m.hwnd == d || IsChild(d, m.hwnd))) break;
+        // 0.4.0: Scan dugmesi — pdbscope ile tam tarama + listeyi yenile
+        if (m.message == WM_COMMAND && m.hwnd == d && LOWORD(m.wParam) == 0x508) {
+            SetCursor(LoadCursor(NULL, IDC_WAIT));
+            std::wstring note;
+            merge_pdbscope(g_pe, g_proj.target, &note);
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
+            if (!note.empty()) SetWindowTextW(d, (std::wstring(goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC)) + L"   [" + note + L"]").c_str());
+            af_fill_list(&st);
+            continue;
+        }
         if (m.message == WM_APP + 30) {
             int p = (int)m.wParam;
             ShowWindow(st.filter, p == 0 ? SW_SHOW : SW_HIDE);
@@ -1412,8 +1674,12 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
                         LVITEMW it; memset(&it, 0, sizeof(it));
                         it.mask = LVIF_PARAM; it.iItem = lv->iItem;
                         if (ListView_GetItem(st.list, &it) && (size_t)it.lParam < g_pe.funcs.size()) {
-                            wchar_t b[32]; _snwprintf(b, 32, L"%llX", g_pe.funcs[it.lParam].rva);
+                            const PeFunc& pf = g_pe.funcs[it.lParam];
+                            // 0.4.0: secilen fonksiyonun adresi Base'e, sonuna End yazilir
+                            wchar_t b[32]; _snwprintf(b, 32, L"%llX", pf.rva);
                             set_txt(st.addr, b);
+                            _snwprintf(b, 32, L"%llX", pf.rva + (pf.size ? pf.size : 16));
+                            set_txt(st.end, b);
                         }
                     }
                 } else if (nm->code == NM_DBLCLK) {
@@ -1432,6 +1698,8 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
     EnableWindow(g_main, TRUE); SetActiveWindow(g_main);
     // 0.3.0 DUZELTME (UI bug #1): kontrol degerleri YIKMADAN ONCE okunur
     std::wstring addr_txt; ctl_txt(st.addr, &addr_txt);
+    std::wstring end_txt; ctl_txt(st.end, &end_txt);
+    unsigned long long end_val = end_txt.empty() ? 0 : wcstoull(end_txt.c_str(), NULL, 16);
     int type_sel = ComboBox_GetCurSel(st.combo_type);
     bool lock_chk = Button_GetCheck(chk) != BST_UNCHECKED;
     DestroyWindow(d);
@@ -1480,6 +1748,8 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
         for (auto& f : g_pe.funcs) if (f.rva == a) { pf.size = f.size; pf.is_export = f.is_export; pf.src = f.source; }
         pf.type = type_sel;
         pf.lock_to_key = lock_chk;
+        // 0.4.0: Manual Address End alanı — tek adres + geçerli End → brk kaydet
+        if (end_val > a && addrs.size() == 1) pf.brk = end_val;
         g_proj.funcs.push_back(pf);
         added++;
     }
@@ -1579,40 +1849,69 @@ static void dlg_watermarks() {
 // ============================================================
 
 // ---------------- diyalog: Lisans Ekle (license_dialog.cc birebir alan seti) ----------------
-static bool dlg_addlicense() {
-    HWND d = dlg_base(L(LS_ADDLIC), 470, 560);
+static bool dlg_addlicense(ProjLicense* edit_lic = NULL) {
+    HWND d = dlg_base(L(LS_ADDLIC), 470, 620);
     mk_ctl(d, L"STATIC", L(LS_DETAILS), 0, 0, 16, 14, 200, 18);
     auto lbl_edit = [&](int y, const wchar_t* lab, int id, const wchar_t* defv = L"") -> HWND {
         mk_ctl(d, L"STATIC", lab, 0, 0, 16, y + 3, 130, 18);
         HWND e = mk_ctl(d, L"EDIT", defv, WS_BORDER | WS_TABSTOP, id, 150, y, 290, 22);
         return e;
     };
-    HWND eName = lbl_edit(36, L(LS_CUSTNAME), 0x701);
-    HWND eMail = lbl_edit(64, L(LS_EMAIL), 0x702);
+    // 0.4.0: tarih yardimcilari (VMP: bugun, +1 ay, +1 yil varsayilanlari)
     SYSTEMTIME st; GetLocalTime(&st);
-    wchar_t today[24]; _snwprintf(today, 24, L"%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
-    HWND eDate = lbl_edit(92, L(LS_DATE), 0x703, today);
-    HWND eOrder = lbl_edit(120, L(LS_ORDER), 0x704);
+    SYSTEMTIME st_month = st, st_year = st;
+    {   // +1 ay
+        st_month.wMonth++; if (st_month.wMonth > 12) { st_month.wMonth = 1; st_month.wYear++; }
+    }
+    st_year.wYear++;
+    wchar_t today[24], exp_def[24], maxb_def[24];
+    _snwprintf(today, 24, L"%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
+    _snwprintf(exp_def, 24, L"%04d-%02d-%02d", st_month.wYear, st_month.wMonth, st_month.wDay);
+    _snwprintf(maxb_def, 24, L"%04d-%02d-%02d", st_year.wYear, st_year.wMonth, st_year.wDay);
+    ProjLicense init;
+    if (edit_lic) init = *edit_lic;
+    HWND eName = lbl_edit(36, L(LS_CUSTNAME), 0x701, init.name.c_str());
+    HWND eMail = lbl_edit(64, L(LS_EMAIL), 0x702, init.email.c_str());
+    HWND eDate = lbl_edit(92, L(LS_DATE), 0x703, init.date.empty() ? today : init.date.c_str());
+    HWND eOrder = lbl_edit(120, L(LS_ORDER), 0x704, init.order.c_str());
     mk_ctl(d, L"STATIC", L(LS_COMMENTS), 0, 0, 16, 152, 130, 18);
-    HWND eComments = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, 0x705, 150, 148, 290, 44);
+    HWND eComments = mk_ctl(d, L"EDIT", init.comments.c_str(), WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, 0x705, 150, 148, 290, 44);
+    mk_ctl(d, L"BUTTON", L(LS_BLOCKED), BS_AUTOCHECKBOX | WS_TABSTOP, 0x706, 150, 196, 200, 20);
+    if (edit_lic && edit_lic->blocked) Button_SetCheck(GetDlgItem(d, 0x706), BST_CHECKED);
     // serial number contents
-    mk_ctl(d, L"BUTTON", L(LS_SERIALCONT), BS_GROUPBOX, 0, 14, 202, 430, 220);
-    struct SRow { int id; const wchar_t* lab; int y; bool* flag; std::wstring* val; };
-    std::wstring exp_d = today, maxb_d = today, time_v, udata_v;
+    mk_ctl(d, L"BUTTON", L(LS_SERIALCONT), BS_GROUPBOX, 0, 14, 238, 430, 220);
+    std::wstring exp_d = init.s_expire ? init.s_expire_d : exp_def;
+    std::wstring maxb_d = init.s_maxbuild ? init.s_maxbuild_d : maxb_def;
+    std::wstring time_v = init.s_time ? init.s_time_v : L"30";   // VMP: varsayilan 30
+    std::wstring udata_v = init.s_userdata ? init.s_userdata_v : L"";
     bool f_name = false, f_mail = false, f_hwid = false, f_exp = false, f_time = false, f_maxb = false, f_udata = false;
-    mk_ctl(d, L"BUTTON", L(LS_CUSTNAME), BS_AUTOCHECKBOX | WS_TABSTOP, 0x710, 26, 222, 200, 20);
-    mk_ctl(d, L"BUTTON", L(LS_EMAIL), BS_AUTOCHECKBOX | WS_TABSTOP, 0x711, 26, 246, 200, 20);
-    mk_ctl(d, L"BUTTON", L(LS_HWID), BS_AUTOCHECKBOX | WS_TABSTOP, 0x712, 26, 270, 200, 20);
-    mk_ctl(d, L"BUTTON", L(LS_EXPIRE), BS_AUTOCHECKBOX | WS_TABSTOP, 0x713, 26, 294, 140, 20);
-    mk_ctl(d, L"EDIT", exp_d.c_str(), WS_BORDER | WS_TABSTOP, 0x713e, 170, 292, 90, 22);
-    mk_ctl(d, L"BUTTON", L(LS_TIMELIMIT), BS_AUTOCHECKBOX | WS_TABSTOP, 0x714, 26, 318, 140, 20);
-    mk_ctl(d, L"EDIT", L"", WS_BORDER | WS_TABSTOP, 0x714e, 170, 316, 90, 22);
-    mk_ctl(d, L"BUTTON", L(LS_MAXBUILD), BS_AUTOCHECKBOX | WS_TABSTOP, 0x715, 26, 342, 140, 20);
-    mk_ctl(d, L"EDIT", maxb_d.c_str(), WS_BORDER | WS_TABSTOP, 0x715e, 170, 340, 90, 22);
-    mk_ctl(d, L"BUTTON", L(LS_USERDATA), BS_AUTOCHECKBOX | WS_TABSTOP, 0x716, 26, 366, 140, 20);
-    mk_ctl(d, L"EDIT", L"", WS_BORDER | WS_TABSTOP, 0x716e, 170, 364, 90, 22);
-    mk_ctl(d, L"BUTTON", L(LS_ADDLIC), BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 260, 436, 96, 26);
-    mk_ctl(d, L"BUTTON", L(LS_CANCEL), WS_TABSTOP, IDCANCEL, 362, 436, 88, 26);
+    if (edit_lic) {
+        f_name = edit_lic->s_name; f_mail = edit_lic->s_email; f_hwid = edit_lic->s_hwid;
+        f_exp = edit_lic->s_expire; f_time = edit_lic->s_time; f_maxb = edit_lic->s_maxbuild; f_udata = edit_lic->s_userdata;
+    }
+    mk_ctl(d, L"BUTTON", L(LS_CUSTNAME), BS_AUTOCHECKBOX | WS_TABSTOP, 0x710, 26, 258, 200, 20);
+    mk_ctl(d, L"BUTTON", L(LS_EMAIL), BS_AUTOCHECKBOX | WS_TABSTOP, 0x711, 26, 282, 200, 20);
+    mk_ctl(d, L"BUTTON", L(LS_HWID), BS_AUTOCHECKBOX | WS_TABSTOP, 0x712, 26, 306, 200, 20);
+    mk_ctl(d, L"BUTTON", L(LS_EXPIRE), BS_AUTOCHECKBOX | WS_TABSTOP, 0x713, 26, 330, 140, 20);
+    mk_ctl(d, L"EDIT", exp_d.c_str(), WS_BORDER | WS_TABSTOP, 0x713e, 170, 328, 90, 22);
+    mk_ctl(d, L"BUTTON", L(LS_TIMELIMIT), BS_AUTOCHECKBOX | WS_TABSTOP, 0x714, 26, 354, 140, 20);
+    mk_ctl(d, L"EDIT", time_v.c_str(), WS_BORDER | WS_TABSTOP, 0x714e, 170, 352, 90, 22);
+    mk_ctl(d, L"BUTTON", L(LS_MAXBUILD), BS_AUTOCHECKBOX | WS_TABSTOP, 0x715, 26, 378, 140, 20);
+    mk_ctl(d, L"EDIT", maxb_d.c_str(), WS_BORDER | WS_TABSTOP, 0x715e, 170, 376, 90, 22);
+    mk_ctl(d, L"BUTTON", L(LS_USERDATA), BS_AUTOCHECKBOX | WS_TABSTOP, 0x716, 26, 402, 140, 20);
+    mk_ctl(d, L"EDIT", udata_v.c_str(), WS_BORDER | WS_TABSTOP, 0x716e, 170, 400, 90, 22);
+    // 0.4.0: duzenleme modunda bayraklari onceden isaretle
+    if (edit_lic) {
+        if (f_name) Button_SetCheck(GetDlgItem(d, 0x710), BST_CHECKED);
+        if (f_mail) Button_SetCheck(GetDlgItem(d, 0x711), BST_CHECKED);
+        if (f_hwid) Button_SetCheck(GetDlgItem(d, 0x712), BST_CHECKED);
+        if (f_exp) Button_SetCheck(GetDlgItem(d, 0x713), BST_CHECKED);
+        if (f_time) Button_SetCheck(GetDlgItem(d, 0x714), BST_CHECKED);
+        if (f_maxb) Button_SetCheck(GetDlgItem(d, 0x715), BST_CHECKED);
+        if (f_udata) Button_SetCheck(GetDlgItem(d, 0x716), BST_CHECKED);
+    }
+    mk_ctl(d, L"BUTTON", edit_lic ? L(LS_OK) : L(LS_ADDLIC), BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 260, 496, 96, 26);
+    mk_ctl(d, L"BUTTON", L(LS_CANCEL), WS_TABSTOP, IDCANCEL, 362, 496, 88, 26);
     bool okout = false;
     EnableWindow(g_main, FALSE); ShowWindow(d, SW_SHOW); UpdateWindow(d);
     MSG m;
@@ -1628,6 +1927,7 @@ static bool dlg_addlicense() {
     if (okout) {
         ctl_txt(eName, &lc.name); ctl_txt(eMail, &lc.email); ctl_txt(eDate, &lc.date);
         ctl_txt(eOrder, &lc.order); ctl_txt(eComments, &lc.comments);
+        lc.blocked = SendDlgItemMessageW(d, 0x706, BM_GETCHECK, 0, 0) == BST_CHECKED;
         lc.s_name = SendDlgItemMessageW(d, 0x710, BM_GETCHECK, 0, 0) == BST_CHECKED;
         lc.s_email = SendDlgItemMessageW(d, 0x711, BM_GETCHECK, 0, 0) == BST_CHECKED;
         lc.s_hwid = SendDlgItemMessageW(d, 0x712, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -1642,6 +1942,13 @@ static bool dlg_addlicense() {
     }
     DestroyWindow(d);
     if (!okout) return false;
+    if (edit_lic) {
+        push_undo();
+        *edit_lic = lc;              // 0.4.0: mevcut lisans guncellenir
+        g_proj.modified = true;
+        update_all();
+        return true;
+    }
     g_proj.lics.push_back(lc);
     g_proj.modified = true;
     update_all();
@@ -1919,6 +2226,42 @@ static void start_compile() {
     HANDLE th = CreateThread(NULL, 0, compile_thread, j, 0, NULL);
     if (th) CloseHandle(th);
     build_menu();   // compile disabled iken
+    // ---- 0.4.0: modal ilerleme penceresi (VMP progress_dialog muadili) ----
+    // derleme is parcacigi loglari WM_APP_LOG, bitisi WM_APP_DONE ile gonderir;
+    // bu dongu onleri yakalayip log'a yazar, pencereyi kapatir.
+    HWND pd = dlg_base(L(LS_COMPILING), 360, 100);
+    mk_ctl(pd, L"STATIC", (std::wstring(L(LS_COMPILING)) + L"  " + basename_of(out)).c_str(), 0, 0xF01, 20, 20, 320, 20);
+    HWND pb = mk_ctl(pd, PROGRESS_CLASSW, L"", PBS_MARQUEE | WS_CHILD | WS_VISIBLE, 0xF02, 20, 48, 320, 22);
+    SendMessageW(pb, PBM_SETMARQUEE, TRUE, 30);
+    ShowWindow(pd, SW_SHOW); UpdateWindow(pd);
+    int done_rc = -1;
+    MSG m2;
+    while (GetMessageW(&m2, NULL, 0, 0)) {
+        if (m2.message == WM_APP_DONE) {
+            done_rc = (int)m2.wParam;
+            g_compiling = false;
+            add_log(std::wstring(L(LS_DONE)) + L"  rc=" + numdec((unsigned long long)(done_rc < 0 ? 0 : done_rc)));
+            if (g_autosave && !g_proj.path.empty()) save_project(false);
+            break;
+        }
+        if (m2.message == WM_APP_LOG) {
+            add_log((wchar_t*)m2.lParam);
+            HeapFree(GetProcessHeap(), 0, (void*)m2.lParam);
+            continue;
+        }
+        if (m2.message == WM_QUIT) { PostQuitMessage((int)m2.wParam); break; }
+        TranslateMessage(&m2); DispatchMessageW(&m2);
+    }
+    DestroyWindow(pd);
+    build_menu();   // compile enable durumuna dondu
+    // 0.4.0: VMP davranisi — basarili derleme sonrasi "korumaliyi calistir?" istemi
+    if (done_rc == 0) {
+        std::wstring pp = protected_path();
+        if (MessageBoxW(g_main, (std::wstring(L(LS_COMPILE_DONE_Q)) + L"\n\n" + pp).c_str(),
+                        XPROTECT_EDITION, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            ShellExecuteW(g_main, L"open", pp.c_str(), g_proj.exec_params.c_str(), exe_dir().c_str(), SW_SHOWNORMAL);
+        }
+    }
 }
 
 // ---------------- proje kaydet / yukle (.xproj) ----------------
@@ -1973,7 +2316,8 @@ static bool save_project_to(const std::wstring& path) {
             lc.s_name, lc.s_email, lc.s_hwid, lc.s_expire, lc.s_time, lc.s_maxbuild, lc.s_userdata);
         std::wstring line = L"lic\t" + esc_t(lc.name) + L"\t" + esc_t(lc.email) + L"\t" + esc_t(lc.date) +
             L"\t" + esc_t(lc.order) + L"\t" + esc_t(lc.comments) + L"\t" + fl + L"\t" +
-            esc_t(lc.s_expire_d) + L"\t" + esc_t(lc.s_maxbuild_d) + L"\t" + esc_t(lc.s_time_v) + L"\t" + esc_t(lc.s_userdata_v);
+            esc_t(lc.s_expire_d) + L"\t" + esc_t(lc.s_maxbuild_d) + L"\t" + esc_t(lc.s_time_v) + L"\t" + esc_t(lc.s_userdata_v) +
+            L"\t" + (lc.blocked ? L"1" : L"0");
         ln(w2s(line));
     }
     fwrite(o.data(), 1, o.size(), f);
@@ -2058,6 +2402,7 @@ static bool load_project_from(const std::wstring& path, std::wstring* err) {
                 lc.s_userdata = fl.size() > 6 && fl[6] == L'1';
                 lc.s_expire_d = unesc_t(p[6]); lc.s_maxbuild_d = unesc_t(p[7]);
                 lc.s_time_v = unesc_t(p[8]); lc.s_userdata_v = unesc_t(p[9]);
+                if (p.size() >= 11) lc.blocked = p[10] == L"1";   // 0.4.0
                 g_proj.lics.push_back(lc);
             }
         }
@@ -2078,12 +2423,63 @@ static void save_project(bool save_as) {
         MessageBoxW(g_main, L"Cannot save project", L(LS_ERROR), MB_ICONERROR);
     }
 }
+// 0.4.0: fonksiyon boyutlarini komsu-sembol kelepcesiyle doldur (siralama sonrasi)
+static void fill_neighbor_sizes(PeInfo& pi) {
+    std::sort(pi.funcs.begin(), pi.funcs.end(), [](const PeFunc& a, const PeFunc& b) { return a.rva < b.rva; });
+    pi.funcs.erase(std::unique(pi.funcs.begin(), pi.funcs.end(), [](const PeFunc& a, const PeFunc& b) { return a.rva == b.rva; }), pi.funcs.end());
+    PeSection* text = NULL;
+    for (auto& s : pi.secs) if (s.name == L".text") { text = &s; break; }
+    if (!text) for (auto& s : pi.secs) if (s.chars & 0x20000000) { text = &s; break; }
+    if (text) {
+        for (size_t i = 0; i < pi.funcs.size(); i++) {
+            if (pi.funcs[i].size) continue;   // PDB/PDBScope'tan biliniyor
+            unsigned long long end = (i + 1 < pi.funcs.size()) ? pi.funcs[i + 1].rva : (text->va + text->vsz);
+            pi.funcs[i].size = end - pi.funcs[i].rva;
+        }
+    }
+}
+// 0.4.0: PDBScope taramasini mevcut listeye birlestir (rva bazli; ayni rva'da
+// isim/boyut zenginlestirilir, yeni RVA'lar eklenir). Not cikti parametresiyle doner.
+static void merge_pdbscope(PeInfo& pi, const std::wstring& path, std::wstring* note_out) {
+    std::vector<PeFunc> pf;
+    std::wstring note;
+    if (!pdbscope_scan(path, pf, &note)) {
+        if (note_out) *note_out = L"pdbscope: no result (tool not found or no functions)";
+        return;
+    }
+    size_t added = 0, enriched = 0;
+    for (auto& f : pf) {
+        PeFunc* hit = NULL;
+        for (auto& e : pi.funcs) if (e.rva == f.rva) { hit = &e; break; }
+        if (hit) {
+            if (!hit->size && f.size) { hit->size = f.size; enriched++; }
+            if ((hit->name.empty() || hit->name.rfind(L"sub_", 0) == 0) && !f.name.empty()) hit->name = f.name;
+        } else {
+            PeFunc nf = f;
+            if (nf.name.empty()) {
+                wchar_t b[32]; _snwprintf(b, 32, L"sub_%08llX", nf.rva);
+                nf.name = b;
+            }
+            pi.funcs.push_back(nf);
+            added++;
+        }
+    }
+    fill_neighbor_sizes(pi);
+    if (note_out)
+        *note_out = note + L"   [+" + numdec(added) + L" new, " + numdec(enriched) + L" enriched]";
+}
 static void open_target(const std::wstring& path) {
+    SetCursor(LoadCursor(NULL, IDC_WAIT));   // 0.4.0: buyuk dosyalarda arayuz yanit verir gorunur
     PeInfo pi; std::wstring err;
     if (!parse_pe_file(path, pi, err)) {
+        SetCursor(LoadCursor(NULL, IDC_ARROW));
         MessageBoxW(g_main, (std::wstring(L"Cannot open file: ") + err).c_str(), L(LS_ERROR), MB_ICONERROR);
         return;
     }
+    // 0.4.0: TUM fonksiyonlar — PDBScope (kullanici araci) entegrasyonu.
+    // Tarama arayuz kurulmadan once tek subprocess ile yapilir.
+    std::wstring scope_note;
+    merge_pdbscope(pi, path, &scope_note);   // 0.4.0: selftest dahil — funcs= sayacı kanıtı
     g_pe = pi;
     g_proj = Project();
     g_proj.open = true;
@@ -2095,8 +2491,10 @@ static void open_target(const std::wstring& path) {
     update_all();
     add_log(L"Opened: " + path + (pi.is64 ? L"  (x64)" : L"  (x86)"));
     if (!pi.sym_note.empty()) add_log(pi.sym_note);
+    if (!scope_note.empty()) add_log(scope_note);
     if (!pi.funcs.empty())
         add_log(std::wstring(L"Functions: ") + numdec(pi.funcs.size()) + L"  (" + src_name(pi.funcs[0].source) + L"...)");
+    SetCursor(LoadCursor(NULL, IDC_ARROW));
 }
 static void open_project_file(const std::wstring& path) {
     std::wstring err;
@@ -2114,6 +2512,182 @@ static void open_project_file(const std::wstring& path) {
     g_prop_sel_kind = 0; g_prop_sel_idx = -1;
     update_all();
     add_log(L"Project opened: " + path);
+}
+
+// ============================================================
+// 0.4.0 — VMProtect .vmp proje dosyasi ici aktarma (tam kapsam portu)
+// core.cc Save birebir format:
+//   <Document Version="2"><Protection InputFileName Options VMCodeSectionName ...>
+//     <Procedures><Procedure Address|MapAddress [CompilationType] [Options]
+//                          [IncludedInCompilation] [Folder] ... />
+// tolerant tarayici: tag/attribute taramasi + &quot; &amp; cozumu
+// ============================================================
+static std::string xml_unescape(const std::string& s) {
+    std::string o;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '&') {
+            if (s.compare(i, 6, "&quot;") == 0) { o += '"'; i += 5; }
+            else if (s.compare(i, 5, "&amp;") == 0) { o += '&'; i += 4; }
+            else if (s.compare(i, 4, "&lt;") == 0) { o += '<'; i += 3; }
+            else if (s.compare(i, 4, "&gt;") == 0) { o += '>'; i += 3; }
+            else if (s.compare(i, 6, "&apos;") == 0) { o += '\''; i += 5; }
+            else o += s[i];
+        } else o += s[i];
+    }
+    return o;
+}
+// tag'in ("<ad " ile baslayan) tum attr'lerini cozer; kapanis '>' konumunu doner.
+// "<Procedure" araması "<Procedures" ile karisabilir → eslesmeyen adaylarda
+// arama bir sonraki konumdan devam eder (döngülü tarama).
+static bool xml_tag_attrs(const std::string& xml, size_t from, const char* tag,
+                          std::map<std::string, std::string>* attrs, size_t* tag_end) {
+    std::string open = std::string("<") + tag;
+    size_t p = from;
+    for (;;) {
+        p = xml.find(open, p);
+        if (p == std::string::npos) return false;
+        // tag adi tam eslesmeli (baska tag'in oneki olmasin)
+        char nx = (p + open.size() < xml.size()) ? xml[p + open.size()] : 0;
+        if (nx == ' ' || nx == '>' || nx == '\t' || nx == '\r' || nx == '\n' || nx == '/')
+            break;
+        p++;   // onek cakismasi — bir sonrakine bak
+    }
+    size_t e = xml.find('>', p);
+    if (e == std::string::npos) return false;
+    std::string body = xml.substr(p + open.size(), e - (p + open.size()));
+    // name="value" ayristirma
+    size_t i = 0;
+    while (i < body.size()) {
+        while (i < body.size() && (body[i] == ' ' || body[i] == '\t')) i++;
+        size_t ns = i;
+        while (i < body.size() && body[i] != '=' ) i++;
+        if (i >= body.size()) break;
+        std::string name = body.substr(ns, i - ns);
+        i++;   // =
+        if (i < body.size() && (body[i] == '"' || body[i] == '\'')) {
+            char q = body[i++];
+            size_t vs = i;
+            while (i < body.size() && body[i] != q) i++;
+            (*attrs)[name] = xml_unescape(body.substr(vs, i - vs));
+            if (i < body.size()) i++;
+        } else {
+            size_t vs = i;
+            while (i < body.size() && body[i] != ' ') i++;
+            (*attrs)[name] = xml_unescape(body.substr(vs, i - vs));
+        }
+    }
+    if (tag_end) *tag_end = e + 1;
+    return true;
+}
+static unsigned long long xml_num(const std::string& v, unsigned long long def = 0) {
+    if (v.empty()) return def;
+    if (v.size() > 2 && v[0] == '0' && (v[1] == 'x' || v[1] == 'X'))
+        return strtoull(v.c_str() + 2, NULL, 16);
+    return strtoull(v.c_str(), NULL, 10);   // TinyXML ondalik yazar
+}
+static bool load_vmp_project(const std::wstring& path, std::wstring* err) {
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) { if (err) *err = L"Cannot open project"; return false; }
+    std::string all;
+    char buf[8192]; size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) all.append(buf, n);
+    fclose(f);
+    if (all.find("<Document") == std::string::npos) {
+        if (err) *err = L"Not a VMProtect project file"; return false;
+    }
+    std::map<std::string, std::string> pa;
+    size_t pe_ = 0;
+    if (!xml_tag_attrs(all, all.find("<Document"), "Protection", &pa, &pe_)) {
+        if (err) *err = L"Protection node not found"; return false;
+    }
+    std::string in_name = pa.count("InputFileName") ? pa["InputFileName"] : std::string();
+    unsigned long long opts = xml_num(pa.count("Options") ? pa["Options"] : "", 0);
+    Project np;
+    np.options = opts;
+    // Procedures — fonksiyonlar
+    size_t proc_at = all.find("<Procedures", pe_);
+    if (proc_at != std::string::npos) {
+        size_t proc_end = all.find("</Procedures>", proc_at);
+        if (proc_end == std::string::npos) proc_end = all.size();
+        size_t cursor = proc_at;
+        for (;;) {
+            std::map<std::string, std::string> fa;
+            size_t tag_end = 0;
+            if (!xml_tag_attrs(all, cursor, "Procedure", &fa, &tag_end) || tag_end > proc_end) break;
+            cursor = tag_end;
+            ProjFunc pf;
+            if (fa.count("MapAddress")) {
+                pf.name = s2w(fa["MapAddress"]);
+            } else if (fa.count("Address")) {
+                pf.rva = xml_num(fa["Address"]);
+                wchar_t b[32]; _snwprintf(b, 32, L"sub_%08llX", pf.rva);
+                pf.name = b;
+            } else continue;
+            unsigned long long ct = xml_num(fa.count("CompilationType") ? fa["CompilationType"] : "", 0);
+            pf.type = ct > 2 ? 0 : (int)ct;
+            unsigned long long co = xml_num(fa.count("Options") ? fa["Options"] : "", 0);
+            pf.lock_to_key = (co & 0x2000) != 0;   // coLockToKey
+            if (fa.count("IncludedInCompilation") && fa["IncludedInCompilation"] == "0")
+                pf.excluded = true;
+            if (fa.count("ExternalAddress")) pf.ext = xml_num(fa["ExternalAddress"]);
+            np.funcs.push_back(pf);
+        }
+    }
+    // hedef dosya yolu — proje klasorune gore coz
+    std::wstring dir = sym_dir_of(path);
+    std::wstring target = s2w(in_name);
+    if (!target.empty() && target.size() > 1 && target[1] != L':' && target[0] != L'\\' && target[0] != L'/')
+        target = dir + L"\\" + target;
+    np.target = target;
+    np.open = true;
+    np.modified = true;
+    g_proj = np;
+    if (err) *err = L"";
+    return true;
+}
+// .vmp projesini ac: XML'i oku → hedef PE'yi parse et → fonksiyon adlariyla eslestir
+static void open_vmp_project(const std::wstring& path) {
+    std::wstring err;
+    if (!load_vmp_project(path, &err)) {
+        MessageBoxW(g_main, err.c_str(), L(LS_ERROR), MB_ICONERROR);
+        return;
+    }
+    if (g_proj.target.empty()) {
+        std::wstring p;
+        if (!pick_file(g_main, false, L"exe", &p, XPROTECT_OPEN_FILTER)) return;
+        g_proj.target = p;
+    }
+    std::wstring scope_note;
+    PeInfo pi; std::wstring perr;
+    if (!parse_pe_file(g_proj.target, pi, perr)) {
+        MessageBoxW(g_main, (std::wstring(L"Target missing: ") + g_proj.target).c_str(), L(LS_ERROR), MB_ICONWARNING);
+        g_pe = pi;
+    } else {
+        g_pe = pi;
+        // MapAddress adlarini discovered fonksiyonlarla zenginlestir (adres/boyut)
+        for (auto& pf : g_proj.funcs) {
+            if (pf.rva) continue;
+            for (auto& e : pi.funcs) {
+                if (e.name == pf.name) { pf.rva = e.rva; pf.size = e.size; pf.src = e.source; pf.is_export = e.is_export; break; }
+            }
+        }
+        merge_pdbscope(pi, g_proj.target, &scope_note);
+        g_pe = pi;
+    }
+    g_proj.open = true;
+    g_proj.path = path;
+    g_prop_sel_kind = 0; g_prop_sel_idx = -1;
+    update_all();
+    add_log(L"VMP project imported: " + path);
+    if (!scope_note.empty()) add_log(scope_note);
+}
+// 0.4.0: acilan dosyayi turune gore yonlendir (VMP loadFile davranisi)
+static void route_open_path(const std::wstring& p) {
+    size_t d = p.find_last_of(L'.');
+    std::wstring ext = (d == std::wstring::npos) ? L"" : p.substr(d + 1);
+    if (_wcsicmp(ext.c_str(), L"xproj") == 0) open_project_file(p);
+    else if (_wcsicmp(ext.c_str(), L"vmp") == 0) open_vmp_project(p);
+    else open_target(p);
 }
 static void close_project() {
     if (g_proj.modified) {
@@ -2137,13 +2711,21 @@ static void close_project() {
 #define IDM_EXTADDR   0x9005
 #define IDM_BRKADDR   0x9006
 #define IDM_CTX_DEL   0x9007
+#define IDM_EXAMPLES  0x9008
+#define IDM_LIC_BLOCK 0x9009
+#define IDM_LIC_EDIT  0x900A
 #define IDM_TYPE_V    0x9010
 #define IDM_TYPE_M    0x9011
 #define IDM_TYPE_U    0x9012
 
 static void update_caption() {
+    // 0.4.0: baslikta degistirilmis yildizi (*) goster — VMP updateCaption davranisi
     std::wstring cap = XPROTECT_EDITION L" [unregistered]";
-    if (g_proj.open) cap += (g_proj.path.empty() ? g_proj.target : g_proj.path);
+    if (g_proj.open) {
+        cap = (g_proj.path.empty() ? g_proj.target : g_proj.path);
+        if (g_proj.modified) cap += L"*";
+        cap += L" \x2014 " XPROTECT_EDITION L" [unregistered]";
+    }
     SetWindowTextW(g_main, cap.c_str());
 }
 
@@ -2161,7 +2743,6 @@ static void log_cols_setup() {
     c.pszText = (LPWSTR)L"Time"; c.cx = 70; ListView_InsertColumn(g_log, 0, &c);
     c.pszText = (LPWSTR)L"Message"; c.cx = 700; ListView_InsertColumn(g_log, 1, &c);
 }
-
 static void update_all() {
     // 0.3.0: menu/toolbar artik yeniden KURULMAZ — durumlar guncellenir
     // (0.2.0'daki tum-secim-degistikce-menü-flicker / toolbar-sifirlanma bitti)
@@ -2169,7 +2750,8 @@ static void update_all() {
     tree_fill();
     if (g_tab == 1) func_fill();
     else if (g_tab == 2) details_fill_rows();
-    fill_prop();
+    if (g_rightmode == 1) dir_fill();
+    else fill_prop();
     update_caption();
     ShowWindow(g_welcome, g_proj.open ? SW_HIDE : SW_SHOW);
     std::wstring t = g_proj.open ? (g_proj.path.empty() ? g_proj.target : g_proj.path) : L(LS_READY);
@@ -2196,6 +2778,9 @@ static bool dlg_input_text(const wchar_t* title, const wchar_t* label, const std
 // ---------------- layout ----------------
 static void layout() {
     if (!g_main) return;
+    static int depth = 0;
+    if (depth > 4) return;   // 0.4.0: olasi layout rekursiyonuna karsi sigorta
+    depth++;
     RECT rc; GetClientRect(g_main, &rc);
     int W = rc.right, H = rc.bottom;
     SendMessageW(g_status, WM_SIZE, 0, 0);
@@ -2232,13 +2817,23 @@ static void layout() {
     if (g_filter) ShowWindow(g_filter, g_tab == 1 ? SW_SHOW : SW_HIDE);
     MoveWindow(g_split, 30 + g_split_x, top, 4, body_h, TRUE);
     MoveWindow(g_prop, 34 + g_split_x, top, W - 34 - g_split_x, body_h, TRUE);
+    MoveWindow(g_dir, 34 + g_split_x, top, W - 34 - g_split_x, body_h, TRUE);
     MoveWindow(g_log, 0, H - st_h - g_log_h, W, g_log_h, TRUE);
     MoveWindow(g_welcome, 0, top, W, body_h + g_log_h, TRUE);
-    MoveWindow(GetDlgItem(g_welcome, 0xA01), 40, 60, W - 80, 44, TRUE);
-    MoveWindow(GetDlgItem(g_welcome, 0xA02), 40, 130, 160, 32, TRUE);
-    MoveWindow(GetDlgItem(g_welcome, 0xA03), 210, 130, 160, 32, TRUE);
-    MoveWindow(GetDlgItem(g_welcome, 0xA04), 40, 180, W - 80, body_h - 200 > 60 ? body_h - 200 : 60, TRUE);
+    // 0.4.0: boot sayfasi yerlesimi (VMP boot_frame: sol Recent, sag Quick Start)
+    int ww = W > 820 ? W : 820;
+    MoveWindow(GetDlgItem(g_welcome, 0xA01), 40, 40, ww - 80, 44, TRUE);
+    MoveWindow(GetDlgItem(g_welcome, 0xA07), 40, 96, ww - 80, 2, TRUE);
+    MoveWindow(GetDlgItem(g_welcome, 0xA05), 40, 112, 200, 22, TRUE);
+    MoveWindow(GetDlgItem(g_welcome, 0xA08), 372, 112, 2, body_h - 120 > 320 ? body_h - 120 : 320, TRUE);
+    MoveWindow(GetDlgItem(g_welcome, 0xA06), 400, 112, 200, 22, TRUE);
+    MoveWindow(GetDlgItem(g_welcome, IDM_OPEN), 400, 142, 210, 36, TRUE);
+    MoveWindow(GetDlgItem(g_welcome, IDM_OPENPROJ), 400, 186, 210, 36, TRUE);
+    MoveWindow(GetDlgItem(g_welcome, IDM_EXAMPLES), 400, 230, 210, 36, TRUE);
+    MoveWindow(GetDlgItem(g_welcome, IDM_HELP), 400, 274, 210, 36, TRUE);
+    MoveWindow(GetDlgItem(g_welcome, 0xA04), 40, 142, 320, body_h - 160 > 290 ? body_h - 160 : 290, TRUE);
     ShowWindow(g_welcome, g_proj.open ? SW_HIDE : SW_SHOW);
+    depth--;   // 0.4.0: giris-koruma sayacini geri ver
 }
 
 // ---------------- acilir menuler ----------------
@@ -2392,11 +2987,26 @@ static void tree_context(HTREEITEM hi) {
     }
     if (id >= 200 && id < 300) {
         int idx = id - 200;
+        AppendMenuW(m, MF_STRING, IDM_RENAME, L"Rename\tF2");
         AppendMenuW(m, MF_STRING, IDM_CTX_DEL, L(LS_DELETE));
+        AppendMenuW(m, MF_STRING | (g_proj.lics[idx].blocked ? MF_CHECKED : 0), IDM_LIC_BLOCK, L(LS_BLOCKED));
+        AppendMenuW(m, MF_STRING, IDM_LIC_EDIT, L(LS_LIC_PROPS));
         cmd = track_menu(m);
         if (cmd == IDM_CTX_DEL) {
             g_proj.lics.erase(g_proj.lics.begin() + idx);
             g_prop_sel_kind = -1; g_proj.modified = true; update_all();
+        } else if (cmd == IDM_LIC_BLOCK) {
+            g_proj.lics[idx].blocked = !g_proj.lics[idx].blocked;
+            g_proj.modified = true; update_all();
+        } else if (cmd == IDM_LIC_EDIT) {
+            ProjLicense lc = g_proj.lics[idx];
+            dlg_addlicense(&lc);
+            update_all();
+        } else if (cmd == IDM_RENAME) {
+            std::wstring v;
+            if (dlg_input_text(L"Rename", L(LS_CUSTNAME), g_proj.lics[idx].name, &v)) {
+                g_proj.lics[idx].name = v; g_proj.modified = true; update_all();
+            }
         }
         return;
     }
@@ -2432,6 +3042,7 @@ static void prop_row_edit(int row) {
             case 9: lc.s_time = !lc.s_time; break;
             case 10: lc.s_maxbuild = !lc.s_maxbuild; break;
             case 11: lc.s_userdata = !lc.s_userdata; break;
+            case 12: lc.blocked = !lc.blocked; break;
             }
             g_proj.modified = true;
         }
@@ -2496,15 +3107,23 @@ static void prop_row_edit(int row) {
 static bool g_drag = false;
 static std::wstring g_cmd_open;
 
-// 0.3.0: dil degisince welcome panel etiketleri tazelenir
+// 0.4.0: dil degisince boot sayfasi etiketleri tazelenir
 static void update_welcome_texts() {
     if (!g_welcome) return;
     HWND wl = GetDlgItem(g_welcome, 0xA01);
     if (wl) SetWindowTextW(wl, (std::wstring(L(LS_WELCOME)) + L" " + XPROTECT_EDITION).c_str());
+    HWND lf = GetDlgItem(g_welcome, 0xA05);
+    if (lf) SetWindowTextW(lf, L(LS_RECENTFILES));
+    HWND lq = GetDlgItem(g_welcome, 0xA06);
+    if (lq) SetWindowTextW(lq, L(LS_QUICKSTART));
     HWND b1 = GetDlgItem(g_welcome, IDM_OPEN);
     if (b1) SetWindowTextW(b1, L(LS_OPEN_FILE));
     HWND b2 = GetDlgItem(g_welcome, IDM_OPENPROJ);
     if (b2) SetWindowTextW(b2, L(LS_OPEN_PROJ));
+    HWND b3 = GetDlgItem(g_welcome, IDM_EXAMPLES);
+    if (b3) SetWindowTextW(b3, L(LS_EXAMPLES));
+    HWND b4 = GetDlgItem(g_welcome, IDM_HELP);
+    if (b4) SetWindowTextW(b4, L(LS_CONTENTS));
 }
 
 static void welcome_fill() {
@@ -2570,7 +3189,10 @@ static LRESULT CALLBACK main_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (g_selftest && wp == 1) {
             KillTimer(h, 1);
-            printf("SELFTEST OK\n"); fflush(stdout);
+            // 0.4.0: acik dosya + proje fonksiyon sayisi (uctan uca kanit)
+            printf("SELFTEST OK funcs=%d proj=%d lics=%d\n",
+                   (int)g_pe.funcs.size(), (int)g_proj.funcs.size(), (int)g_proj.lics.size());
+            fflush(stdout);
             PostQuitMessage(0);
         }
         return 0;
@@ -2584,12 +3206,18 @@ static LRESULT CALLBACK main_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (id == 0xA04 && code == LBN_DBLCLK) {
             int sel = (int)SendMessageW(GetDlgItem(g_welcome, 0xA04), LB_GETCURSEL, 0, 0);
-            if (sel >= 0 && sel < (int)g_recent.size()) open_target(g_recent[sel]);
+            if (sel >= 0 && sel < (int)g_recent.size()) route_open_path(g_recent[sel]);
             return 0;
         }
         switch (id) {
-        case IDM_OPEN: { std::wstring p; if (pick_file(h, false, L"exe", &p)) open_target(p); return 0; }
-        case IDM_OPENPROJ: { std::wstring p; if (pick_file(h, false, L"xproj", &p)) open_project_file(p); return 0; }
+        case IDM_OPEN: { std::wstring p; if (pick_file(h, false, L"exe", &p, XPROTECT_OPEN_FILTER)) route_open_path(p); return 0; }
+        case IDM_OPENPROJ: { std::wstring p; if (pick_file(h, false, L"xproj", &p, XPROTECT_OPEN_FILTER)) route_open_path(p); return 0; }
+        case IDM_EXAMPLES: {   // 0.4.0: VMP Examples — exe dizininden baslar
+            std::wstring d = exe_dir();
+            std::wstring p;
+            if (pick_file(h, false, L"exe", &p, XPROTECT_OPEN_FILTER, d.c_str())) route_open_path(p);
+            return 0;
+        }
         case IDM_SAVE: save_project(false); return 0;
         case IDM_SAVEAS: save_project(true); return 0;
         case IDM_SAVELIC: {
@@ -2701,11 +3329,27 @@ static LRESULT CALLBACK main_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (nm->code == TVN_SELCHANGEDW) {
                 NMTREEVIEWW* tv = (NMTREEVIEWW*)lp;
                 long idl = (long)tv->itemNew.lParam;
-                if (idl == 0) { g_prop_sel_kind = 0; g_prop_sel_idx = -1; }
-                else if (idl >= 100 && idl < 200) { g_prop_sel_kind = 2; g_prop_sel_idx = idl - 100; }
-                else if (idl >= 200 && idl < 300) { g_prop_sel_kind = 4; g_prop_sel_idx = idl - 200; }
-                else { g_prop_sel_kind = -1; g_prop_sel_idx = -1; }
-                fill_prop();
+                if (idl == 0) {
+                    g_prop_sel_kind = 0; g_prop_sel_idx = -1;
+                    right_show(0); fill_prop();
+                } else if (idl == 1) {
+                    // 0.4.0: Functions klasoru → sag taraf dizin gorunumu (VMP directory_tree_)
+                    g_prop_sel_kind = -1; g_prop_sel_idx = -1;
+                    g_dir_kind = 1; dir_cols_setup(1); dir_fill(); right_show(1);
+                } else if (idl == 2) {
+                    // 0.4.0: Licenses klasoru → lisans dizin gorunumu
+                    g_prop_sel_kind = -1; g_prop_sel_idx = -1;
+                    g_dir_kind = 2; dir_cols_setup(2); dir_fill(); right_show(1);
+                } else if (idl >= 100 && idl < 200) {
+                    g_prop_sel_kind = 2; g_prop_sel_idx = idl - 100;
+                    right_show(0); fill_prop();
+                } else if (idl >= 200 && idl < 300) {
+                    g_prop_sel_kind = 4; g_prop_sel_idx = idl - 200;
+                    right_show(0); fill_prop();
+                } else {
+                    g_prop_sel_kind = -1; g_prop_sel_idx = -1;
+                    right_show(0); fill_prop();
+                }
                 // 0.3.0: menu yeniden KURULMAZ — Delete durumu WM_INITMENUPOPUP'da
             } else if (nm->code == NM_RCLICK) {
                 DWORD pos = GetMessagePos();
@@ -2746,6 +3390,27 @@ static LRESULT CALLBACK main_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        if (nm->hwndFrom == g_dir) {
+            // 0.4.0: dizin gorunumunde cift tiklama → ogeyi ozellik izgarasinda ac
+            if (nm->code == NM_DBLCLK) {
+                NMITEMACTIVATE* ia = (NMITEMACTIVATE*)lp;
+                if (ia->iItem >= 0) {
+                    LVITEMW it; memset(&it, 0, sizeof(it));
+                    it.mask = LVIF_PARAM; it.iItem = ia->iItem;
+                    if (ListView_GetItem(g_dir, &it)) {
+                        long idl = (long)it.lParam;
+                        if (idl >= 100 && idl < 200) {
+                            g_prop_sel_kind = 2; g_prop_sel_idx = idl - 100;
+                            right_show(0); fill_prop();
+                        } else if (idl >= 200 && idl < 300) {
+                            g_prop_sel_kind = 4; g_prop_sel_idx = idl - 200;
+                            right_show(0); fill_prop();
+                        }
+                    }
+                }
+            }
+            return 0;
+        }
         if (nm->hwndFrom == g_prop) {
             if (nm->code == NM_DBLCLK) {
                 NMITEMACTIVATE* ia = (NMITEMACTIVATE*)lp;
@@ -2777,6 +3442,15 @@ static LRESULT CALLBACK main_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         DestroyWindow(h);
         return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DROPFILES: {   // 0.4.0: dosya surukle-birak (VMP window-level drop)
+        HDROP hd = (HDROP)wp;
+        wchar_t fn[MAX_PATH];
+        if (DragQueryFileW(hd, 0, fn, MAX_PATH)) {
+            route_open_path(fn);
+        }
+        DragFinish(hd);
+        return 0;
+    }
     case WM_LBUTTONDOWN: {
         RECT sr; GetWindowRect(g_split, &sr);
         POINT sp; sp.x = GET_X_LPARAM(lp); sp.y = GET_Y_LPARAM(lp);
@@ -2855,7 +3529,19 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
                         while (p < fl.size()) {
                             size_t q = fl.find(',', p);
                             std::string one = fl.substr(p, q == std::string::npos ? std::string::npos : q - p);
-                            if (!one.empty()) opt.funcs.push_back(one);
+                            if (!one.empty()) {
+                                // 0.4.0 DUZELTME (0.3.0 CLI bug): "Isim:Tip" son eki
+                                // ayrilip ftypes'a yazilir — aksi halde eslesme 0 olur
+                                size_t c = one.find_last_of(':');
+                                std::string nm = (c == std::string::npos) ? one : one.substr(0, c);
+                                int tv = 0;
+                                if (c != std::string::npos) {
+                                    std::string t = one.substr(c + 1);
+                                    tv = (t == "M") ? 1 : (t == "U" ? 2 : 0);
+                                }
+                                opt.funcs.push_back(nm);
+                                if (c != std::string::npos) opt.ftypes[nm] = tv;
+                            }
                             if (q == std::string::npos) break;
                             p = q + 1;
                         }
@@ -2921,8 +3607,9 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
     wc2.lpszClassName = L"XPROTECT_WELCOME";
     RegisterClassW(&wc2);
     g_main = CreateWindowExW(0, L"XPROTECT_MAIN", XPROTECT_EDITION L" [unregistered]",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1150, 720, NULL, NULL, hI, NULL);
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1150, 720, NULL, NULL, hI, NULL);
     if (!g_main) return 1;
+    DragAcceptFiles(g_main, TRUE);   // 0.4.0: dosya surukle-birak
     g_status = CreateWindowExW(0, STATUSCLASSNAMEW, NULL, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
         0, 0, 0, 0, g_main, (HMENU)IDC_MAIN_STATUS, hI, NULL);
     SendMessageW(g_status, WM_SETFONT, (WPARAM)g_font, TRUE);
@@ -2949,6 +3636,10 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
     g_prop = CreateWindowExW(0, WC_LISTVIEWW, NULL,
         WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
         0, 0, 0, 0, g_main, (HMENU)IDC_MAIN_PROP, hI, NULL);
+    // 0.4.0: sag panel dizin gorunumu (Functions/Licenses klasoru secimi)
+    g_dir = CreateWindowExW(0, WC_LISTVIEWW, NULL,
+        WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
+        0, 0, 0, 0, g_main, (HMENU)IDC_MAIN_DIR, hI, NULL);
     g_log = CreateWindowExW(0, WC_LISTVIEWW, NULL,
         WS_CHILD | LVS_REPORT | LVS_SHOWSELALWAYS,
         0, 0, 0, 0, g_main, (HMENU)IDC_MAIN_LOG, hI, NULL);
@@ -2956,20 +3647,31 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
         0, 0, 0, 0, g_main, (HMENU)IDC_SPLIT_V, hI, NULL);
     g_welcome = CreateWindowExW(0, L"XPROTECT_WELCOME", NULL, WS_CHILD,
         0, 0, 0, 0, g_main, (HMENU)IDC_MAIN_WELCOME, hI, NULL);
+    // ---- 0.4.0: boot sayfasi — VMP boot_frame birebir yapi ----
+    // ust: "Welcome to XProtect Ultimate"; sol: Recent Files (10); sag: Quick Start
     HWND wl = mk_ctl(g_welcome, L"STATIC", (std::wstring(L(LS_WELCOME)) + L" " + XPROTECT_EDITION).c_str(),
-                     SS_CENTER, 0xA01, 40, 60, 400, 44);
+                     SS_CENTER, 0xA01, 40, 40, 700, 44);
     SendMessageW(wl, WM_SETFONT, (WPARAM)g_font_bold, TRUE);
-    mk_ctl(g_welcome, L"BUTTON", L(LS_OPEN_FILE), BS_PUSHBUTTON | WS_TABSTOP, IDM_OPEN, 40, 130, 160, 32);
-    mk_ctl(g_welcome, L"BUTTON", L(LS_OPEN_PROJ), BS_PUSHBUTTON | WS_TABSTOP, IDM_OPENPROJ, 210, 130, 160, 32);
-    HWND lb = mk_ctl(g_welcome, L"LISTBOX", L"", LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP,
-                     0xA04, 40, 180, 400, 120);
-    (void)lb;
-    HWND ctl_font_targets[4] = { g_tree, g_func, g_prop, g_log };
-    for (int i = 0; i < 4; i++) SendMessageW(ctl_font_targets[i], WM_SETFONT, (WPARAM)g_font, TRUE);
+    mk_ctl(g_welcome, L"STATIC", L"", SS_ETCHEDHORZ, 0xA07, 40, 96, 700, 2);
+    mk_ctl(g_welcome, L"STATIC", L(LS_RECENTFILES), 0, 0xA05, 40, 112, 200, 22);
+    SendDlgItemMessageW(g_welcome, 0xA05, WM_SETFONT, (WPARAM)g_font_bold, TRUE);
+    mk_ctl(g_welcome, L"STATIC", L"", SS_ETCHEDVERT, 0xA08, 372, 112, 2, 320);
+    mk_ctl(g_welcome, L"STATIC", L(LS_QUICKSTART), 0, 0xA06, 400, 112, 200, 22);
+    SendDlgItemMessageW(g_welcome, 0xA06, WM_SETFONT, (WPARAM)g_font_bold, TRUE);
+    mk_ctl(g_welcome, L"BUTTON", L(LS_OPEN_FILE), BS_PUSHBUTTON | WS_TABSTOP, IDM_OPEN, 400, 142, 210, 36);
+    mk_ctl(g_welcome, L"BUTTON", L(LS_OPEN_PROJ), BS_PUSHBUTTON | WS_TABSTOP, IDM_OPENPROJ, 400, 186, 210, 36);
+    mk_ctl(g_welcome, L"BUTTON", L(LS_EXAMPLES), BS_PUSHBUTTON | WS_TABSTOP, IDM_EXAMPLES, 400, 230, 210, 36);
+    mk_ctl(g_welcome, L"BUTTON", L(LS_CONTENTS), BS_PUSHBUTTON | WS_TABSTOP, IDM_HELP, 400, 274, 210, 36);
+    mk_ctl(g_welcome, L"LISTBOX", L"", LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP,
+           0xA04, 40, 142, 320, 290);
+    HWND ctl_font_targets[5] = { g_tree, g_func, g_prop, g_log, g_dir };
+    for (int i = 0; i < 5; i++) SendMessageW(ctl_font_targets[i], WM_SETFONT, (WPARAM)g_font, TRUE);
     ListView_SetImageList(g_func, g_il, LVSIL_SMALL);
     func_cols_setup();
     prop_cols_setup();
     log_cols_setup();
+    dir_cols_setup(1);
+    right_show(0);   // baslangicta ozellik izgarasi gorunur
     // 0.3.0: filtre seridi (Fonksiyonlar sekmesinin ust seridi — toolbar'a binmez)
     g_filter = mk_ctl(g_main, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, IDC_MAIN_FILTER, 0, 0, 200, 24);
     build_accel();
@@ -2982,7 +3684,7 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
     switch_tab(0);
     update_all();
     welcome_fill();
-    if (!g_cmd_open.empty()) open_target(g_cmd_open);
+    if (!g_cmd_open.empty()) route_open_path(g_cmd_open);   // 0.4.0: .xproj/.vmp/exe yonlendirme
     if (g_selftest) SetTimer(g_main, 1, 1200, NULL);
     // 0.3.0 DUZELTME (UI bug #6): wine/launcher nCmd=0 (SW_HIDE) iletiyorsa
     // pencere HIC haritalanmiyor (X'te Map State: IsUnMapped — gorunumsuz
