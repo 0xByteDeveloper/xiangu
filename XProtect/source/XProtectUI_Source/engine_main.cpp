@@ -18,6 +18,195 @@
 
 struct RStr { u32 rva, len; };
 
+// ============================================================
+// 0.5.0 — XProtect Runtime yardimcilari (xrt_core.c ile SOZLESME)
+// ============================================================
+// FNV-1a 32 — xrt_core.c fnv_a ile birebir (export isim hash'i)
+static u32 xfnv_a(const char* s, size_t n) {
+    u32 h = 2166136261u;
+    for (size_t i = 0; i < n; i++) { h ^= (u8)s[i]; h *= 16777619u; }
+    return h;
+}
+// FNV-1a 32 kucuk-harf — xrt fnv_w ile ayni sonucu veren ANSI surumu
+// (modul adi: PEB BaseDllName kucuk-harfe indirilir)
+static u32 xfnv_lower(const std::string& s) {
+    u32 h = 2166136261u;
+    for (char c : s) {
+        if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+        h ^= (u8)c; h *= 16777619u;
+    }
+    return h;
+}
+// CRC32 bitwise — xrt crc_up ile birebir
+static u32 xcrc_up(u32 c, u8 by) {
+    c ^= by;
+    for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+    return c;
+}
+
+// ---- import tablosu (IAT yuvalari) ----
+struct ImpSlot {
+    u32 iat_rva = 0;
+    u32 dll_hash = 0, name_hash = 0;
+    bool ordinal = false;
+    std::string dll, name;
+};
+static bool parse_imports(const PEFile& pe, std::vector<ImpSlot>& out) {
+    if (pe.e_lfanew == 0 || (size_t)pe.e_lfanew + 24 + 160 > pe.buf.size()) return false;
+    const u8* base = pe.buf.data();
+    u16 magic; memcpy(&magic, base + pe.e_lfanew + 24, 2);
+    u32 ddoff = (magic == 0x20B) ? 112 : 96;   // OptionalHeader'e gore
+    u32 imp_rva, imp_sz;
+    memcpy(&imp_rva, base + pe.e_lfanew + 24 + ddoff + 8, 4);
+    memcpy(&imp_sz,  base + pe.e_lfanew + 24 + ddoff + 12, 4);
+    if (!imp_rva || !imp_sz) return false;
+    u32 psz = pe.is64 ? 8 : 4;
+    bool okc;
+    u32 raw = pe.rva2raw(imp_rva, &okc);
+    if (!okc) return false;
+    for (u32 d = 0; d < 0x10000 && raw + d * 20 + 20 <= pe.buf.size(); d++) {
+        u32 doff = raw + d * 20;
+        u32 oft, name_rva, ft;
+        memcpy(&oft, base + doff, 4);
+        memcpy(&name_rva, base + doff + 12, 4);
+        memcpy(&ft, base + doff + 16, 4);
+        if (!oft && !name_rva && !ft) break;   // sonlandirici descriptor
+        std::string dll;
+        {
+            bool ok2; u32 nr = pe.rva2raw(name_rva, &ok2);
+            if (ok2 && nr + 2 < pe.buf.size()) {
+                const char* p = (const char*)base + nr; u32 q = 0;
+                while (q < 64 && nr + q < pe.buf.size() && p[q]) { dll.push_back(p[q]); q++; }
+            }
+        }
+        u32 thunk_rva = oft ? oft : ft;
+        if (!thunk_rva) continue;
+        bool okt; u32 traw = pe.rva2raw(thunk_rva, &okt);
+        if (!okt) continue;
+        for (u32 k = 0; k < 0x20000; k++) {
+            u64 th = 0;
+            u32 toff = traw + k * psz;
+            if (toff + psz > pe.buf.size()) break;
+            memcpy(&th, base + toff, psz);
+            if (!th) break;
+            ImpSlot s;
+            s.dll = dll;
+            s.iat_rva = ft + k * psz;
+            if (th & (pe.is64 ? 0x8000000000000000ull : 0x80000000u)) {
+                s.ordinal = true;
+            } else {
+                bool okn; u32 hn = pe.rva2raw((u32)th, &okn);
+                if (okn && hn + 2 < pe.buf.size()) {
+                    const char* p = (const char*)base + hn + 2;   // hint (2 bayt) atla
+                    u32 q = 0;
+                    while (q < 128 && hn + 2 + q < pe.buf.size() && p[q]) { s.name.push_back(p[q]); q++; }
+                }
+            }
+            s.dll_hash = xfnv_lower(dll);
+            s.name_hash = s.ordinal ? 0 : xfnv_a(s.name.c_str(), s.name.size());
+            out.push_back(s);
+        }
+    }
+    return !out.empty();
+}
+
+// ---- SDK isaret taramasi (xprotect_sdk.h sozlesmesi) ----
+// B8 <BEG_MAGIC> B8 <tip 1..3> [kullanici kodu] B8 <END_MAGIC>
+static const u32 SDK_BEG_MAGIC = 0x9C37E1B5u;
+static const u32 SDK_END_MAGIC = 0x3D7A2C8Eu;
+static void scan_sdk(const PEFile& pe, std::vector<ManFn>& out, std::vector<std::string>& log) {
+    const Section* t = pe.secbyname_c(".text");
+    if (!t) return;
+    bool ok; u32 raw = pe.rva2raw(t->va, &ok);
+    if (!ok) return;
+    u32 maxn = t->vsz;
+    if (raw + maxn > pe.buf.size()) maxn = (u32)(pe.buf.size() - raw);
+    if (maxn < 16) return;
+    const u8* p = pe.buf.data() + raw;
+    u32 i = 0;
+    int found = 0;
+    while (i + 10 <= maxn) {
+        if (p[i] == 0xB8) {
+            u32 mg; memcpy(&mg, p + i + 1, 4);
+            if (mg == SDK_BEG_MAGIC && p[i + 5] == 0xB8) {
+                u32 ty; memcpy(&ty, p + i + 6, 4);
+                if (ty >= 1 && ty <= 3) {
+                    // kapanis isaretini ara
+                    u32 j = i + 10;
+                    u32 end_at = 0;
+                    while (j + 5 <= maxn) {
+                        if (p[j] == 0xB8) {
+                            u32 me; memcpy(&me, p + j + 1, 4);
+                            if (me == SDK_END_MAGIC) { end_at = j; break; }
+                        }
+                        j++;
+                    }
+                    if (end_at) {
+                        u32 beg = t->va + i + 10;
+                        u32 endr = t->va + end_at;
+                        if (endr > beg + 7 && endr - beg <= 0x40000) {
+                            ManFn m;
+                            m.rva = beg; m.size = endr - beg; m.ty = (int)ty - 1;
+                            m.name = (ty == 1 ? "SDK_V" : (ty == 2 ? "SDK_M" : "SDK_U"));
+                            m.name += "_0x" + hex32(beg);
+                            out.push_back(m);
+                            found++;
+                            log.push_back("[SDK] isaret bulundu: " + m.name +
+                                          " boyut=0x" + hex32(m.size) +
+                                          " tip=" + (ty == 1 ? "V" : (ty == 2 ? "M" : "U")));
+                        }
+                        i = end_at + 5;
+                        continue;
+                    }
+                    // kapanis yok: bu magic yanlis pozitif olabilir — normal devam
+                }
+            }
+        }
+        i++;
+    }
+    (void)found;
+}
+
+// ---- IAT dolayli-cagri noktasi tarayicisi ----
+// Kesfedilmis fonksiyonlari disasm ile yurur; FF15/FF25 (XP_CALLI/XP_JMPI)
+// uzerinden IAT yuvasina isaret edenleri toplar. Cozulemeyen bayt gorulurse
+// O fonksiyon gvenli olmayan kabul edilir (yama yok — crash riski sifir).
+struct IatSite { u32 site_rva; u32 iat_rva; bool is_jmp; u32 insn_len; };
+static void scan_iat_sites(const PEFile& pe, const std::vector<FnInfo>& fns,
+                            const std::map<u32, ImpSlot>& by_rva,
+                            std::vector<IatSite>& out, u32& n_func_skip) {
+    for (auto& f : fns) {
+        if (f.size < 8) continue;
+        bool ok; u32 raw = pe.rva2raw(f.rva, &ok);
+        if (!ok || raw + f.size > pe.buf.size()) continue;
+        u32 pc = f.rva, end = f.rva + f.size;
+        bool aborted = false;
+        while (pc < end) {
+            Insn I = disasm(&pe.buf[raw + (pc - f.rva)], (int)(end - pc), pe.is64, pc,
+                            (u64)pe.imagebase, pe.sizeofimage);
+            if (I.op == XP_UNKNOWN || I.len == 0) { aborted = true; break; }
+            if (I.op == XP_CALLI || I.op == XP_JMPI) {
+                u32 slot_rva = 0;
+                if (I.mem.riprel)
+                    slot_rva = pc + I.len + (u32)(i32)(u32)I.mem.disp;
+                else if (I.mem.absimage) {
+                    u64 va = I.mem.absval;
+                    if (va >= pe.imagebase && va < (u64)pe.imagebase + pe.sizeofimage)
+                        slot_rva = (u32)(va - pe.imagebase);
+                }
+                if (slot_rva && by_rva.count(slot_rva)) {
+                    IatSite s;
+                    s.site_rva = pc; s.iat_rva = slot_rva;
+                    s.is_jmp = (I.op == XP_JMPI); s.insn_len = I.len;
+                    out.push_back(s);
+                }
+            }
+            pc += I.len;
+        }
+        if (aborted) n_func_skip++;
+    }
+}
+
 // Fonksiyonun GERCEK sonunu tara: ret + dolgu (int3/nop) -> dur.
 // COFF sembolu olmayan son fonksiyonlarda 0xCC firtinasi onlenir.
 static u32 est_func_size(const u8* p, u32 max, bool is64, u64 ib, u32 isz) {
@@ -213,12 +402,15 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     L(b);
 
     // --- 0.4.1: MANUEL fonksiyonlar (UI Manual Address Base/End) ---
+    // 0.5.0: opt.manual + SDK isaretleri birlesik liste (manual_all)
+    std::vector<ManFn> manual_all = opt.manual;
+    if (opt.sdk_scan) scan_sdk(pe, manual_all, log);
     // Kullanici Base/End ile kesin {rva, boyut, tip} verir. 0.4.0'a kadar bu
     // liste motora hic ulasmadigindan (yalnizca tarayici adaylari eslestirilirdi)
     // ULTRA (M+V) secilse bile fonksiyona DOKUNULMIYORDU (.vmp0 yalnizca VM blob
     // tasiyordu). Artik aday-aramadan bagimsiz derlenir; ayni RVA'daki tarayici
     // adayi kesin boyut lehine cikarilir.
-    for (auto& m : opt.manual) {
+    for (auto& m : manual_all) {
         Section* ms = NULL;
         for (auto& s : pe.secs)
             if ((s.chars & 0x20000000) && m.rva >= s.va && m.rva < s.va + s.vsz) { ms = &s; break; }
@@ -247,9 +439,10 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
 
     // --- secim ---
     std::set<u32> man_rva; std::map<u32,int> man_ty;   // 0.4.1: manuel fonksiyonlar
-    for (auto& m : opt.manual) { man_rva.insert(m.rva); man_ty[m.rva] = m.ty; }
+    for (auto& m : manual_all) { man_rva.insert(m.rva); man_ty[m.rva] = m.ty; }
     for (auto& f : fns) {
         if (man_rva.count(f.rva)) continue;   // manuel: kesin secili (asla ezilmez)
+        if (opt.sdk_only) continue;           // 0.5.0: yalniz SDK/manual bolgeleri koru
         if (opt.manual.empty() && (opt.all || opt.funcs.empty())) { f.selected = (f.size >= 24 && f.size <= 8192); continue; }
         for (auto& want : opt.funcs) {
             if (want == f.name) { f.selected = true; break; }
@@ -282,6 +475,104 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         L(b);
     }
 
+    // ============================================================
+    // 0.5.0 — ERKEN YERLESIM + IMPORT KORUMASI (derleme ONCESI)
+    // .vmp0 duzeni: [vm blob][xrt kod][cfg][IAT thunklar][bc][stublar]
+    //               [M kapi+govde][state][IAT cache]
+    // IAT yamalari derlemeden once yapilir: boylece mutasyon/lifter
+    // FF15 yerine E8 (dogrudan cagri) gorur -> API cagiran fonksiyonlar
+    // da sanallastirilabilir hale gelir (VMProtect davranisi).
+    // ============================================================
+    const u8* blob; int blob_len;
+    if (pe.is64) { blob = VM_BLOB64; blob_len = VM_BLOB64_LEN; }
+    else         { blob = VM_BLOBX86; blob_len = VM_BLOBX86_LEN; }
+
+    u32 newva_guess = 0;
+    {
+        u32 lastva = 0, lastvsz = 0;
+        for (auto& s : pe.secs) if (s.va + s.vsz > lastva + lastvsz) { lastva = s.va; lastvsz = s.vsz; }
+        newva_guess = (lastva + lastvsz + pe.secalign - 1) & ~(pe.secalign - 1);
+    }
+
+    bool rt_any  = opt.rt_selfcrc || opt.rt_textcrc || opt.rt_filecrc;
+    bool rt_blob = rt_any || opt.iat_prot;
+    u32 xrt_len      = pe.is64 ? (u32)XRT_BLOB64_LEN : (u32)XRT_BLOBX86_LEN;
+    u32 xrt_code_off = 0, cfg_off = 0;
+    u32 xrt_entry_rva = 0, xrt_resolve_rva = 0, cfg_rva = 0;
+    if (rt_blob) {
+        xrt_code_off = ((u32)blob_len + 15) & ~15u;
+        cfg_off      = (xrt_code_off + xrt_len + 15) & ~15u;
+        u32 xrt_rva  = newva_guess + xrt_code_off;
+        xrt_entry_rva   = xrt_rva + (pe.is64 ? XRT_BLOB64_ENTRY_OFF : XRT_BLOBX86_ENTRY_OFF);
+        xrt_resolve_rva = xrt_rva + (pe.is64 ? XRT_BLOB64_RESOLVE_OFF : XRT_BLOBX86_RESOLVE_OFF);
+        cfg_rva         = newva_guess + cfg_off;
+    }
+
+    // ---- IAT korumasi: tarama + thunk planlama + cagri noktasi yamasi ----
+    std::vector<ImpSlot> imps;
+    std::vector<u32> thunk_rvas;          // benzersiz IAT yuvasi basina bir thunk
+    std::vector<ImpSlot> thunk_slots;     // thunk ile eslesen slot
+    u32 thunk_area_end = rt_blob ? (cfg_off + 0x40) : (u32)blob_len;
+    u32 n_iat_sites = 0, n_iat_funcs_skip = 0;
+    if (opt.iat_prot) {
+        std::map<u32, ImpSlot> by_rva;
+        if (parse_imports(pe, imps))
+            for (auto& s : imps) by_rva[s.iat_rva] = s;
+        if (by_rva.empty()) {
+            L("[IAT] import tablosu bos/okunamadi — koruma atlandi");
+        } else {
+            std::vector<IatSite> sites;
+            scan_iat_sites(pe, fns, by_rva, sites, n_iat_funcs_skip);
+            // benzersiz yuvalar
+            std::map<u32, ImpSlot> uniq;
+            std::vector<u32> order;
+            for (auto& st : sites)
+                if (!uniq.count(st.iat_rva)) { uniq[st.iat_rva] = by_rva[st.iat_rva]; order.push_back(st.iat_rva); }
+            std::vector<u8> probe = pe.is64
+                ? build_thunk_x64(0, 0, 0, 0, 0, 0)
+                : build_thunk_x86(0, 0, 0, 0, 0, 0);
+            const u32 thlen = (u32)probe.size();
+            u32 tcur = (thunk_area_end + 15) & ~15u;
+            for (u32 r : order) {
+                thunk_rvas.push_back(newva_guess + tcur);
+                thunk_slots.push_back(uniq[r]);
+                tcur += thlen;
+            }
+            thunk_area_end = tcur;
+            // cagri noktalarini yamala: FF15->E8 (call), FF25->E9 (jmp) + nop dolgu
+            // (ayni site birden fazla fonksiyon araliginda olabilir — dedupe)
+            std::set<u32> done;
+            for (auto& st : sites) {
+                if (done.count(st.site_rva)) continue;
+                done.insert(st.site_rva);
+                bool okr; u32 sraw = pe.rva2raw(st.site_rva, &okr);
+                if (!okr || sraw + st.insn_len > pe.buf.size()) continue;
+                // thunk rvasini bul
+                u32 thr = 0;
+                for (size_t q = 0; q < thunk_slots.size(); q++)
+                    if (thunk_slots[q].iat_rva == st.iat_rva) { thr = thunk_rvas[q]; break; }
+                if (!thr) continue;
+                i32 rel = (i32)(thr - (st.site_rva + 5));
+                u8 jb[16];
+                jb[0] = st.is_jmp ? 0xE9 : 0xE8;   // jmp / call thunk
+                jb[1] = (u8)(u32)rel; jb[2] = (u8)((u32)rel >> 8);
+                jb[3] = (u8)((u32)rel >> 16); jb[4] = (u8)((u32)rel >> 24);
+                for (u32 q = 5; q < st.insn_len; q++) jb[q] = 0x90;  // nop dolgu
+                memcpy(&pe.buf[sraw], jb, st.insn_len);
+                n_iat_sites++;
+            }
+            snprintf(b, sizeof b, "[IAT] %zu import (benzersiz yuva=%zu) | %u cagri noktasi thunk'a cevrildi | %u fonksiyon atlandi (cozumlenemeyen bayt)",
+                     imps.size(), order.size(), n_iat_sites, n_iat_funcs_skip);
+            L(b);
+            for (size_t q = 0; q < thunk_slots.size() && q < 12; q++)
+                L("  [IAT] thunk[" + std::to_string(q) + "] " + thunk_slots[q].dll + "!" +
+                  (thunk_slots[q].ordinal ? ("#" + std::to_string(thunk_slots[q].name_hash)) : thunk_slots[q].name) +
+                  " IAT=0x" + hex32(thunk_slots[q].iat_rva) + " RVA=0x" + hex32(thunk_rvas[q]));
+            if (thunk_slots.size() > 12)
+                L("  [IAT] ... +" + std::to_string(thunk_slots.size() - 12) + " thunk daha");
+        }
+    }
+
     // --- lift / mutasyon ---
     struct Compiled {
         FnInfo* f; VFn v; std::vector<u8> plain, enc;
@@ -290,6 +581,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         int  ty = 0;                          // 0=V 1=M 2=U
         MutFn mut;                           // M: olcum gecisi; U: kaynak mutasyon
         u32  mut_rva = 0;                    // M: .vmp0 icindeki yerlesim
+        u32  mut_gate_rva = 0;               // 0.5.0: M onundeki runtime kapisI
         std::vector<u32> state_sites;         // plain icinde state rva u32 pozisyonlari
         std::vector<u32> state_strva;         // sirasiyla string rva'lari
     };
@@ -300,13 +592,14 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         bool okraw; u32 raw = pe.rva2raw(f.rva, &okraw);
         if (!okraw || raw + f.size > pe.buf.size()) { f.note = "ham veri yok"; continue; }
         int ty = ftype_of(f);
+        bool is_region = man_rva.count(f.rva) != 0;   // 0.5.0: SDK/manual bolge
         if (ty == 1) {
             // --- MUTASYON (native): makine kodu kalir, yeniden uretilir ---
             MutFn m = mutate_function(&pe.buf[raw], f.rva, f.size, pe.is64,
                                       pe.imagebase, pe.sizeofimage,
                                       true /* 0.4.1: x86 dis-cagri rel32 fixup zaten destekli */,
                                       opt.mut_strength,
-                                      f.rva ^ 0x9E3779B9u, 0 /*olcum gecisi*/);
+                                      f.rva ^ 0x9E3779B9u, 0 /*olcum gecisi*/, is_region);
             if (!m.ok) { f.note = "RED: mutasyon " + m.why; continue; }
             Compiled c; c.f = &f; c.ty = 1; c.mut = m;
             comps.push_back(c);
@@ -324,14 +617,15 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                                       pe.imagebase, pe.sizeofimage,
                                       true /* 0.4.1: x86 dis-cagri rel32 fixup zaten destekli */,
                                       opt.mut_strength,
-                                      f.rva ^ 0x9E3779B9u, f.rva /*base=fonksiyon RVA*/);
+                                      f.rva ^ 0x9E3779B9u, f.rva /*base=fonksiyon RVA*/,
+                                      false /* U kaynak mutasyonu: bolge kuyrugu YOK — lifter yapay OP_RET ile cikar */);
             if (m.ok) {
                 mbuf = m.code; lcode = mbuf.data(); lsize = (u32)mbuf.size();
                 mkeep = m;
                 nU++;
             } else {
                 // mutasyon mumkun degil: 0.2.0 U davranisina dus (VM junk)
-                L("[ULTRA] on-mutasyon RED: " + m.why + " -> saf V ye dusuluyor");
+                L("[ULTRA] on-mutasyon RED: " + m.why + " -> saf V ye dusuluyor" + (is_region ? " (bolge)" : ""));
                 ty = 0; nUf++;
             }
             jl = 2;
@@ -341,12 +635,19 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
             jl = opt.ftypes.empty() ? (opt.level >= 2 ? 2 : 0) : 0;
             nV++;
         }
+        // 0.5.0: x86 VM'de dogal cagri (OP_NCALL) hala kirik (vm_natcall86
+        // Unicorn testinde yigin bozumu) — x86'ta cagri iceren fonksiyonlar
+        // V/U reddedilir (duru RED, sessiz yanlis SONUC yerine). M modu
+        // native calistigi icin cagrilar sorunsuz. x64'te natcall CALISIYOR
+        // (wine test_rt64 kaniti). 0.5.1'de x86 natcall duzeltmesi planli.
+        bool lift_allow_call = pe.is64;
         VFn v = lift_function(lcode, f.rva, lsize, pe.is64,
                               pe.imagebase, pe.sizeofimage,
-                              true /* 0.4.1: x86 natcall eklendi — call iceren fonksiyonlar da sanallastirilir */,
+                              lift_allow_call,
                               rdata_rva, rdata_sz,
                               jl, f.rva ^ 0x9E3779B9u,
-                              mbuf.empty() /* 0.4.1: mutant girdide dolgu akisi kesmez */);
+                              mbuf.empty() /* 0.4.1: mutant girdide dolgu akisi kesmez */,
+                              is_region);
         if (!v.ok) { f.note = "RED: " + v.why; continue; }
         Compiled c; c.f = &f; c.ty = ty; c.v = v;
         if (ty == 2) c.mut = mkeep;
@@ -361,16 +662,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     }
 
     // --- plain olustur: STRDEC + ANTIDBG + govde ---
-    const u8* blob; int blob_len;
-    if (pe.is64) { blob = VM_BLOB64; blob_len = VM_BLOB64_LEN; }
-    else         { blob = VM_BLOBX86; blob_len = VM_BLOBX86_LEN; }
-
-    u32 newva_guess = 0;
-    {
-        u32 lastva = 0, lastvsz = 0;
-        for (auto& s : pe.secs) if (s.va + s.vsz > lastva + lastvsz) { lastva = s.va; lastvsz = s.vsz; }
-        newva_guess = (lastva + lastvsz + pe.secalign - 1) & ~(pe.secalign - 1);
-    }
+    // (blob/newva_guess 0.5.0'da derleme ONCESINE tasindi — IAT thunk plani)
 
     for (auto& c : comps) {
         if (c.ty == 1) continue;              // M: bayt-kod yok
@@ -398,7 +690,9 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     }
 
     // --- section icinde RVAlari planla ---
-    u32 cur = (u32)blob_len;
+    // 0.5.0: vm blob + (xrt + cfg + thunklar erken planlandi) sonrasindan devam
+    u32 cur = thunk_area_end;
+    u32 xrt_after = cur;   // xrt kodu + cfg zaten secimg'in basina yazilacak
     for (auto& c : comps) {
         if (c.ty == 1) continue;              // M: bc yerlesimi yok
         cur = (cur + 7) & ~7u;
@@ -411,20 +705,39 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         cur = (cur + 15) & ~15u;
         c.stub_rva = newva_guess + cur;
         std::vector<u8> st;
-        if (pe.is64) st = build_stub_x64(c.stub_rva, vent_guess, c.key, c.bc_rva, (u32)c.plain.size());
-        else         st = build_stub_x86(c.stub_rva, vent_guess, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm);
+        bool isreg = man_rva.count(c.f->rva) != 0;
+        u32 cont = isreg ? (c.f->rva + c.f->size) : 0;
+        if (pe.is64) st = build_stub_x64(c.stub_rva, vent_guess, c.key, c.bc_rva, (u32)c.plain.size(),
+                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont);
+        else         st = build_stub_x86(c.stub_rva, vent_guess, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm,
+                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont);
         c.tramp = st.size() > c.f->size;
         cur += (u32)st.size();
     }
-    // --- mutasyon bloklari (tip M): olcum gecisi boyutu kadar yer ---
+    // --- mutasyon bloklari (tip M): runtime kapisI + olcum gecisi boyutu ---
     for (auto& c : comps) if (c.ty == 1) {
         cur = (cur + 15) & ~15u;
-        c.mut_rva = newva_guess + cur;
-        cur += (u32)c.mut.code.size();
+        u32 gate_rva = newva_guess + cur;
+        u32 glen = 0;
+        if (rt_any) {
+            std::vector<u8> g = pe.is64
+                ? build_mgate_x64(gate_rva, xrt_entry_rva, cfg_rva, 0)
+                : build_mgate_x86(gate_rva, xrt_entry_rva, cfg_rva, 0);
+            glen = (u32)g.size();
+        }
+        c.mut_gate_rva = gate_rva;
+        c.mut_rva = gate_rva + glen;          // govde kapiya bitisik
+        cur += glen + (u32)c.mut.code.size();
     }
     u32 state_off = cur;
     u32 nstate = 0;
     for (auto& c : comps) nstate += (u32)c.state_sites.size();
+    // 0.5.0: IAT cache hucreleri (thunk basina isaretci genisligi)
+    u32 psz = pe.is64 ? 8 : 4;
+    u32 cache_off = state_off + nstate;
+    std::vector<u32> cache_rvas;
+    for (size_t q = 0; q < thunk_slots.size(); q++)
+        cache_rvas.push_back(newva_guess + cache_off + (u32)q * psz);
 
     // --- state RVA'larini plain'e yaz ---
     u32 state_idx = 0;
@@ -454,8 +767,15 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     // --- section goruntusunu kur ---
     std::vector<u8> secimg;
     secimg.insert(secimg.end(), blob, blob + blob_len);
+    // 0.5.0: xrt blob (kod) — self-CRC bu bolgeyi kapsar (cfg haric)
+    if (rt_blob) {
+        secimg.resize(xrt_code_off, 0);
+        const u8* xblob = pe.is64 ? XRT_BLOB64 : XRT_BLOBX86;
+        secimg.insert(secimg.end(), xblob, xblob + xrt_len);
+        secimg.resize(cfg_off + 0x40, 0);   // cfg (degerler son asamada yazilir)
+    }
     while (secimg.size() < (size_t)state_off - (nstate ? 0 : 0)) secimg.push_back(0);
-    secimg.resize(state_off + nstate, 0);
+    secimg.resize(cache_off + (u32)thunk_slots.size() * psz, 0);
     for (auto& c : comps) {
         if (c.ty == 1) continue;              // M: bc/stub kopyasi yok
         u32 o = c.bc_rva - newva_guess;
@@ -463,9 +783,29 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         u32 so = c.stub_rva - newva_guess;
         u32 vent = vent_guess;
         std::vector<u8> st;
-        if (pe.is64) st = build_stub_x64(c.stub_rva, vent, c.key, c.bc_rva, (u32)c.plain.size());
-        else         st = build_stub_x86(c.stub_rva, vent, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm);
+        bool isreg2 = man_rva.count(c.f->rva) != 0;
+        u32 cont2 = isreg2 ? (c.f->rva + c.f->size) : 0;
+        if (pe.is64) st = build_stub_x64(c.stub_rva, vent, c.key, c.bc_rva, (u32)c.plain.size(),
+                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont2);
+        else         st = build_stub_x86(c.stub_rva, vent, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm,
+                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont2);
         memcpy(&secimg[so], st.data(), st.size());
+    }
+    // 0.5.0: IAT thunklari (gecikmeli import cozumleyicileri)
+    for (size_t q = 0; q < thunk_slots.size(); q++) {
+        std::vector<u8> th = pe.is64
+            ? build_thunk_x64(thunk_rvas[q], xrt_resolve_rva, cache_rvas[q],
+                              thunk_slots[q].dll_hash, thunk_slots[q].name_hash, thunk_slots[q].iat_rva)
+            : build_thunk_x86(thunk_rvas[q], xrt_resolve_rva, cache_rvas[q],
+                              thunk_slots[q].dll_hash, thunk_slots[q].name_hash, thunk_slots[q].iat_rva);
+        std::vector<u8> probe2 = pe.is64 ? build_thunk_x64(0, 0, 0, 0, 0, 0) : build_thunk_x86(0, 0, 0, 0, 0, 0);
+        u32 expected = (u32)probe2.size();
+        if (th.size() != expected) {
+            snprintf(b, sizeof b, "[HATA] IAT thunk boyut %zu != %u (yerlesim bozulur)", th.size(), expected);
+            L(b); return 1;
+        }
+        u32 o = thunk_rvas[q] - newva_guess;
+        memcpy(&secimg[o], th.data(), th.size());
     }
     // mutasyon bloklari: GERCEK base_rva ile yeniden uret (deterministik LCG
     // ayni seed'i verir; boyutlar bayt bayt eslesmeli)
@@ -483,12 +823,21 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         MutFn m2 = mutate_function(&pe.buf[raw2], c.f->rva, c.f->size, pe.is64,
                                    pe.imagebase, pe.sizeofimage, true,
                                    opt.mut_strength, c.f->rva ^ 0x9E3779B9u,
-                                   c.mut_rva /* GERCEK base */);
+                                   c.mut_rva /* GERCEK base */,
+                                   man_rva.count(c.f->rva) != 0 /* 0.5.0: bolge kipi */);
         if (!m2.ok || m2.code.size() != c.mut.code.size()) {
             { FILE* f1 = fopen("/tmp/mutpass1.bin","wb"); if(f1){fwrite(c.mut.code.data(),1,c.mut.code.size(),f1);fclose(f1);} FILE* f2 = fopen("/tmp/mutpass2.bin","wb"); if(f2){fwrite(m2.code.data(),1,m2.code.size(),f2);fclose(f2);} L("[HATA] mutasyon tutarsiz: " + c.f->name + " neden=" + m2.why + " " + std::to_string(m2.code.size()) + " vs " + std::to_string(c.mut.code.size())); return 1; }
         }
         u32 o = c.mut_rva - newva_guess;
         memcpy(&secimg[o], m2.code.data(), m2.code.size());
+        // 0.5.0: runtime kapisini govde onune yaz (pushad/pushaq korumali)
+        if (rt_any) {
+            std::vector<u8> g = pe.is64
+                ? build_mgate_x64(c.mut_gate_rva, xrt_entry_rva, cfg_rva, c.mut_rva)
+                : build_mgate_x86(c.mut_gate_rva, xrt_entry_rva, cfg_rva, c.mut_rva);
+            u32 go = c.mut_gate_rva - newva_guess;
+            memcpy(&secimg[go], g.data(), g.size());
+        }
     }
     // state baytlari 0 (VM ilk calismada 1 yapar)
 
@@ -506,9 +855,10 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         bool okraw; u32 raw = pe.rva2raw(f.rva, &okraw);
         if (!okraw) { f.note += " | yama raw yok"; continue; }
         if (c.ty == 1) {
-            // MUTASYON: giris kapisi E9 -> .vmp0'taki mutasyonlu govde.
-            // Govde native x86/x64 kodu olarak calisir (VM YOK, tam hiz).
-            i32 rel = (i32)(c.mut_rva - (f.rva + 5));
+            // MUTASYON: giris kapisi E9 -> .vmp0'taki (runtime kapisi +)
+            // mutasyonlu govde. Govde native x86/x64 kodu olarak calisir
+            // (VM YOK, tam hiz); rt aciksa once bir-kez butunluk kontrolu.
+            i32 rel = (i32)((rt_any ? c.mut_gate_rva : c.mut_rva) - (f.rva + 5));
             u8 j[5] = { 0xE9, (u8)(u32)rel, (u8)((u32)rel >> 8), (u8)((u32)rel >> 16), (u8)((u32)rel >> 24) };
             memcpy(&pe.buf[raw], j, 5);
             for (u32 i = 5; i < f.size; i++) pe.buf[raw + i] = 0xCC;
@@ -532,8 +882,12 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
             // YERINDE stub: stub_rva = fonksiyonun kendi RVA'si olacak sekilde uret
             u32 vent = vmp_rva + (pe.is64 ? VM_BLOB64_ENTRY_OFF : VM_BLOBX86_ENTRY_OFF);
             std::vector<u8> st;
-            if (pe.is64) st = build_stub_x64(f.rva, vent, c.key, c.bc_rva, (u32)c.plain.size());
-            else         st = build_stub_x86(f.rva, vent, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm);
+            bool isreg3 = man_rva.count(f.rva) != 0;
+            u32 cont3 = isreg3 ? (f.rva + f.size) : 0;
+            if (pe.is64) st = build_stub_x64(f.rva, vent, c.key, c.bc_rva, (u32)c.plain.size(),
+                                             rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont3);
+            else         st = build_stub_x86(f.rva, vent, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm,
+                                             rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont3);
             memcpy(&pe.buf[raw], st.data(), st.size());
             for (u32 i = (u32)st.size(); i < f.size; i++) pe.buf[raw + i] = 0xCC;
         }
@@ -596,6 +950,132 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         }
     }
 
+    // ============================================================
+    // 0.5.0 — XRT runtime cfg kurulumu + butunluk degerleri
+    // Sira onemli: .text yamalari + reloc filtresi + bolum bayraklari
+    // + checksum TAMAMLANDI; cfg degerleri bu son duruma gore hesaplanir.
+    // cfg .vmp0 icinde (dosya CRC'sinin atladigi bolge) -> yazmasi CRC'yi
+    // gecersiz kilmaz.
+    // ============================================================
+    if (rt_any) {
+        // reloc dizini (xrt crc_text ile ayni atlama icin)
+        u32 reloc_rva = 0, reloc_sz = 0;
+        {
+            u32 ddoff = pe.is64 ? 112 : 96;
+            memcpy(&reloc_rva, &pe.buf[pe.e_lfanew + 24 + ddoff + 40], 4);
+            memcpy(&reloc_sz,  &pe.buf[pe.e_lfanew + 24 + ddoff + 44], 4);
+        }
+        // --- self CRC: vm blob + xrt kodu (cfg haric) ---
+        u32 self_len = xrt_code_off + xrt_len;
+        u32 sc = 0xFFFFFFFFu;
+        for (u32 i = 0; i < self_len && i < secimg.size(); i++) sc = xcrc_up(sc, secimg[i]);
+        sc = ~sc;
+        // --- text CRC: sayfa sayfa, reloc yamalarini atlayarak ---
+        u32 tc = 0;
+        if (text && text->vsz) {
+            bool okt; u32 traw = pe.rva2raw(text->va, &okt);
+            const u8* rraw = 0;
+            if (reloc_rva && reloc_sz) {
+                bool okr; u32 rr = pe.rva2raw(reloc_rva, &okr);
+                if (okr && rr + reloc_sz <= pe.buf.size()) rraw = &pe.buf[rr];
+            }
+            u32 c = 0xFFFFFFFFu;
+            u8 flag[4096 + 16];
+            for (u32 pg = 0; pg < text->vsz; pg += 0x1000) {
+                u32 pgrva = text->va + pg;
+                u32 plen = (text->vsz - pg < 0x1000) ? (text->vsz - pg) : 0x1000;
+                for (u32 i = 0; i < plen + 8 && i < sizeof flag; i++) flag[i] = 0;
+                if (rraw) {
+                    u32 ro = 0;
+                    while (ro + 8 <= reloc_sz) {
+                        u32 page_rva; memcpy(&page_rva, rraw + ro, 4);
+                        u32 bsz;     memcpy(&bsz, rraw + ro + 4, 4);
+                        if (bsz < 8 || ro + bsz > reloc_sz) break;
+                        if (page_rva == pgrva) {
+                            for (u32 eo = 8; eo + 2 <= bsz; eo += 2) {
+                                u16 e; memcpy(&e, rraw + ro + eo, 2);
+                                u32 typ = (u32)(e >> 12);
+                                u32 off = (u32)(e & 0xFFF);
+                                u32 len = (typ == 3) ? 4 : (typ == 10 ? 8 : 0);
+                                if (len && off < plen + 8)
+                                    for (u32 i = 0; i < len && off + i < sizeof flag; i++)
+                                        flag[off + i] = 1;
+                            }
+                        }
+                        ro += bsz;
+                    }
+                }
+                for (u32 i = 0; i < plen; i++) {
+                    if (flag[i]) continue;
+                    // 0.5.0 DUZELTME: ham-boyut kelepcesi — vsz > rawsz oldugunda
+                    // (kucuk x86 exeler) yuklenen goruntude sonrası SIFIRDIR;
+                    // eski kod pes bolumlerin ham baytlarini okuyordu -> CRC
+                    // calisma zamaniyla uyusmazdi.
+                    u8 by = 0;
+                    u32 off = pg + i;
+                    if (okt && off < text->rawsz && traw + off < pe.buf.size())
+                        by = pe.buf[traw + off];
+                    c = xcrc_up(c, by);
+                }
+            }
+            tc = ~c;
+        }
+        // --- file CRC: tum dosya (CheckSum alani + .vmp0 ham araligi atla) ---
+        u32 cksum_off = pe.e_lfanew + 24 + 64;   // OptionalHeader.CheckSum
+        u32 vraw0 = 0, vraw1 = 0;
+        {
+            const Section* vs = pe.secbyname_c(".vmp0");
+            if (vs) { vraw0 = vs->rawoff; vraw1 = vs->rawoff + vs->rawsz; }
+        }
+        u32 fc = 0xFFFFFFFFu;
+        for (u32 i = 0; i < pe.buf.size(); i++) {
+            if (i >= cksum_off && i < cksum_off + 4) continue;
+            if (i >= vraw0 && i < vraw1) continue;
+            fc = xcrc_up(fc, pe.buf[i]);
+        }
+        fc = ~fc;
+        // --- cfg'yi pe.buf icine yaz ---
+        bool okc2; u32 cfg_raw = pe.rva2raw(cfg_rva, &okc2);
+        if (!okc2 || cfg_raw + 0x40 > pe.buf.size()) {
+            L("[HATA] XRT cfg yerlesimi raw yok"); return 1;
+        }
+        u8 cfg[0x40]; memset(cfg, 0, sizeof cfg);
+        u32 fl = 0;
+        if (opt.rt_selfcrc) fl |= 0x01;
+        if (opt.rt_textcrc) fl |= 0x02;
+        if (opt.rt_filecrc) fl |= 0x04;
+        if (opt.rt_msg)     fl |= 0x08;
+        if (opt.rt_exit)    fl |= 0x10;
+        auto cwr = [&](u32 off, u32 v) { memcpy(cfg + off, &v, 4); };
+        cwr(0x00, 0x31545258u);                 // 'XRT1'
+        cwr(0x04, fl);
+        cwr(0x08, 0);                           // state: 0 (ilk cagrida kontrol)
+        cwr(0x0C, vmp_rva);                     // self_rva (vm blob basi)
+        cwr(0x10, self_len);
+        cwr(0x14, sc);
+        cwr(0x18, text ? text->va : 0);
+        cwr(0x1C, text ? text->vsz : 0);
+        cwr(0x20, tc);
+        cwr(0x24, reloc_rva);
+        cwr(0x28, reloc_sz);
+        cwr(0x2C, fc);
+        cwr(0x30, vraw0);
+        cwr(0x34, vraw1);
+        cwr(0x38, cksum_off);
+        cwr(0x3C, cfg_rva);
+        memcpy(&pe.buf[cfg_raw], cfg, 0x40);
+        snprintf(b, sizeof b,
+                 "[XRT] runtime katmani: flags=0x%X | self=0x%08X (%uB) | text=0x%08X (0x%X, reloc-atla %uB) | file=0x%08X (atla: cksum+%u, .vmp0 %u..%u)",
+                 fl, sc, self_len, tc, text ? text->vsz : 0, reloc_sz, fc,
+                 cksum_off, vraw0, vraw1);
+        L(b);
+        L(std::string("[XRT] xrt_entry=0x") + hex32(xrt_entry_rva) + " cfg=0x" + hex32(cfg_rva) +
+          " | her korumali giris BIR KEZ kontrol eder (state kilidi); hata: " +
+          (opt.rt_msg ? "MessageBoxA + " : "") + (opt.rt_exit ? "ExitProcess" : "ud2 zehir"));
+    } else if (opt.iat_prot) {
+        L("[XRT] yalniz IAT korumasi: xrt_resolve gecikmeli cozumleyici yerlesti (cfg kullanilmaz)");
+    }
+
     pe.fix_checksum();
     if (!pe.save(out)) { L("[HATA] kaydedilemedi: " + out); return 1; }
     snprintf(b, sizeof b, "[KAYIT] %s (%zu bayt)", out.c_str(), pe.buf.size());
@@ -606,6 +1086,10 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
       + " | strenc=" + (opt.strenc ? "ACIK" : "kapali")
       + " | memprot=" + (opt.memprot ? "ACIK" : "kapali")
       + " | vmenc=" + (opt.vmenc ? "ACIK" : "KAPALI")
-      + " | mutasyon-gucu=" + std::to_string(opt.mut_strength));
+      + " | mutasyon-gucu=" + std::to_string(opt.mut_strength)
+      + " | runtime=" + (rt_any ? std::string("ACIK(self=") + (opt.rt_selfcrc ? "1" : "0")
+          + ",text=" + (opt.rt_textcrc ? "1" : "0") + ",file=" + (opt.rt_filecrc ? "1" : "0") + ")" : "kapali")
+      + " | iat=" + (opt.iat_prot ? "ACIK(" + std::to_string(thunk_slots.size()) + " thunk)" : "kapali")
+      + " | sdk=" + (opt.sdk_scan ? "ACIK" : "kapali"));
     return 0;
 }

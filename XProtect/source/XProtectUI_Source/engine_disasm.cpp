@@ -382,7 +382,15 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
             I.sz = sz;
             if (m.present) { I.op = XP_INCDEC_M; I.ud = (sub == 0) ? 0 : 1; I.mem = m; }
             else { I.op = XP_INCDEC_R; I.ud = (sub == 0) ? 0 : 1; I.r1 = m.base; }
-        } else { I.text = "grp5 call/jmp/push ind"; return I; }
+        } else if (sub == 2 && m.present) {
+            // 0.5.0: call [mem] (FF15) — dolayli. IAT korumasi tarayicisi
+            // hedefi cozer; lifter RED verir (bilinmeyen hedef sanallastirilamaz).
+            I.op = XP_CALLI; I.sz = sz; I.mem = m;
+            I.text = "call [mem]";
+        } else if (sub == 4 && m.present) {
+            I.op = XP_JMPI; I.sz = sz; I.mem = m;
+            I.text = "jmp [mem]";
+        } else { I.text = "grp5 push/far"; return I; }
         break;
     }
     case 0xE8: { I.op = XP_CALL; I.imm = read_imm(4); I.immsz = 4;

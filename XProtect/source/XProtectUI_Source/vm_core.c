@@ -12,12 +12,12 @@
 // ============================================================
 #include "vm_opcodes.h"
 #ifdef VM_TRACE
-#include <stdio.h>
-#include <stdlib.h>
-static int vm_trace_on = -1;   /* ilk VM_TRACE env okumasiyla 1 olur */
-#define VM_TRACE_CHECK() do { if (vm_trace_on < 0) vm_trace_on = getenv("VM_TRACE") ? 1 : 0; } while (0)
+/* 0.5.0 hata ayiklama izi — tputn typedef'lerden sonra tanimlanir */
+static int vm_trace_on = 1;
+#define VM_TRACE_CHECK()
 #else
 #define VM_TRACE_CHECK()
+#define tputn(p, a, b)
 #endif
 
 typedef unsigned char  u8;
@@ -25,6 +25,21 @@ typedef unsigned short u16;
 typedef unsigned int   u32;
 typedef unsigned long long u64;
 typedef long long i64;
+
+#ifdef VM_TRACE
+static void tputn(const char* pre, u64 v, u64 v2) {
+    char b[128]; int n = 0; int k;
+    while (*pre && n < 40) b[n++] = *pre++;
+    b[n++] = ' ';
+    b[n++] = '0'; b[n++] = 'x';
+    for (k = 15; k >= 0; k--) { char c = (char)((v >> (4 * k)) & 0xF); b[n++] = (char)(c < 10 ? '0' + c : 'a' + c - 10); }
+    b[n++] = ' ';
+    b[n++] = '0'; b[n++] = 'x';
+    for (k = 15; k >= 0; k--) { char c = (char)((v2 >> (4 * k)) & 0xF); b[n++] = (char)(c < 10 ? '0' + c : 'a' + c - 10); }
+    b[n++] = '\n';
+    __asm__ volatile("syscall" : : "a"((u64)1), "D"((u64)2), "S"((u64)(unsigned long)b), "d"((u64)n) : "rcx", "r11", "memory");
+}
+#endif
 
 typedef struct {
     u64 bc;         // +0x00 bayt-kod gostergesi
@@ -204,6 +219,29 @@ static u64 do_shift(int shi, u64 a, int n, int sz, u64* fl) {
     return r;
 }
 
+#if defined(VM_IS_X86)
+// 0.5.0: x86 dogal cagri — cdecl VE stdcall evrensel:
+// VM'nin izledigi rsp'de (gercek bellekte) duran arglarla cagri yapilir;
+// SONRACIKI esp geri okunur -> stdcall callee arglari temizlediyse VM rsp
+// senkronize edilir (cdecl'de degismez, derleyicinin add esp'i kaldirir).
+static void vm_natcall86(u32 t, u64 vm_rsp, u64* out_ret, u64* out_rsp) {
+    u32 ret = 0, esp_after = 0;
+    register u32 vt   __asm__("esi") = t;        /* callee-saved: cagri bozmaz */
+    register u32 vrsp __asm__("edi") = (u32)vm_rsp;
+    __asm__ volatile(
+        "movl %%esp, %%ebx     \n\t"   /* gercek esp'i ebx'te sakla */
+        "movl %[vr], %%esp     \n\t"   /* esp = VM yigini (arglar burada) */
+        "call  *%[vt]          \n\t"
+        "movl %%esp, %[ea]     \n\t"   /* callee sonrasi esp (stdcall farki) */
+        "movl %%ebx, %%esp     \n\t"
+        : "=a"(ret), [ea] "=m"(esp_after)
+        : [vt] "r"(vt), [vr] "r"(vrsp)
+        : "memory", "cc", "ebx", "ecx", "edx");
+    *out_ret = (u64)ret;
+    *out_rsp = (u64)esp_after;
+}
+#endif
+
 #ifdef VM_IS_X64
 // Native cagri. VM_WINDOWS: Win64 ABI (rcx,rdx,r8,r9). VM_SYSV_NATCALL:
 // Linux test duzenegi (rdi,rsi,rdx,rcx,r8,r9).
@@ -280,9 +318,7 @@ static void vm_run(VMContext* c) {
         c->scratch[1] = s.ic;
         c->scratch[2] = s.key;
 #ifdef VM_TRACE
-        if (vm_trace_on == 1)
-            fprintf(stderr, "[vm] ic=%llu op=0x%02X key=%llu\n",
-                    (unsigned long long)s.ic, (unsigned)op, (unsigned long long)s.key);
+        if (vm_trace_on) tputn("[vm] ic=", s.ic, ((u64)op << 56) | s.key);
 #endif
 
         if (op == OP_NOP) {
@@ -503,8 +539,16 @@ static void vm_run(VMContext* c) {
 #ifdef VM_IS_X64
             c->regs[0] = vm_natcall(c->base + (u64)v32, c->regs);
 #else
-            (void)v32;
-            c->done = 1;   // x86: dis cagri desteklenmez (encoder engeller)
+            {
+                /* 0.5.0: x86 dogal cagri (0.4.x'te done=1 ile erken cikis
+                YANLIS sonuc veriyordu). VM yiginindaki arglarla cagri;
+                stdcall temizlemesi esp senkronu ile yansitilir. */
+                u64 nret = 0, nesp = 0;
+                vm_natcall86((u32)(c->base + (u64)v32),
+                             c->regs[REG_RSP] - (u64)VM_DELTA, &nret, &nesp);
+                c->regs[0] = nret;
+                c->regs[REG_RSP] = nesp + (u64)VM_DELTA;
+            }
 #endif
 
         } else if (op == OP_RET) {
@@ -581,16 +625,18 @@ void vm_entry(VMContext* c) {
     int k;
     int map[NMAP];
 #if defined(VM_IS_X64)
-    { int t[15] = {0,1,2,3,5,6,7,8,9,10,11,12,13,14,15};
-      for (k = 0; k < 15; k++) map[k] = t[k]; }
+    /* 0.5.0 KOK-NEEN Duzeltmesi: eski {0,1,2,3,5,...} tablosunu GCC 14
+    .rodata+memcpy'ye ceviriyordu -> blob PIC olmaktan cikiyordu (korunmis
+    exe'de 0x103000 mutlak okuma = SIGSEGV). Tablo ARITMETIK yazilir:
+    reg 4 (RSP) push edilmez -> atlanir. */
+    for (k = 0; k < 15; k++) map[k] = (k < 4) ? k : (k + 1);
 #else
     /* x86 pushad sirasi: EAX once push edilir -> EN YUKSEK adreste; EDI enson
        -> EN ALCAK adreste. push_area[k] ARTAN okundugu icin siralama ters:
        [0]=EDI(7), [1]=ESI(6), [2]=EBP(5), [3]=ESP_orig(atla), [4]=EBX(3),
        [5]=EDX(2), [6]=ECX(1), [7]=EAX(0). Eski map {0,1,2,3,..} reg'leri
        tamamen karistiriyordu (dir=copuk deger -> yanlis hareket). */
-    { int t[8] = {7,6,5,(int)0xFFFFFFFFu,3,2,1,0};
-      for (k = 0; k < 8; k++) map[k] = t[k]; }
+    for (k = 0; k < 8; k++) map[k] = (k == 3) ? (int)0xFFFFFFFFu : (7 - k);
 #endif
 #if defined(VM_IS_X64)
     u64* src = (u64*)u2p(c->push_area);          /* x64: 8B slot (push'lar) */

@@ -19,10 +19,12 @@ static void put64(std::vector<u8>& v, u64 x) {
 }
 
 std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
-                               u32 bc_rva, u32 bc_len) {
+                               u32 bc_rva, u32 bc_len,
+                               u32 xrt_entry_rva, u32 cfg_rva, u32 cont_rva) {
     std::vector<u8> s;
     Patch32 p_key{}, p_l1{}, p_bc{}, p_len{}, p_rel{}, p_call2{};
     u32 off_pop = 0;
+    u32 off_xrt_call = 0;
 
     // --- 15 register push: SIRA ONEMILI! vm_entry push_area[k]'yi YUKARI
     // dogru okur: push_area[0]=rax, [1]=rcx, ... [14]=r15. Yigin asagi
@@ -52,6 +54,27 @@ std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
     put(s, {0x48,0x89,0x04,0x24});                      // mov [rsp], rax (bc)
     put(s, {0x48,0xB8}); p_len = {(u32)s.size(), 0}; put64(s, 0);   // mov rax,bc_len
     put(s, {0x48,0x89,0x44,0x24,0x08});                 // mov [rsp+0x08], rax
+    // --- 0.5.0: XProtect Runtime kapisi (bir-kez butunluk kontrolu) ---
+    // xrt_entry SysV'dir; rax,rcx,rdx,rsi,rdi,r8-r11 bozar — 15 GPR
+    // zaten push'lu, rax'in son kullanimi (len yazimi) geride kaldi.
+    if (xrt_entry_rva && cfg_rva) {
+        // 0.5.0 HIZALAMA DÜZELTMESI: bolgeye E9 (jmp) ile girilir — donus
+        // adresi YOK, rsp hizasi cagirana bagli (0 veya 8 mod 16). xrt_entry
+        // (SysV C) movaps kullanir -> giris rsp mutlaka 8 mod 16 olmali.
+        // rbx 15-push blogunda zaten sakli (sonraki pop geri yukler).
+        put(s, {0x48,0x8B,0x4C,0x24,0x18});              // mov rcx,[rsp+0x18] (base)
+        put(s, {0x48,0x8D,0x89}); put32(s, cfg_rva);     // lea rcx,[rcx+cfg_rva]
+        put(s, {0x80,0x79,0x08,0x00});                    // cmp byte [rcx+8],0 (state)
+        put(s, {0x75,0x18});                              // jne .skip (24 bayt)
+        put(s, {0x48,0x89,0xE3});                         // mov rbx,rsp (kaydet)
+        put(s, {0x48,0x83,0xE4,0xF0});                    // and rsp,-16 (hizala)
+        put(s, {0x48,0x89,0xCF});                         // mov rdi,rcx (SysV arg1)
+        put(s, {0xE8,0,0,0,0}); off_xrt_call = (u32)s.size() - 5; // call xrt_entry
+        put(s, {0x48,0x89,0xDC});                         // mov rsp,rbx (geri)
+        put(s, {0x85,0xC0});                              // test eax,eax
+        put(s, {0x74,0x02});                              // jz .skip
+        put(s, {0x0F,0x0B});                              // ud2 (zehir)
+    }
     // NOT: blob Linux gcc ile derlenir -> vm_entry SysV ABI (ilk arg RDI).
     // (Windows'ta da ayni: blob kendi icinde tutarli; VM_WINDOWS sadece
     //  natcall'un Win64 konvansiyonunu secar — dis fonksiyon cagrilari icin.)
@@ -62,7 +85,15 @@ std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
     // pop'lar push'larin TERSTEN (rax once ... r15 enson)
     put(s, {0x58,0x59,0x5A,0x5B,0x5D,0x5E,0x5F});       // pop rax,rcx,rdx,rbx,rbp,rsi,rdi
     for (int r = 8; r <= 15; r++) put(s, {0x41, (u8)(0x58 + (r - 8))});
-    put(s, {0xC3});                                     // ret
+    // 0.5.0: BOLGE kipi — ret yerine region sonuna jmp (donus adresi yiginda
+    // kalir; region sonu kodu epilogu yurutur). Normal fonksiyon: ret.
+    u32 off_cont = 0;
+    if (cont_rva) {
+        off_cont = (u32)s.size();
+        put(s, {0xE9,0,0,0,0});                         // jmp region_end
+    } else {
+        put(s, {0xC3});                                 // ret
+    }
 
     // --- yamalar ---
     u32 l1_rva = stub_rva + off_pop;
@@ -81,6 +112,19 @@ std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
     s[p_bc.off + 3] = (u8)(bc_rva >> 24);
     // bc len
     for (int k = 0; k < 8; k++) s[p_len.off + k] = (u8)((u64)bc_len >> (8 * k));
+    // xrt_entry rel32
+    if (off_xrt_call) {
+        i32 xr = (i32)(xrt_entry_rva - (stub_rva + off_xrt_call + 5));
+        for (int k = 0; k < 4; k++) s[off_xrt_call + 1 + k] = (u8)((u32)xr >> (8 * k));
+    }
+    // region devam rel32
+    if (off_cont) {
+        i32 rc = (i32)(cont_rva - (stub_rva + off_cont + 5));
+        s[off_cont + 1] = (u8)(u32)rc;
+        s[off_cont + 2] = (u8)((u32)rc >> 8);
+        s[off_cont + 3] = (u8)((u32)rc >> 16);
+        s[off_cont + 4] = (u8)((u32)rc >> 24);
+    }
     // vm_entry rel32
     i32 rel = (i32)(vm_entry_rva - (stub_rva + off_call2 + 5));
     s[off_call2 + 1] = (u8)(u32)rel;
@@ -92,7 +136,8 @@ std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
 }
 
 std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva, u64 key,
-                               u32 bc_rva, u32 bc_len, u32 retimm) {
+                               u32 bc_rva, u32 bc_len, u32 retimm,
+                               u32 xrt_entry_rva, u32 cfg_rva, u32 cont_rva) {
     // BUGFIX #12 (x86 w+Enter cokmesi): retimm eskiden u16 idi.
     // engine.hpp'deki "ret yok" sentinel'i 0xFFFFFFFF (u32) u16'ya
     // kirpilinca 0xFFFF oluyor, asagidaki sentinel kontrolu atlaniyor
@@ -101,6 +146,7 @@ std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva, u64 key,
     // stack corba -> SIGSEGV. Simdi param u32; sentinel veya 0 -> C3.
     std::vector<u8> s;
     u32 off_key, off_key2, off_l1, off_bc, off_len, off_call2, off_pop;
+    u32 off_xrt_call = 0;
 
     put(s, {0x60});                                     // pushad
     put(s, {0x81,0xEC}); put32(s, VM_STUB_SUB86);       // sub esp
@@ -123,13 +169,32 @@ std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva, u64 key,
     put(s, {0x89,0x04,0x24});                           // mov [esp], eax
     put(s, {0xB8}); off_len = (u32)s.size(); put32(s, 0);           // mov eax,len
     put(s, {0x89,0x44,0x24,0x08});                      // mov [esp+0x08], eax
+    // --- 0.5.0: XProtect Runtime kapisi (bir-kez butunluk kontrolu) ---
+    // xrt_entry cdecl'dir; eax/ecx/edx bozar — bu noktada ucude de ihtiyac yok.
+    if (xrt_entry_rva && cfg_rva) {
+        put(s, {0x8B,0x4C,0x24,0x18});                  // mov ecx,[esp+0x18] (base)
+        put(s, {0x8D,0x89}); put32(s, cfg_rva);         // lea ecx,[ecx+cfg_rva]
+        put(s, {0x80,0x79,0x08,0x00});                  // cmp byte [ecx+8],0 (state)
+        put(s, {0x75,0x0F});                            // jne .skip (15 bayt)
+        put(s, {0x51});                                 // push ecx (cfg*)
+        put(s, {0xE8,0,0,0,0}); off_xrt_call = (u32)s.size() - 5; // call xrt_entry
+        put(s, {0x83,0xC4,0x04});                       // add esp,4
+        put(s, {0x85,0xC0});                            // test eax,eax
+        put(s, {0x74,0x02});                            // jz .skip
+        put(s, {0x0F,0x0B});                            // ud2 (zehir)
+    }
     put(s, {0x54});                                     // push esp (ctx)
     put(s, {0xE8,0,0,0,0});                             // call vm_entry
     off_call2 = (u32)s.size() - 5;
     put(s, {0x83,0xC4,0x04});                           // add esp,4
     put(s, {0x81,0xC4}); put32(s, VM_STUB_SUB86);       // add esp
     put(s, {0x61});                                     // popad
-    if (retimm != 0 && retimm != 0xFFFFFFFF) {
+    u32 off_cont = 0;
+    if (cont_rva) {
+        // 0.5.0: BOLGE kipi — ret/ret-imm yerine region sonuna jmp
+        off_cont = (u32)s.size();
+        put(s, {0xE9,0,0,0,0});                         // jmp region_end
+    } else if (retimm != 0 && retimm != 0xFFFFFFFF) {
         put(s, {0xC2});
         put32(s, retimm); s.pop_back(); s.pop_back();   // ret imm16 (C2 + 2 bayt)
         // (eski kod tek pop_back yapiyordu, ucuncu byte cop kaliyordu)
@@ -143,7 +208,163 @@ std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva, u64 key,
     for (int k = 0; k < 4; k++) s[off_l1 + k]  = (u8)(l1_rva >> (8 * k));
     for (int k = 0; k < 4; k++) s[off_bc + k]  = (u8)(bc_rva >> (8 * k));
     for (int k = 0; k < 4; k++) s[off_len + k] = (u8)(bc_len >> (8 * k));
+    if (off_xrt_call) {
+        i32 xr = (i32)(xrt_entry_rva - (stub_rva + off_xrt_call + 5));
+        for (int k = 0; k < 4; k++) s[off_xrt_call + 1 + k] = (u8)((u32)xr >> (8 * k));
+    }
+    if (off_cont) {
+        i32 rc = (i32)(cont_rva - (stub_rva + off_cont + 5));
+        for (int k = 0; k < 4; k++) s[off_cont + 1 + k] = (u8)((u32)rc >> (8 * k));
+    }
     i32 rel = (i32)(vm_entry_rva - (stub_rva + off_call2 + 5));
     for (int k = 0; k < 4; k++) s[off_call2 + 1 + k] = (u8)((u32)rel >> (8 * k));
+    return s;
+}
+
+// ============================================================
+// 0.5.0 — M-tipi govde onu runtime kapisi
+// pushad/pushaq korumali: fastcall (ecx/edx) arglari dahil hicbir
+// kayit bozulmaz. Zehir: ud2. Govde kapiye bitisik yerlesir.
+// ============================================================
+std::vector<u8> build_mgate_x86(u32 gate_rva, u32 xrt_entry_rva, u32 cfg_rva,
+                                u32 body_rva) {
+    std::vector<u8> s;
+    u32 off_call = 0;
+    put(s, {0x60});                                     // pushad (tum GPR'ler korunur)
+    put(s, {0xE8,0,0,0,0}); off_call = (u32)s.size() - 5; // call L1
+    u32 l1 = (u32)s.size();
+    put(s, {0x58});                                     // pop eax (runtime addr)
+    put(s, {0x2D}); put32(s, gate_rva + l1);            // sub eax,(L1 rva) -> base
+    put(s, {0x8D,0x88}); put32(s, cfg_rva);             // lea ecx,[eax+cfg_rva]
+    put(s, {0x80,0x79,0x08,0x00});                      // cmp byte [ecx+8],0
+    put(s, {0x75,0x0F});                                // jne .ok
+    put(s, {0x51});                                     // push ecx
+    put(s, {0xE8,0,0,0,0});                             // call xrt_entry
+    u32 xr = (u32)s.size() - 5;
+    put(s, {0x83,0xC4,0x04});                           // add esp,4
+    put(s, {0x85,0xC0});                                // test eax,eax
+    put(s, {0x74,0x02});                                // jz .ok
+    put(s, {0x0F,0x0B});                                // ud2
+    put(s, {0x61});                                     // .ok: popad
+    i32 r1 = (i32)(xrt_entry_rva - (gate_rva + xr + 5));
+    for (int k = 0; k < 4; k++) s[xr + 1 + k] = (u8)((u32)r1 >> (8 * k));
+    (void)body_rva;                                     // govde bitisik — jmp yok
+    return s;
+}
+
+std::vector<u8> build_mgate_x64(u32 gate_rva, u32 xrt_entry_rva, u32 cfg_rva,
+                                u32 body_rva) {
+    std::vector<u8> s;
+    // 7 push: rax,rcx,rdx,r8,r9,rsi,rdi (arg + varargs-al korunur;
+    // rbx/rbp/r12-15 zaten callee-saved, xrt_entry (SysV) dokunmaz)
+    put(s, {0x50,0x51,0x52});
+    put(s, {0x41,0x50,0x41,0x51});
+    put(s, {0x56,0x57});
+    put(s, {0x53});                                     // 0.5.0: push rbx (hizalama kaydi — callee-saved)
+    put(s, {0xE8,0,0,0,0});                             // call L1
+    u32 l1 = (u32)s.size();
+    put(s, {0x58});                                     // pop rax
+    put(s, {0x48,0x2D}); put32(s, gate_rva + l1);       // sub rax,(L1 rva) -> base
+    put(s, {0x48,0x8D,0x88}); put32(s, cfg_rva);        // lea rcx,[rax+cfg_rva]
+    put(s, {0x80,0x79,0x08,0x00});                      // cmp byte [rcx+8],0
+    put(s, {0x75,0x18});                                // jne .ok (24 bayt: hizalama blogu)
+    put(s, {0x48,0x89,0xE3});                           // mov rbx,rsp
+    put(s, {0x48,0x83,0xE4,0xF0});                      // and rsp,-16 (movass hizasi)
+    put(s, {0x48,0x89,0xCF});                           // mov rdi,rcx (SysV arg1)
+    put(s, {0xE8,0,0,0,0});                             // call xrt_entry
+    u32 xr = (u32)s.size() - 5;
+    put(s, {0x48,0x89,0xDC});                           // mov rsp,rbx
+    put(s, {0x85,0xC0});                                // test eax,eax
+    put(s, {0x74,0x02});                                // jz .ok
+    put(s, {0x0F,0x0B});                                // ud2
+    put(s, {0x5B});                                     // .ok: pop rbx
+    put(s, {0x5F,0x5E,0x41,0x59,0x41,0x58,0x5A,0x59,0x58}); // pop'lar (ters)
+    i32 r1 = (i32)(xrt_entry_rva - (gate_rva + xr + 5));
+    for (int k = 0; k < 4; k++) s[xr + 1 + k] = (u8)((u32)r1 >> (8 * k));
+    (void)body_rva;
+    return s;
+}
+
+// ============================================================
+// 0.5.0 — gecikmeli import thunk'lari
+// Cagri noktasi (FF15 -> E8 thunk / FF25 -> E9 thunk) tarafindan
+// cagrilir. Cozum: xrt_resolve(dllhash, namehash, fallback_abs);
+// sonuc .vmp0 cache hucresine yazilir (bir kez cozulur).
+// Tum arg kayitlari (fastcall/Win64 + varargs rax) korunur.
+// ============================================================
+std::vector<u8> build_thunk_x86(u32 thunk_rva, u32 resolve_rva, u32 cache_rva,
+                                u32 dll_hash, u32 name_hash, u32 iat_rva) {
+    std::vector<u8> s;
+    // yigin duzeni (rsp'ye gore): edi+0 esi+4 edx+8 ecx+0xC eax+0x10
+    put(s, {0x50,0x51,0x52,0x56,0x57});                 // push eax,ecx,edx,esi,edi
+    put(s, {0xE8,0,0,0,0});                             // call L1
+    u32 l1 = (u32)s.size();
+    put(s, {0x58});                                     // pop eax
+    put(s, {0x2D}); put32(s, thunk_rva + l1);           // sub eax,L1 -> base
+    put(s, {0x89,0x44,0x24,0x10});                      // mov [esp+0x10],eax (eax yuvasi=base)
+    put(s, {0x8D,0x90}); put32(s, cache_rva);           // lea edx,[eax+cache_rva]
+    put(s, {0x83,0x3A,0x00});                           // cmp dword [edx],0
+    put(s, {0x75,0x18});                                // jne .go (24 bayt)
+    put(s, {0x8B,0x44,0x24,0x10});                      // mov eax,[esp+0x10] (base)
+    put(s, {0x05}); put32(s, iat_rva);                  // add eax,iat_rva (fallback_abs)
+    put(s, {0x50});                                     // push eax (arg3)
+    put(s, {0x68}); put32(s, name_hash);                // push name_hash (arg2)
+    put(s, {0x68}); put32(s, dll_hash);                 // push dll_hash (arg1)
+    put(s, {0xE8,0,0,0,0});                             // call xrt_resolve
+    u32 xr = (u32)s.size() - 5;
+    put(s, {0x83,0xC4,0x0C});                           // add esp,12
+    put(s, {0x8B,0x54,0x24,0x10});                      // mov edx,[esp+0x10] (base)
+    put(s, {0x89,0x82}); put32(s, cache_rva);           // mov [edx+cache_rva],eax
+    put(s, {0x8B,0x0A});                                // .go: mov ecx,[edx] (hedef)
+    put(s, {0x89,0x4C,0x24,0x08});                      // mov [esp+8],ecx (edx yuvasina)
+    put(s, {0x5F,0x5E,0x5A,0x59,0x58});                 // pop edi,esi,edx,ecx,eax
+    put(s, {0xFF,0xE2});                                // jmp edx
+    i32 r1 = (i32)(resolve_rva - (thunk_rva + xr + 5));
+    for (int k = 0; k < 4; k++) s[xr + 1 + k] = (u8)((u32)r1 >> (8 * k));
+    return s;
+}
+
+std::vector<u8> build_thunk_x64(u32 thunk_rva, u32 resolve_rva, u32 cache_rva,
+                                u32 dll_hash, u32 name_hash, u32 iat_rva) {
+    // 0.5.0 DUZELTME v2: rsp kaydi r10 ile yapiliyordu — r10 SysV'de
+    // CALLER-SAVED, xrt_resolve (C fonksiyonu) cagrisi onu bozuyor ->
+    // yigin kaybi -> crash. Cozum: rbx push'lu (Win64 callee-saved; SysV
+    // resolve da kendisi korur) ve hizalama kaydi rbx uzerinden.
+    // Yigin: [ret][rax][rcx][rdx][r8][r9][rsi][rdi][rbx]  (rsp -> rbx)
+    //   [rsp+0] = saklanan rbx ; [rsp+8] = rdi-slot = base deposu
+    std::vector<u8> s;
+    put(s, {0x50,0x51,0x52});                        // push rax,rcx,rdx
+    put(s, {0x41,0x50,0x41,0x51});                   // push r8,r9
+    put(s, {0x56,0x57});                             // push rsi,rdi
+    put(s, {0x53});                                  // push rbx (hizalama kaydi)
+    put(s, {0xE8,0,0,0,0});                          // call L1
+    u32 l1 = (u32)s.size();
+    put(s, {0x58});                                  // pop rax
+    put(s, {0x48,0x2D}); put32(s, thunk_rva + l1);   // sub rax,L1 -> base
+    put(s, {0x48,0x89,0x44,0x24,0x08});              // mov [rsp+8],rax (base)
+    put(s, {0x48,0x8D,0x90}); put32(s, cache_rva);   // lea rdx,[rax+cache_rva]
+    put(s, {0x48,0x83,0x3A,0x00});                   // cmp qword [rdx],0
+    // jne .go — atlanacak blogun baytlari:
+    //   mov rdx,[rsp+8](5) add rdx,iat(7) mov rbx,rsp(3) and rsp,-16(4)
+    //   mov rdi,imm64(10) mov esi,imm32(5) call(5) mov rsp,rbx(3)  = 42
+    put(s, {0x75,0x2A});                             // jne .go (42)
+    put(s, {0x48,0x8B,0x54,0x24,0x08});              // mov rdx,[rsp+8] (base)
+    put(s, {0x48,0x81,0xC2}); put32(s, iat_rva);     // add rdx,iat_rva (fallback_abs)
+    put(s, {0x48,0x89,0xE3});                        // mov rbx,rsp (KAYDET — callee-saved)
+    put(s, {0x48,0x83,0xE4,0xF0});                   // and rsp,-16 (movaps hizasi)
+    put(s, {0x48,0xBF}); put64(s, dll_hash);         // mov rdi,dll_hash
+    put(s, {0xBE}); put32(s, name_hash);             // mov esi,name_hash
+    put(s, {0xE8,0,0,0,0});                          // call xrt_resolve
+    u32 xr = (u32)s.size() - 5;
+    put(s, {0x48,0x89,0xDC});                        // mov rsp,rbx (geri — rbx resolve'da korundu)
+    put(s, {0x48,0x8B,0x54,0x24,0x08});              // .go: mov rdx,[rsp+8] (base)
+    put(s, {0x48,0x8D,0x92}); put32(s, cache_rva);   // lea rdx,[rdx+cache_rva]
+    put(s, {0x48,0x89,0x02});                        // mov [rdx],rax (cache)
+    put(s, {0x4C,0x8B,0x1A});                        // mov r11,[rdx] (hedef)
+    put(s, {0x5B});                                  // pop rbx (orijinal geri)
+    put(s, {0x5F,0x5E,0x41,0x59,0x41,0x58,0x5A,0x59,0x58}); // pop rdi,rsi,r9,r8,rdx,rcx,rax
+    put(s, {0x41,0xFF,0xE3});                        // jmp r11
+    i32 r1 = (i32)(resolve_rva - (thunk_rva + xr + 5));
+    for (int k = 0; k < 4; k++) s[xr + 1 + k] = (u8)((u32)r1 >> (8 * k));
     return s;
 }

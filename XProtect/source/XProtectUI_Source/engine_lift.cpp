@@ -97,7 +97,7 @@ struct Lift {
 VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                   u64 imagebase, u32 imagesize, bool allow_call,
                   u32 rdata_rva, u32 rdata_size, int junk_level, u32 junk_seed,
-                  bool pad_terminates) {
+                  bool pad_terminates, bool region_mode) {
     VFn F; F.rva = rva; F.size = size;
 
     Lift L{ F.plain, F.fix, F.str_refs, is64, imagebase, rdata_rva, rdata_size };
@@ -313,7 +313,14 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
         pc += I.len;
     }
 
-    if (!saw_ret) { F.why = "ret bulunamadi"; return F; }
+    if (!saw_ret) {
+        // 0.5.0: SDK/manual BOLGE — govde ret icermeyebilir (orta-fonksiyon).
+        // VM dongusu done bayragina ihtiyac duyar -> yapay OP_RET; stub ret
+        // YERINE region_end'e atlar (cont_rva) -> yigin/donus adresi korunur.
+        if (!region_mode) { F.why = "ret bulunamadi"; return F; }
+        L.e(OP_RET);
+        F.notes.push_back("  [BOLGE] govde ret yok — yapay OP_RET + stub region sonuna atlar");
+    }
 
     // 0.4.1 DÜZELTME (0.3.0 gizli bug): yerel retimm hicbir zaman F.retimm'e
     // aktarilmiyordu -> tum x86 stub'lari sentinel ile uretiliyordu (C3).

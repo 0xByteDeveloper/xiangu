@@ -60,7 +60,8 @@ enum XOp {
     XP_MOV_MI, XP_MOV_RI, XP_MOV_RI64, XP_LEA, XP_ALU, XP_SHIFT, XP_IMUL_RRI,
     XP_IMUL_RR, XP_INCDEC_R, XP_INCDEC_M, XP_MOVZX, XP_MOVSX, XP_JMP, XP_JCC,
     XP_CALL, XP_RET, XP_RETI16, XP_SETCC, XP_CWDE, XP_CDQ, XP_IDIV, XP_TEST_RM, XP_PUSH_I, XP_LEAVE, XP_CMOV,
-    XP_NEG, XP_NOT
+    XP_NEG, XP_NOT,
+    XP_CALLI, XP_JMPI    // 0.5.0: dolayli cagri/atlayis (FF15/FF25) — IAT korumasi tarayicisi icin
 };
 
 struct MemOp {
@@ -108,7 +109,8 @@ struct VFn {
 VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                   u64 imagebase, u32 imagesize, bool allow_call,
                   u32 rdata_rva, u32 rdata_size, int junk_level, u32 junk_seed,
-                  bool pad_terminates = true);
+                  bool pad_terminates = true,
+                  bool region_mode = false);   // 0.5.0: SDK/manual bolge — ret zorunlu degil
 
 // ---------------- Mutasyon cekirdegi (0.3.0) ----------------
 // VMProtect "Mutation" tipinin yerli uygulaması: fonksiyon makine
@@ -128,6 +130,7 @@ struct MutFn {
     std::vector<u8> code;      // mutasyonlu native kod (base_rva tabanli)
     MutStats st;
     std::vector<std::string> notes;
+    bool region_tail = false;  // 0.5.0: govde ret yok — sona region_end jmp eklendi
 };
 
 // strength: 1=hafif 2=normal 3=agir (ikame/junk/kapi olasiliklari)
@@ -135,15 +138,37 @@ struct MutFn {
 // buna göre hesaplanir; M modunda iki geçişte çağrılır: ölçüm + gerçek)
 MutFn mutate_function(const u8* code, u32 rva, u32 size, bool is64,
                       u64 imagebase, u32 imagesize, bool allow_call,
-                      int strength, u32 seed, u32 base_rva);
+                      int strength, u32 seed, u32 base_rva,
+                      bool region_mode = false);  // 0.5.0: bolge — sona region_end'e jmp ekle
 
 // ---------------- Stub ureteci ----------------
 // x64: 15 reg push + ctx + call vm_entry(RDI) + geri
 // x86: pushad + ctx + push ctxptr + call vm_entry(cdecl) + popad + ret[imm16]
-std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rel_target_rva,
-                               u64 key, u32 bc_rva, u32 bc_len);
-std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva,
-                               u64 key, u32 bc_rva, u32 bc_len, u32 retimm);
+// 0.5.0: xrt_rva/cfg_rva != 0 ise stub, vm_entry cagrisindan once xrt_entry
+// cagrisi (bir-kez kilidi cfg->state) + zehir yolu (ud2) icerir.
+std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
+                               u32 bc_rva, u32 bc_len,
+                               u32 xrt_entry_rva = 0, u32 cfg_rva = 0,
+                               u32 cont_rva = 0);   // 0.5.0: region sonu (ret yerine jmp)
+std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva, u64 key,
+                               u32 bc_rva, u32 bc_len, u32 retimm,
+                               u32 xrt_entry_rva = 0, u32 cfg_rva = 0,
+                               u32 cont_rva = 0);   // 0.5.0: region sonu (ret yerine jmp)
+
+// 0.5.0: M-tipi (mutasyon) govde onu runtime kapisini (bir-kez xrt kontrolu).
+// jmp bu kapiye atlar; kapi zehirse ud2, degilse govdeye atlar.
+std::vector<u8> build_mgate_x86(u32 gate_rva, u32 xrt_entry_rva, u32 cfg_rva,
+                                u32 body_rva);
+std::vector<u8> build_mgate_x64(u32 gate_rva, u32 xrt_entry_rva, u32 cfg_rva,
+                                u32 body_rva);
+
+// 0.5.0: gecikmeli import thunk'i — IAT yuvasini hash ile cozumler,
+// sonucu cache'hler ve hedefe atlar. Cozumlenemezse orijinal IAT degeri
+// (loader'in yazdigi) okunur (fallback_abs).
+std::vector<u8> build_thunk_x86(u32 thunk_rva, u32 resolve_rva, u32 cache_rva,
+                                u32 dll_hash, u32 name_hash, u32 iat_rva);
+std::vector<u8> build_thunk_x64(u32 thunk_rva, u32 resolve_rva, u32 cache_rva,
+                                u32 dll_hash, u32 name_hash, u32 iat_rva);
 
 // ---------------- Orkestrasyon ----------------
 struct ManFn {               // 0.4.1: MANUEL fonksiyon (UI Add Function Base/End)
@@ -161,6 +186,15 @@ struct Options {
     bool strenc = false;
     bool memprot = false;
     bool vmenc = true;
+    // --- 0.5.0 runtime katmani ---
+    bool rt_selfcrc = false;   // motor kodu (.vmp0 vm+xrt blob) CRC
+    bool rt_textcrc = false;   // .text bellek CRC (reloc-farkindalikli)
+    bool rt_filecrc = false;   // diskteki dosya CRC (CheckSum+.vmp0 atla)
+    bool rt_msg = true;        // hata: MessageBoxA goster
+    bool rt_exit = true;       // hata: ExitProcess(1)
+    bool iat_prot = false;     // import korumasi: cagri noktalarini thunk'a cevir
+    bool sdk_scan = true;      // SDK isaretlerini otomatik kesfet
+    bool sdk_only = false;     // 0.5.0: yalniz SDK/manual bolgeleri koru (--all/devredisi)
     std::vector<std::string> funcs;   // isim ya da rva(hex) listesi; bos -> hepsi uygun olanlar
     bool all = false;
     std::vector<ManFn> manual;        // 0.4.1: kesin {rva,boyut,tip} listesi — tarayici adayina bakilmaksizin derlenir
@@ -188,3 +222,10 @@ extern const unsigned char VM_BLOB64[]; extern const int VM_BLOB64_LEN;
 extern const unsigned char VM_BLOBX86[]; extern const int VM_BLOBX86_LEN;
 extern const u32 VM_BLOB64_ENTRY_OFF;   // blob icinde vm_entry ofseti
 extern const u32 VM_BLOBX86_ENTRY_OFF;
+// 0.5.0: XProtect Runtime blob'u (xrt_core.c)
+extern const unsigned char XRT_BLOB64[]; extern const int XRT_BLOB64_LEN;
+extern const unsigned char XRT_BLOBX86[]; extern const int XRT_BLOBX86_LEN;
+extern const u32 XRT_BLOB64_ENTRY_OFF;
+extern const u32 XRT_BLOB64_RESOLVE_OFF;
+extern const u32 XRT_BLOBX86_ENTRY_OFF;
+extern const u32 XRT_BLOBX86_RESOLVE_OFF;

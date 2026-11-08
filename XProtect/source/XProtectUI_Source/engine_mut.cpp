@@ -258,7 +258,7 @@ static void ud_of(MInsn& m) {
 // ============================================================
 MutFn mutate_function(const u8* code, u32 rva, u32 size, bool is64,
                       u64 imagebase, u32 imagesize, bool allow_call,
-                      int strength, u32 seed, u32 base_rva) {
+                      int strength, u32 seed, u32 base_rva, bool region_mode) {
     MutFn F; F.st.orig_bytes = size;
     if (strength < 1) strength = 1;
     if (strength > 3) strength = 3;
@@ -308,10 +308,22 @@ MutFn mutate_function(const u8* code, u32 rva, u32 size, bool is64,
             F.why = "disari jcc"; return F;
         }
         if (I.op == XP_CALL && !allow_call) { F.why = "call desteklenmiyor"; return F; }
+        // 0.5.0: dolayli cagri/atlamasi — mutator icin guvenli degil (hedef
+        // bilinemez + x64 riprel konum-bagimli). IAT korumasi aciksa bu
+        // noktalar derleme ONCESI E8/E9'a cevrildiginden buraya ulasmaz.
+        if (I.op == XP_CALLI || I.op == XP_JMPI) {
+            F.why = "dolayli cagri/atlamasi (IAT korumasi ile E8'e cevrilir)";
+            return F;
+        }
         if (I.op == XP_RET || I.op == XP_RETI16) saw_ret = true;
         pc += I.len;
     }
-    if (!saw_ret) { F.why = "ret bulunamadi"; return F; }
+    if (!saw_ret) {
+        // 0.5.0: SDK/manual BOLGE — govde ret icermeyebilir. Mutant govdenin
+        // sonuna region_end'e (rva+size) E9 ilave edilir; yigin degmez.
+        if (!region_mode) { F.why = "ret bulunamadi"; return F; }
+        F.region_tail = true;
+    }
     if (ins.empty()) { F.why = "bos govde"; return F; }
     F.st.ninsn = (u32)ins.size();
 
@@ -614,6 +626,22 @@ MutFn mutate_function(const u8* code, u32 rva, u32 size, bool is64,
         char dp[64]; snprintf(dp, sizeof dp, "/tmp/mutdump_%X.bin", rva);
         FILE* df = fopen(dp, "wb");
         if (df) { fwrite(out.data(), 1, out.size(), df); fclose(df); }
+    }
+    // 0.5.0: BOLGE kipi — govde ret icermiyorsa sona region_end'e E9 ekle.
+    // (yigin ayni kalir; region sonu kodu epilogu/ret'i kendisi yurutur)
+    if (F.region_tail) {
+        u32 cont = rva + size;
+        u32 at = (u32)out.size();              // govde sonunda
+        i64 rel = (i64)cont - (i64)((i64)base_rva + at + 5);
+        if (rel < -2147483648LL || rel > 2147483647LL) {
+            F.why = "region kuyrugu rel32 tasmasi"; return F;
+        }
+        out.push_back(0xE9);
+        out.push_back((u8)(u32)(i32)rel);
+        out.push_back((u8)(((u32)(i32)rel) >> 8));
+        out.push_back((u8)(((u32)(i32)rel) >> 16));
+        out.push_back((u8)(((u32)(i32)rel) >> 24));
+        F.notes.push_back("  [BOLGE] sona E9 -> 0x" + hex32(cont) + " (region devami)");
     }
     F.code = std::move(out);
     F.st.new_bytes = (u32)F.code.size();

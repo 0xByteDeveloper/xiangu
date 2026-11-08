@@ -33,8 +33,8 @@
 
 // ---------------- surum ----------------
 #define XPROTECT_EDITION  L"XProtect Ultimate"
-#define XPROTECT_VERSION  L"0.4.3"
-#define XPROTECT_BUILD    L"2026-11-08"
+#define XPROTECT_VERSION  L"0.5.0"
+#define XPROTECT_BUILD    L"2026-11-09"
 
 // ---------------- dil tablosu (en.lng birebir + TR) ----------------
 enum LS {
@@ -209,7 +209,8 @@ enum ProjectOption {
     cpEncryptBytecode       = 0x80000000,
     cpVirtualFiles          = 0x08000000,
     cpInternalMemoryProtection = 0x04000000,
-    cpLoader                = 0x02000000
+    cpLoader                = 0x02000000,
+    cpFileCRC               = 0x20000000    // 0.5.0: XProtect ozel — disk dosya CRC (core.h disi)
 };
 
 // ---------------- PE cozumleyici: export + COFF + PDB + MAP + stub ----------------
@@ -1084,9 +1085,10 @@ static void fill_prop() {
             { cpVirtualFiles, L"Virtual Files" },
             { cpInternalMemoryProtection, L"Internal Memory Protection" },
             { cpLoader, L"Loader" },
+            { cpFileCRC, L"File CRC (disk)" },
         };
         prop_add_row(0, L(LS_PROTECTION), L"", 0);
-        for (int i = 0; i < 19; i++)
+        for (int i = 0; i < 20; i++)
             prop_add_row(1, opts[i].nm, (g_proj.options & opts[i].bit) ? L"Yes" : L"No", opts[i].bit);
     } else if (g_prop_sel_kind == 2 && g_prop_sel_idx >= 0 && (size_t)g_prop_sel_idx < g_proj.funcs.size()) {
         const ProjFunc& f = g_proj.funcs[g_prop_sel_idx];
@@ -2558,6 +2560,13 @@ static void start_compile() {
     opt.strenc = (g_proj.options & cpCryptValues) != 0;
     opt.memprot = (g_proj.options & cpMemoryProtection) != 0;
     opt.vmenc = (g_proj.options & cpEncryptBytecode) == 0;   // vmenc varsayilan ACIK
+    // --- 0.5.0: runtime katmani + import korumasi ---
+    // cpLoaderCRC (core.h): bellek butunlugu -> motor kodu self-CRC + .text CRC
+    opt.rt_selfcrc = (g_proj.options & cpLoaderCRC) != 0;
+    opt.rt_textcrc = (g_proj.options & cpLoaderCRC) != 0;
+    opt.rt_filecrc = (g_proj.options & cpFileCRC) != 0;
+    opt.iat_prot   = (g_proj.options & cpImportProtection) != 0;
+    opt.sdk_scan   = true;   // SDK isaretleri otomatik (VMProtect davranisi)
     // 0.3.0: level artik ftypes oncelikli; "tumunu derle" yolu 0.2.0 uyumu
     // icin level=2 birakilir (ftypes bosken VM junk aktif)
     if (opt.all) opt.level = 2;
@@ -3997,6 +4006,16 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
                     else if (!wcscmp(argv[j], L"--strenc")) opt.strenc = true;
                     else if (!wcscmp(argv[j], L"--memprot")) opt.memprot = true;
                     else if (!wcscmp(argv[j], L"--novmenc")) opt.vmenc = false;
+                    // 0.5.0: runtime katmani + import korumasi + SDK
+                    else if (!wcscmp(argv[j], L"--loadercrc")) { opt.rt_selfcrc = true; opt.rt_textcrc = true; }
+                    else if (!wcscmp(argv[j], L"--selfcrc")) opt.rt_selfcrc = true;
+                    else if (!wcscmp(argv[j], L"--textcrc")) opt.rt_textcrc = true;
+                    else if (!wcscmp(argv[j], L"--filecrc")) opt.rt_filecrc = true;
+                    else if (!wcscmp(argv[j], L"--rt-nomsg")) opt.rt_msg = false;
+                    else if (!wcscmp(argv[j], L"--rt-noexit")) opt.rt_exit = false;
+                    else if (!wcscmp(argv[j], L"--import") || !wcscmp(argv[j], L"--iat")) opt.iat_prot = true;
+                    else if (!wcscmp(argv[j], L"--nosdk")) opt.sdk_scan = false;
+                    else if (!wcscmp(argv[j], L"--sdkonly")) opt.sdk_only = true;
                 }
                 if (!have_funcs && !opt.all) opt.all = true;
                 std::vector<std::string> log;

@@ -204,6 +204,29 @@ static u64 do_shift(int shi, u64 a, int n, int sz, u64* fl) {
     return r;
 }
 
+#if defined(VM_IS_X86)
+// 0.5.0: x86 dogal cagri — cdecl VE stdcall evrensel:
+// VM'nin izledigi rsp'de (gercek bellekte) duran arglarla cagri yapilir;
+// SONRACIKI esp geri okunur -> stdcall callee arglari temizlediyse VM rsp
+// senkronize edilir (cdecl'de degismez, derleyicinin add esp'i kaldirir).
+static void vm_natcall86(u32 t, u64 vm_rsp, u64* out_ret, u64* out_rsp) {
+    u32 ret = 0, esp_after = 0;
+    register u32 vt   __asm__("esi") = t;        /* callee-saved: cagri bozmaz */
+    register u32 vrsp __asm__("edi") = (u32)vm_rsp;
+    __asm__ volatile(
+        "movl %%esp, %%ebx     \n\t"   /* gercek esp'i ebx'te sakla */
+        "movl %[vr], %%esp     \n\t"   /* esp = VM yigini (arglar burada) */
+        "call  *%[vt]          \n\t"
+        "movl %%esp, %[ea]     \n\t"   /* callee sonrasi esp (stdcall farki) */
+        "movl %%ebx, %%esp     \n\t"
+        : "=a"(ret), [ea] "=m"(esp_after)
+        : [vt] "r"(vt), [vr] "r"(vrsp)
+        : "memory", "cc", "ebx", "ecx", "edx");
+    *out_ret = (u64)ret;
+    *out_rsp = (u64)esp_after;
+}
+#endif
+
 #ifdef VM_IS_X64
 // Native cagri. VM_WINDOWS: Win64 ABI (rcx,rdx,r8,r9). VM_SYSV_NATCALL:
 // Linux test duzenegi (rdi,rsi,rdx,rcx,r8,r9).
@@ -260,41 +283,6 @@ static u64 vm_natcall(u64 t, const u64* regs) {
     return ret;
 }
 #endif
-#endif
-
-#if defined(VM_IS_X86)
-/* 0.4.1: x86 natcall — stdcall VE cdecl destegi.
-   Kontrat: cagri aninda argumanlar misafir yiginindadir (OP_PUSH ile basilmis;
-   fiziksel adres = regs[RSP] - VM_DELTA). Misafir yiginina gecilip hedef
-   `call` ile cagrilarak callee'nin KENDI ret/ret imm'si yigini duzeltir
-   (stdcall imm16 + cdecl ikisi de otomatik). EAX donus degeri; yeni misafir
-   ESP = callee sonrasi gercek ESP + VM_DELTA.
-   Register guvenligi:
-     - edi: yorumlayici ESP'sini saklar (Win32 ABI callee korur; yine de
-       clobber bildirilir -> GCC canli degeri ezilmeden tasir)
-     - esi/edx: girdiler (esp_real / hedef); edx cagrildiktan sonra kullanilmaz
-     - ecx: cikti (callee sonrasi gercek ESP); eax: cikti (donus degeri)
-     - YIGIN: esp hedef cerceveye gecirilir; tum giris/cikis register bagli,
-       bellek operandi YOK (esp degisirken frame-goreli erisim bozulur). */
-static u32 vm_natcall_x86(u32 t, u32 guest_esp, u32 guest_ecx, u32 guest_edx,
-                          u32* new_guest_esp) {
-    u32 ret;
-    register u32 r_esp __asm__("esi") = guest_esp - (u32)VM_DELTA;
-    register u32 r_ecx __asm__("ecx") = guest_ecx;   /* thiscall/fastcall 1. arg */
-    register u32 r_edx __asm__("edx") = guest_edx;   /* fastcall 2. arg */
-    register u32 r_t   __asm__("edi") = t;
-    __asm__ volatile(
-        "movl %%esp, %%ebp \n\t"     /* yorumlayici ESP -> ebp (clobber) */
-        "movl %%esi, %%esp \n\t"     /* misafir yiginina gec */
-        "call *%%edi \n\t"           /* callee kendi ret/ret imm'si temizler */
-        "movl %%esp, %%esi \n\t"     /* callee sonrasi gercek ESP (cikti) */
-        "movl %%ebp, %%esp \n\t"     /* yorumlayici ESP geri */
-        : "+S"(r_esp), "=a"(ret)
-        : "c"(r_ecx), "d"(r_edx), "D"(r_t)
-        : "ebp", "memory", "cc");
-    *new_guest_esp = r_esp + (u32)VM_DELTA;
-    return ret;
-}
 #endif
 
 // --- yorumlayici ---
@@ -537,22 +525,17 @@ static void vm_run(VMContext* c) {
             v32 = sf32(&s);
 #ifdef VM_IS_X64
             c->regs[0] = vm_natcall(c->base + (u64)v32, c->regs);
-#elif defined(VM_IS_X86)
-            {
-                /* 0.4.1: x86 dis cagri — stdcall/cdecl/thiscall/fastcall;
-                   yigin argumanlari misafir yiginindadir, ECX/EDX register
-                   argumanlari gercek register'lara yuklenir (thiscall!). */
-                u32 newesp = 0;
-                u32 t = (u32)(c->base + (u64)v32);
-                u32 g = (u32)(c->regs[REG_RSP] & 0xFFFFFFFFu);
-                u32 gecx = (u32)(c->regs[1] & 0xFFFFFFFFu);
-                u32 gedx = (u32)(c->regs[2] & 0xFFFFFFFFu);
-                c->regs[0] = (u64)vm_natcall_x86(t, g, gecx, gedx, &newesp);
-                c->regs[REG_RSP] = (u64)newesp;
-            }
 #else
-            (void)v32;
-            c->done = 1;   // diger hedefler: dis cagri desteklenmez
+            {
+                /* 0.5.0: x86 dogal cagri (0.4.x'te done=1 ile erken cikis
+                YANLIS sonuc veriyordu). VM yiginindaki arglarla cagri;
+                stdcall temizlemesi esp senkronu ile yansitilir. */
+                u64 nret = 0, nesp = 0;
+                vm_natcall86((u32)(c->base + (u64)v32),
+                             c->regs[REG_RSP] - (u64)VM_DELTA, &nret, &nesp);
+                c->regs[0] = nret;
+                c->regs[REG_RSP] = nesp + (u64)VM_DELTA;
+            }
 #endif
 
         } else if (op == OP_RET) {
