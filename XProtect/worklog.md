@@ -478,3 +478,80 @@ Stage Summary:
   sekme/filtre/Tara (x5), retimm 0.3.0 gizli bug fix.
 - Siradaki: 0.5.0 runtime katmani (self-CRC, dosya CRC, gecikmeli import)
   ve/veya lisans/SDK.
+
+---
+Task ID: 14 — 0.4.2: fonksiyon listesi penceresi BOS (kullanici raporu)
+Agent: main (Z.ai)
+Tarih: 2026-11-08 (oturum 4)
+Kullanici raporu: "XProtect_0.4.1 de fonksyon liste penceresinde hicbir
+nesne gozukmuyor" — Add Function / Fonksiyon listesi diyalogu acilinca
+listede satir yok (0.4.0'da gozukuyordu).
+Plan:
+1) Kok neden: 0.4.1 dlg_addfunction yeniden yazimi (af_dlg_proc + af_layout
+   + tab goster/gizle + WM_SETREDRAW toplu doldurma) taranacak; acilis
+   akisinda g_pe.funcs dolu mu kontrol edilecek.
+2) Wine+Xvfb ile gorsel yeniden uretim (testpes/fake64.exe).
+3) Fix + derleme + SELFTEST OK + paket 0.4.2 + GitHub push.
+Durum: kod incelemesi basladi.
+
+---
+Task ID: 15 — 0.4.2: fonksiyon listesi penceresi BOS — KOK NEDEN + FIX (kullanici raporu)
+Agent: main (Z.ai)
+Tarih: 2026-11-08 (oturum 4)
+Rapor: "XProtect_0.4.1 de fonksyon liste penceresinde hicbir nesne gozukmuyor".
+
+Yontem (kanit zinciri):
+1) Tani araci: --uistate (diyalog ic-durumunu dosyaya dokar: geometri,
+   gorunurluk, LVM sayim + ilk 6 satir) + shotx.py (python-xlib+numpy,
+   Xvfb ekran goruntusu) + afdiag2.sh (senkron akis: AF-OPEN dump'i bekle ->
+   goruntu -> AF-T1500 -> goruntu). AF diyaloqu otomatik acilir (WM_TIMER ->
+   IDM_ADDFUNC), 1.5 sn sonra dokum + temiz cikis.
+2) Ilk dokum: listview items=568 cols=5 vis=1 — VERI DOLU, PENCERE "gorunur"
+   ama EKRANDA HICBIR PIKSEL YOK. Piksel analizi: tab sayfasi beyaz; filtre/
+   Tara/LISTVIEW/status VE Manual satiri (Base/End) HIC boyanmiyor; tab
+   basliklari + OK/Cancel + grup basligi boyaniyor.
+3) Deneysel ayristirma (tek degiskenlikli derlemeler):
+   V3 (--nolayout): dokunulmedi gibi — layout degil.
+   V2 (--noclip): HER SEY BOYANIYOR — liste ustten dolu (kanit goruntusu).
+   -> KOK NEDEN: 0.4.1'in mk_ctl'sine ekledigi TOPLU WS_CLIPSIBLINGS.
+   Wine/X11'de clip'li her cocuk ayri X alt-penceresi; X yigini Win32
+   z-sirasini izlemedigi icin once yaratilan TAB'in beyaz sayfasi sonradan
+   yaratilan kontrollerin ustune biniyor. (0.4.1 x1 icin girilmisti; x1'in
+   gercek fix'i layout gizlemesiydi.)
+4) Ikincil bulgular: (a) haritalanmadan once doldurulan + tasinan listview'de
+   satirlar sayfa altina kayiyor, header boyanmiyordu -> ilk doldurma
+   ShowWindow+af_layout SONRASINA tasindi; (b) af_fill_list WM_SETREDRAW
+   toplu doldurma wine'da kayma yaratıyordu -> 0.4.0 duz doldurma; (c)
+   AFState.chk_lock HIC atanmamisti -> af_layout gecersiz HWND'ye MoveWindow
+   yapiyordu -> st.chk_lock = chk atandi.
+
+Fixler (xprotect_ui.cpp):
+- mk_ctl: toplu WS_CLIPSIBLINGS kaldirildi (0.4.0 davranisi; aciklama yorumu).
+- dlg_addfunction: af_fill_list ShowWindow+af_layout sonrasi.
+- af_fill_list: WM_SETREDRAW kaldirildi.
+- st.chk_lock atamasi + uistate tani araci kalici.
+
+Kanitlar (0.4.2 build, wine64+Xvfb):
+- AF diyaloqu: items=568, header Name/Address/Size/Export/Source, satirlar
+  ustten WrapPos/MovePlayer/GhostStep/CheckCollision/GameTick/entry_point...
+- x1 regresyon: boot sayfasi render OK + Quick Start "Open File" XTEST
+  tiklamasi canli (app hayatta; dosya diyalogu headless X'te map olmuyor —
+  bilinen ortam siniri, app crash YOK).
+- SELFTEST OK funcs=568 proj=0 lics=0
+- CLI regresyon: --cli Test.exe --funcs WrapPos:V,GameTick:U -> V=1 U=1 rc=0
+  (T42.exe 236032 B uretildi — motor etkilenmedi).
+- Ikililer: XProtectUI.exe 1020928 B (baa2ef64), XProtectUI32.exe 1072128 B
+  (776ff1f6). Zip icinde md5 teyitli.
+
+Paket: XProtect_0.4.2.zip 63 dosya 3.81MB (801e025e0669691c7d7e9429dd7e12d4)
+-> releases/ + download/XProtect/ + versions/. README.txt/CHANGELOG.md 0.4.2.
+
+GitHub push: PAT bu oturumda da KESIKLI kayitli (github_pat_11B32B3RI0...);
+tam token dosyaya yazilmaz, push URL'sinde gecici kullanilir, .git/config
+temiz birakilir.
+
+Stage Summary:
+- 0.4.2 teslim: fonksiyon listesi penceresi geri geldi (kok neden: toplu
+  WS_CLIPSIBLINGS; wine X11 z-sirasi). SELFTEST OK + CLI regresyon OK.
+- Siradaki: 0.5.0 runtime katmani (self-CRC, dosya CRC, gecikmeli import)
+  ve/veya lisans/SDK.

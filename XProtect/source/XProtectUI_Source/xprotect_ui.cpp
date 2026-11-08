@@ -915,9 +915,16 @@ static void add_log(const std::wstring& msg) {
 // ---------------- pencere oyuncaklari: dugme yaratma ----------------
 static HWND mk_ctl(HWND parent, const wchar_t* cls, const wchar_t* txt,
                    unsigned long style, int id, int x, int y, int w, int h) {
-    // 0.4.1: WS_CLIPSIBLINGS — kardes cocuklar birbirinin uzerine boyamaz
-    // (boot sayfasi / panel cakisma ve tiklama bulanikligi hususu)
-    HWND c = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style,
+    // 0.4.2 FIX (kullanici raporu: fonksiyon listesi penceresinde hicbir nesne
+    // gozukmuyor): 0.4.1 burada tum kontrollere toplu WS_CLIPSIBLINGS eklemisti.
+    // Wine/X11'de WS_CLIPSIBLINGS'li her cocuk ayri X alt-penceresi olur; X
+    // yigin sirasi Win32 z-sirasini izlemedigi icin once yaratilan TAB
+    // kontrolunun beyaz sayfası, sonradan yaratilan filtre/Tara/LISTVIEW/ durum
+    // kontrollerinin UZERINE boyaniyor -> liste gorunmez kaliyor (LVM sayar:
+    // items=568 vis=1 ama piksel yok). 0.4.0 davranisina donuldu (Windows'ta da
+    // kanitli). Boot sayfasi izolasyonu (x1) layout gizlemeyle saglanir;
+    // g_welcome'in kendi WS_CLIPSIBLINGS'i duruyor.
+    HWND c = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | style,
                              x, y, w, h, parent, (HMENU)(INT_PTR)id, NULL, NULL);
     SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
     return c;
@@ -1656,6 +1663,47 @@ static void dlg_settings() {
 }
 
 // ---------------- diyalog: Fonksiyon Ekle / Adrese Git (function_dialog.cc) ----------------
+// 0.4.2: --uistate — diyaloq ic-durumunu dosyaya dokar (wine otomasyon tanisi;
+// normal kullanimda etkisiz). Cikti: Z:\home\z\my-project\scripts\ui_state.txt
+static bool g_uistate = false;
+static void uistate_dump(const wchar_t* tag, HWND dlg, HWND list, HWND tab) {
+    FILE* f = _wfopen(L"Z:\\home\\z\\my-project\\scripts\\ui_state.txt", L"a, ccs=UTF-8");
+    if (!f) return;
+    fwprintf(f, L"=== %s ===\n", tag);
+    if (dlg) {
+        RECT r; GetWindowRect(dlg, &r);
+        wchar_t ttl[128]; GetWindowTextW(dlg, ttl, 128);
+        fwprintf(f, L"dlg: '%s' visible=%d rect=(%ld,%ld %ldx%ld)\n", ttl,
+                 IsWindowVisible(dlg) ? 1 : 0, r.left, r.top, r.right - r.left, r.bottom - r.top);
+    }
+    HWND c = dlg ? GetWindow(dlg, GW_CHILD) : NULL;
+    int n = 0;
+    while (c && n < 64) {
+        wchar_t cls[64] = L"", txt[96] = L"";
+        GetClassNameW(c, cls, 64); GetWindowTextW(c, txt, 96);
+        RECT r; GetWindowRect(c, &r);
+        POINT pt = { r.left, r.top }; ScreenToClient(dlg, &pt);
+        fwprintf(f, L"  child[%d] cls=%s txt='%.24s' vis=%d at(%ld,%ld %ldx%ld)\n",
+                 n, cls, txt, IsWindowVisible(c) ? 1 : 0,
+                 pt.x, pt.y, r.right - r.left, r.bottom - r.top);
+        c = GetWindow(c, GW_HWNDNEXT); n++;
+    }
+    if (list) {
+        int items = (int)SendMessageW(list, LVM_GETITEMCOUNT, 0, 0);
+        HWND hdr = (HWND)SendMessageW(list, LVM_GETHEADER, 0, 0);
+        int cols = hdr ? (int)SendMessageW(hdr, HDM_GETITEMCOUNT, 0, 0) : -1;
+        fwprintf(f, L"listview: items=%d cols=%d vis=%d\n", items, cols, IsWindowVisible(list) ? 1 : 0);
+        wchar_t b[64];
+        for (int i = 0; i < items && i < 6; i++) {
+            LVITEMW it; memset(&it, 0, sizeof(it));
+            it.mask = LVIF_TEXT; it.iItem = i; it.pszText = b; it.cchTextMax = 64;
+            SendMessageW(list, LVM_GETITEMTEXTW, i, (LPARAM)&it);
+            fwprintf(f, L"  item[%d]='%s'\n", i, b);
+        }
+    }
+    if (tab) fwprintf(f, L"tab: cursel=%d\n", (int)SendMessageW(tab, TCM_GETCURSEL, 0, 0));
+    fclose(f);
+}
 struct ScanJob;                                        // 0.4.1: tarama is parcacigi (ileri bildirim)
 static DWORD WINAPI scan_thread(LPVOID p);
 static void merge_funcs(PeInfo& pi, const std::vector<PeFunc>& pf, std::wstring* note_out);
@@ -1710,10 +1758,12 @@ static LRESULT CALLBACK af_dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return dlg_proc(h, msg, wp, lp);
 }
 static void af_fill_list(AFState* st) {
-    // 0.4.1 (x3): buyuk listelerde takilmayi onle — yeniden-boyama kapali toplu doldur
-    SendMessageW(st->list, WM_SETREDRAW, FALSE, 0);
+    // 0.4.2 FIX: 0.4.1'deki WM_SETREDRAW toplu doldurma wine'da liste
+    // kaydirma/boyama tutarsizligina yol aciyordu (satirlar sayfanin altinda
+    // kayiyor, ust bosh). 0.4.0'in kanitlanmis duz doldurmasina donuldu;
+    // 568 satir ~50 ms — takilma riski yok.
     ListView_DeleteAllItems(st->list);
-    if (!g_proj.open) { SendMessageW(st->list, WM_SETREDRAW, TRUE, 0); return; }
+    if (!g_proj.open) return;
     std::wstring flt; ctl_txt(st->filter, &flt);
     int shown = 0;
     for (size_t i = 0; i < g_pe.funcs.size(); i++) {
@@ -1732,8 +1782,6 @@ static void af_fill_list(AFState* st) {
         ListView_SetItemText(st->list, idx, 4, (LPWSTR)src_name(f.source));
         shown++;
     }
-    SendMessageW(st->list, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(st->list, NULL, TRUE);
 }
 static bool addr_in_exec(unsigned long long a) {
     for (auto& s : g_pe.secs)
@@ -1777,7 +1825,10 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
     int wds[5] = { 420, 110, 90, 60, 80 };
     for (int i = 0; i < 5; i++) { c.pszText = cols[i]; c.cx = wds[i]; ListView_InsertColumn(st.list, i, &c); }
     st.status = mk_ctl(d, L"STATIC", L"", 0, 0x50A, 22, 472, 760, 18);
-    af_fill_list(&st);
+    // 0.4.2 FIX: ilk doldurma ShowWindow+af_layout SONRASINA tasinadi —
+    // wine X11'de haritalanmamis/taşinacak listview'e onceden satir eklemek
+    // icerik-kayma bozuklugu yaratıyordu (satirlar sayfanin altina biniyor,
+    // header boyanmiyordu). Windows'ta da siralama daha dogru.
     // sayfa 1: options (sadece add modu — VMProtect: smAddFunction)
     st.grp_prot = mk_ctl(d, L"BUTTON", L(LS_PROTECTION), BS_GROUPBOX, 0x505, 22, 106, 760, 110);
     st.lbl_type = mk_ctl(d, L"STATIC", L(LS_COMPTYPE), 0, 0, 38, 136, 120, 18);
@@ -1800,13 +1851,19 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
     if (!g_pe.sym_note.empty())
         SetWindowTextW(d, (std::wstring(goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC)) + L"   [" + g_pe.sym_note + L"]").c_str());
     SetFocus(st.addr);
+    st.chk_lock = chk;                   // 0.4.2 FIX-1: af_layout bunu tasiyordu;
+                                         // atanmamisti -> MoveWindow(gecersiz HWND)
     // tab gecisi: TCN_SELCHANGE -> WM_APP+30 (dlg_proc)
     bool okout = false;
     EnableWindow(g_main, FALSE);
     g_af = &st; g_af_dlg = d;
     ShowWindow(d, SW_SHOW); UpdateWindow(d);
     af_layout(d);
+    af_fill_list(&st);           // 0.4.2 FIX: son geometri oturduktan SONRA doldur
     SetTimer(d, 2, 100, NULL);   // 0.4.1: Tara ilerleme sayaci
+    // 0.4.2 tani: --uistate — acilis aninda ic-durum dokumu + 1.5 sn sonra
+    // ikinci dokum (ilk boyama/WM_SIZE sonrasi) ve otomatik kapanis
+    if (g_uistate) { uistate_dump(L"AF-OPEN", d, st.list, st.tab); SetTimer(d, 4, 1500, NULL); }
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0)) {
         if (m.message == WM_APP_MODAL_OK && (m.hwnd == d || IsChild(d, m.hwnd))) { okout = true; break; }
@@ -1832,6 +1889,13 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
         if (m.message == WM_COMMAND && m.hwnd == d && LOWORD(m.wParam) == 0x503 &&
             HIWORD(m.wParam) == EN_CHANGE) {
             af_fill_list(&st);
+            continue;
+        }
+        // 0.4.2 tani: 1.5 sn sonra durum dokumu + diyaloqi kapat + cik
+        if (m.message == WM_TIMER && m.wParam == 4 && g_uistate) {
+            KillTimer(d, 4);
+            uistate_dump(L"AF-T1500", d, st.list, st.tab);
+            PostMessageW(d, WM_APP_MODAL_CANCEL, 0, 0);
             continue;
         }
         if (m.message == WM_TIMER && m.wParam == 2 && st.job) {
@@ -1906,6 +1970,7 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
     }
     g_af = NULL; g_af_dlg = NULL;
     EnableWindow(g_main, TRUE); SetActiveWindow(g_main);
+    if (g_uistate) PostQuitMessage(0);   // 0.4.2 tani: temiz cikis
     // 0.3.0 DUZELTME (UI bug #1): kontrol degerleri YIKMADAN ONCE okunur
     std::wstring addr_txt; ctl_txt(st.addr, &addr_txt);
     std::wstring end_txt; ctl_txt(st.end, &end_txt);
@@ -3441,6 +3506,18 @@ static LRESULT CALLBACK main_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             fflush(stdout);
             PostQuitMessage(0);
         }
+        // 0.4.2 tani: --uistate — dosya acildiktan sonra Add Function diyaloqini
+        // otomatik ac (diyalog 1.5 sn sonra kendi dokumunu yapar ve cikar)
+        else if (g_uistate && wp == 1) {
+            KillTimer(h, 1);
+            SetTimer(h, 6, 30000, NULL);   // emniyet subabi: takilirsa zorla cik
+            PostMessageW(h, WM_COMMAND, MAKEWPARAM(IDM_ADDFUNC, 0), 0);
+        }
+        if (g_uistate && wp == 6) {
+            KillTimer(h, 6);
+            uistate_dump(L"TIMEOUT", NULL, NULL, NULL);
+            PostQuitMessage(1);
+        }
         return 0;
     case WM_APP + 40: welcome_fill(); return 0;
     case WM_COMMAND: {
@@ -3749,6 +3826,7 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
     if (argv) {
         for (int i = 1; i < argc; i++) {
             if (!wcscmp(argv[i], L"--selftest")) g_selftest = true;
+            else if (!wcscmp(argv[i], L"--uistate")) g_uistate = true;   // 0.4.2 tani
             else if (!wcscmp(argv[i], L"--open") && i + 1 < argc) g_cmd_open = argv[++i];
             else if (!wcscmp(argv[i], L"--cli") && i + 2 < argc) {
                 // ---- 0.3.0 CLI modu (otomatik test / betik kullanimi) ----
@@ -3946,7 +4024,7 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
     update_all();
     welcome_fill();
     if (!g_cmd_open.empty()) route_open_path(g_cmd_open);   // 0.4.0: .xproj/.vmp/exe yonlendirme
-    if (g_selftest) SetTimer(g_main, 1, 1200, NULL);
+    if (g_selftest || g_uistate) SetTimer(g_main, 1, 1200, NULL);
     // 0.3.0 DUZELTME (UI bug #6): wine/launcher nCmd=0 (SW_HIDE) iletiyorsa
     // pencere HIC haritalanmiyor (X'te Map State: IsUnMapped — gorunumsuz
     // kaliyordu). Savunmaci gosterim:
