@@ -577,6 +577,7 @@ static HMENU g_menu = NULL;
 static HACCEL g_accel = NULL;
 static PeInfo g_pe;
 static int g_tab = 0;              // 0=project 1=functions 2=details
+static std::wstring g_scan_note;   // 0.4.1: son tarama ozeti (open_target loglari)
 static int g_split_x = 400;        // sol panel genisligi
 static int g_log_h = 150;
 static bool g_selftest = false;
@@ -675,11 +676,17 @@ static std::vector<std::string> pdbscope_csv_line(const std::string& line) {
 // pdbscope.exe'yi subprocess olarak koşar; stdout'u CSV olarak çözer.
 static void fill_neighbor_sizes(PeInfo& pi);          // 0.4.0 ileri bildirim
 static void merge_pdbscope(PeInfo& pi, const std::wstring& path, std::wstring* note_out);
-static bool pdbscope_scan(const std::wstring& target, std::vector<PeFunc>& out,
-                          std::wstring* note) {
+// 0.4.1: tarama is parcacigi icin genisletilmis kosum —
+//   use_pdb : true -> "semboller" (PDB/MAP), false -> "pdbless"
+//   percent : 0..100 arasi ilerleme (PROGRESS satirlari + asama tahmini)
+//   found   : su ana kadar cozulen CSV satiri (fonksiyon sayisi)
+static bool pdbscope_scan_ex(const std::wstring& target, std::vector<PeFunc>& out,
+                             std::wstring* note, bool use_pdb,
+                             volatile LONG* percent, volatile LONG* found) {
     std::wstring tool;
     if (!pdbscope_find(&tool)) return false;
-    std::wstring cl = L"\"" + tool + L"\" pdbless \"" + target + L"\" --format csv";
+    std::wstring cmd = use_pdb ? L"semboller" : L"pdbless";
+    std::wstring cl = L"\"" + tool + L"\" " + cmd + L" \"" + target + L"\" --format csv";
     SECURITY_ATTRIBUTES sa; memset(&sa, 0, sizeof(sa));
     sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
     HANDLE rd = NULL, wr = NULL;
@@ -689,14 +696,15 @@ static bool pdbscope_scan(const std::wstring& target, std::vector<PeFunc>& out,
     si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = wr; si.hStdError = wr; si.hStdInput = NULL;
     PROCESS_INFORMATION pinfo; memset(&pinfo, 0, sizeof(pinfo));
-    std::vector<wchar_t> cmd(cl.begin(), cl.end()); cmd.push_back(0);
-    BOOL ok = CreateProcessW(NULL, cmd.data(), NULL, NULL, TRUE,
+    std::vector<wchar_t> cmdbuf(cl.begin(), cl.end()); cmdbuf.push_back(0);
+    BOOL ok = CreateProcessW(NULL, cmdbuf.data(), NULL, NULL, TRUE,
                              CREATE_NO_WINDOW, NULL, NULL, &si, &pinfo);
     CloseHandle(wr);   // yazan tek taraf child olsun (EOF için şart)
     if (!ok) { CloseHandle(rd); return false; }
     std::string data;
     char buf[4096];
     DWORD t0 = GetTickCount();
+    int rows = 0, progs = -1;
     for (;;) {
         DWORD avail = 0;
         if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL)) break;   // kapandı
@@ -704,6 +712,17 @@ static bool pdbscope_scan(const std::wstring& target, std::vector<PeFunc>& out,
             DWORD got = 0;
             if (!ReadFile(rd, buf, sizeof(buf), &got, NULL) || !got) break;
             data.append(buf, got);
+            // canli ilerleme: satir say + PROGRESS satirlarini yakala
+            for (size_t p = data.size() >= got ? data.size() - got : 0; p + 1 <= data.size(); p++)
+                if (data[p] == '\n') rows++;
+            size_t pr;
+            while ((pr = data.find("PROGRESS ", pr == std::string::npos ? 0 : pr)) != std::string::npos) {
+                int v = atoi(data.c_str() + pr + 9);
+                if (v >= 0 && v <= 100) progs = v;
+                pr += 9;
+            }
+            if (percent) InterlockedExchange(percent, progs >= 0 ? progs : (rows ? (rows % 900) / 9 + 10 : 10));
+            if (found) InterlockedExchange(found, rows);
         } else {
             if (WaitForSingleObject(pinfo.hProcess, 60) == WAIT_OBJECT_0) {
                 // bitti; kalan veriyi boşalt
@@ -722,25 +741,42 @@ static bool pdbscope_scan(const std::wstring& target, std::vector<PeFunc>& out,
     CloseHandle(rd);
     CloseHandle(pinfo.hThread);
     CloseHandle(pinfo.hProcess);
-    // CSV çözümle
+    if (percent) InterlockedExchange(percent, 100);
+    // CSV çözümle — iki bicim:
+    //   pdbless  : rva,va,size,confidence,percent,class,kind,callers,sources,name (10)
+    //   semboller: rva,va,seg,off,orig_rva,size,type,is_code,is_function,module,name,demangled (13)
     int line_no = 0;
     size_t pos = 0;
     int added = 0, strong = 0;
+    int ncols = 0, c_size = 2, c_kind = 6, c_name = 9;
     while (pos < data.size()) {
         size_t e = data.find('\n', pos);
         std::string line = data.substr(pos, (e == std::string::npos ? data.size() : e) - pos);
         pos = (e == std::string::npos) ? data.size() : e + 1;
         if (!line.empty() && line[line.size() - 1] == '\r') line.erase(line.size() - 1);
         if (line.empty()) continue;
-        if (++line_no == 1) continue;   // başlık
+        ++line_no;
+        // 0.4.1 DUZELTME: baslik SATIR NUMARASIYLA degil ICERIKLE secilir —
+        // boruda stderr satirlari (fixme/PROGRESS) CSV'nin ONUNDE gelebilir;
+        // "ilk satir basliktir" varsayimi tum listeyi bosaltiyordu.
+        if (line.rfind("rva,", 0) == 0) {
+            ncols = 1;
+            for (size_t k = 0; k < line.size(); k++) if (line[k] == ',') ncols++;
+            if (ncols >= 13) { c_size = 5; c_kind = 7; c_name = 12; }   // semboller
+            else             { c_size = 2; c_kind = 6; c_name = 9; }    // pdbless
+            continue;
+        }
+        if (line.rfind("PROGRESS ", 0) == 0) continue;
+        if (ncols == 0) continue;   // baslik oncesi gurultu (fixme vb.)
         auto f = pdbscope_csv_line(line);
-        if (f.size() < 10) continue;
+        if ((int)f.size() < ncols || ncols < 10) continue;
         unsigned long long rva = strtoull(f[0].c_str(), NULL, 10);
-        unsigned long long size = strtoull(f[2].c_str(), NULL, 10);
-        const std::string& cls = f[5];
-        const std::string& kind = f[6];
-        const std::string& name = f[9];
-        if (cls == "CERTAIN" || cls == "HIGH") strong++;
+        unsigned long long size = strtoull(f[c_size].c_str(), NULL, 10);
+        const std::string& cls = (ncols >= 13) ? f[7] : f[5];
+        const std::string& kind = f[c_kind];
+        std::string name = f[c_name];
+        if (ncols >= 13 && name.empty()) name = f[10];
+        if (cls == "CERTAIN" || cls == "HIGH" || cls == "func") strong++;
         if (!rva) continue;
         PeFunc pf;
         pf.rva = rva; pf.size = size;
@@ -751,12 +787,80 @@ static bool pdbscope_scan(const std::wstring& target, std::vector<PeFunc>& out,
         added++;
     }
     if (note)
-        *note = std::wstring(L"PDBScope: ") + sym_numdec(added) + L" fonksiyon (CERTAIN/HIGH: " +
-                sym_numdec(strong) + L")";
+        *note = std::wstring(L"PDBScope[") + (use_pdb ? L"PDB" : L"pdbless") + L"]: " +
+                sym_numdec(added) + L" fonksiyon (güçlü: " + sym_numdec(strong) + L")";
     return added > 0;
+}
+static bool pdbscope_scan(const std::wstring& target, std::vector<PeFunc>& out,
+                          std::wstring* note) {
+    return pdbscope_scan_ex(target, out, note, false, NULL, NULL);
 }
 static std::wstring numdec(unsigned long long v) {
     wchar_t b[32]; _snwprintf(b, 32, L"%llu", v); return b;
+}
+// ---------------- 0.4.1: TARAMA IS PARCACIGI (x2: arayuz donmesin) ----------------
+// Kullanici istegi: tarama yeni thread'de + yuzde gostergesi + ayni klasorde
+// PDB varsa PDB ile, yoksa pdbless tarama.
+struct ScanJob {
+    std::wstring target;
+    std::vector<PeFunc> out;      // worker doldurur
+    std::wstring note;            // ozet satir
+    std::wstring mode;            // "PDB" / "pdbless"
+    bool use_pdb = false;
+    volatile LONG done = 0;
+    volatile LONG percent = 0;
+    volatile LONG found = 0;
+    bool ok = false;
+};
+static DWORD WINAPI scan_thread(LPVOID p) {
+    ScanJob* j = (ScanJob*)p;
+    // ayni klasorde <hedef>.pdb var mi?
+    std::wstring base = j->target;
+    size_t dot = base.rfind(L'.');
+    if (dot != std::wstring::npos && dot > base.rfind(L'\\')) base.resize(dot);
+    std::wstring pdb = base + L".pdb";
+    j->use_pdb = GetFileAttributesW(pdb.c_str()) != INVALID_FILE_ATTRIBUTES;
+    j->mode = j->use_pdb ? L"PDB" : L"pdbless";
+    j->ok = pdbscope_scan_ex(j->target, j->out, &j->note, j->use_pdb, &j->percent, &j->found);
+    if (!j->ok && j->note.empty()) j->note = L"pdbscope sonuc vermedi (arac yok?)";
+    InterlockedExchange(&j->done, 1);
+    return 0;
+}
+// 0.4.1: PDBScope sonucunu mevcut listeye birlestir (rva bazli; ayni rva'da
+// isim/boyut zenginlestirilir, yeni RVA'lar eklenir). Is parcacigi sonucuyla
+// calisir — is parcacigi g_pe/g_proj'e DOKUNMAZ.
+static void merge_funcs(PeInfo& pi, const std::vector<PeFunc>& pf, std::wstring* note_out) {
+    size_t added = 0, enriched = 0;
+    for (auto& f : pf) {
+        PeFunc* hit = NULL;
+        for (auto& e : pi.funcs) if (e.rva == f.rva) { hit = &e; break; }
+        if (hit) {
+            if (!hit->size && f.size) { hit->size = f.size; enriched++; }
+            if ((hit->name.empty() || hit->name.rfind(L"sub_", 0) == 0) && !f.name.empty()) hit->name = f.name;
+        } else {
+            PeFunc nf = f;
+            if (nf.name.empty()) {
+                wchar_t b[32]; _snwprintf(b, 32, L"sub_%08llX", nf.rva);
+                nf.name = b;
+            }
+            pi.funcs.push_back(nf);
+            added++;
+        }
+    }
+    fill_neighbor_sizes(pi);
+    if (note_out)
+        *note_out = L"   [+" + numdec(added) + L" new, " + numdec(enriched) + L" enriched]";
+}
+static void merge_pdbscope(PeInfo& pi, const std::wstring& path, std::wstring* note_out) {
+    std::vector<PeFunc> pf;
+    std::wstring note;
+    if (!pdbscope_scan(path, pf, &note)) {
+        if (note_out) *note_out = L"pdbscope: no result (tool not found or no functions)";
+        return;
+    }
+    std::wstring extra;
+    merge_funcs(pi, pf, &extra);
+    if (note_out) *note_out = note + extra;
 }
 static void ini_write(const wchar_t* sec, const wchar_t* key, const wchar_t* val) {
     WritePrivateProfileStringW(sec, key, val, g_ini);
@@ -811,7 +915,9 @@ static void add_log(const std::wstring& msg) {
 // ---------------- pencere oyuncaklari: dugme yaratma ----------------
 static HWND mk_ctl(HWND parent, const wchar_t* cls, const wchar_t* txt,
                    unsigned long style, int id, int x, int y, int w, int h) {
-    HWND c = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | style,
+    // 0.4.1: WS_CLIPSIBLINGS — kardes cocuklar birbirinin uzerine boyamaz
+    // (boot sayfasi / panel cakisma ve tiklama bulanikligi hususu)
+    HWND c = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style,
                              x, y, w, h, parent, (HMENU)(INT_PTR)id, NULL, NULL);
     SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
     return c;
@@ -1550,15 +1656,64 @@ static void dlg_settings() {
 }
 
 // ---------------- diyalog: Fonksiyon Ekle / Adrese Git (function_dialog.cc) ----------------
+struct ScanJob;                                        // 0.4.1: tarama is parcacigi (ileri bildirim)
+static DWORD WINAPI scan_thread(LPVOID p);
+static void merge_funcs(PeInfo& pi, const std::vector<PeFunc>& pf, std::wstring* note_out);
 struct AFState {
     bool goto_mode;
     HWND addr, end, list, filter;
     HWND combo_type, chk_lock;
+    HWND scan, grp_manual, lbl_base, lbl_end, grp_prot, lbl_type, status, tab;
+    ScanJob* job = NULL;          // 0.4.1: Tara is parcacigi
     int type; bool lock;
 };
+static AFState* g_af = NULL;      // 0.4.1: yeniden boyutlandirma icin aktif durum
+static HWND g_af_dlg = NULL;
+// 0.4.1 (x3): pencereyi yeniden konumlandir — WM_SIZE'dan cagrilir
+static void af_layout(HWND d) {
+    if (!g_af || g_af_dlg != d) return;
+    RECT rc; GetClientRect(d, &rc);
+    int W = rc.right, H = rc.bottom;
+    // Manual Address grubu (ust, sabit yukseklik)
+    MoveWindow(g_af->grp_manual, 10, 8, W - 20, 58, TRUE);
+    MoveWindow(g_af->lbl_base, 24, 34, 44, 18, TRUE);
+    MoveWindow(g_af->addr, 70, 31, (W - 100) / 2, 22, TRUE);
+    int ex = 70 + (W - 100) / 2 + 16;
+    MoveWindow(g_af->lbl_end, ex, 34, 40, 18, TRUE);
+    MoveWindow(g_af->end, ex + 44, 31, W - ex - 58, 22, TRUE);
+    // tab + sayfalar
+    int ty = 74, th = H - ty - 44;
+    MoveWindow(g_af->tab, 10, ty, W - 20, th, TRUE);
+    int px = 10 + 12, py = ty + 32, pw = W - 20 - 24, ph = th - 44;
+    bool pg0 = TabCtrl_GetCurSel(g_af->tab) == 0;
+    MoveWindow(g_af->filter, px, py, pw - 100, 22, TRUE);
+    MoveWindow(g_af->scan, px + pw - 92, py - 2, 92, 26, TRUE);
+    MoveWindow(g_af->list, px, py + 28, pw, ph - 28, TRUE);
+    MoveWindow(g_af->status, px, ty + th - 22, pw, 18, TRUE);
+    MoveWindow(g_af->grp_prot, px, py, pw, 110, TRUE);
+    MoveWindow(g_af->lbl_type, px + 16, py + 30, 120, 18, TRUE);
+    MoveWindow(g_af->combo_type, px + 140, py + 26, 240, 120, TRUE);
+    MoveWindow(g_af->chk_lock, px + 16, py + 62, 300, 20, TRUE);
+    // OK/Cancel (sag alt)
+    MoveWindow(GetDlgItem(d, IDOK), W - 210, H - 36, 96, 26, TRUE);
+    MoveWindow(GetDlgItem(d, IDCANCEL), W - 106, H - 36, 92, 26, TRUE);
+}
+// 0.4.1 (x3): fonksiyon listesi diyalog proc'u — WM_SIZE/WM_GETMINMAXINFO
+// af_layout'a yonlendirir, gerisi paylasilan dlg_proc'e gider
+static LRESULT CALLBACK af_dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_SIZE) { if (g_af && g_af_dlg == h) af_layout(h); return 0; }
+    if (msg == WM_GETMINMAXINFO) {
+        MINMAXINFO* mm = (MINMAXINFO*)lp;
+        mm->ptMinTrackSize.x = 640; mm->ptMinTrackSize.y = 500;
+        return 0;
+    }
+    return dlg_proc(h, msg, wp, lp);
+}
 static void af_fill_list(AFState* st) {
+    // 0.4.1 (x3): buyuk listelerde takilmayi onle — yeniden-boyama kapali toplu doldur
+    SendMessageW(st->list, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(st->list);
-    if (!g_proj.open) return;
+    if (!g_proj.open) { SendMessageW(st->list, WM_SETREDRAW, TRUE, 0); return; }
     std::wstring flt; ctl_txt(st->filter, &flt);
     int shown = 0;
     for (size_t i = 0; i < g_pe.funcs.size(); i++) {
@@ -1577,6 +1732,8 @@ static void af_fill_list(AFState* st) {
         ListView_SetItemText(st->list, idx, 4, (LPWSTR)src_name(f.source));
         shown++;
     }
+    SendMessageW(st->list, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(st->list, NULL, TRUE);
 }
 static bool addr_in_exec(unsigned long long a) {
     for (auto& s : g_pe.secs)
@@ -1589,82 +1746,128 @@ static std::wstring sym_by_addr(unsigned long long a) {
 }
 static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
     AFState st; st.goto_mode = goto_mode;
-    HWND d = dlg_base(goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC), 560, 478);
-    // 0.4.0: Manual Address grubu — Base + End (kullanici istegi;
+    // 0.4.1 (x3): buyuk + BOYUTLANDIRILABILIR pencere (eski: 560x478 sabit)
+    HWND d = dlg_base(goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC), 840, 640);
+    LONG_PTR wl = GetWindowLongPtrW(d, GWL_STYLE);
+    SetWindowLongPtrW(d, GWL_STYLE, wl | WS_THICKFRAME | WS_MAXIMIZEBOX);
+    SetWindowPos(d, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    // 0.4.1 (x3): yeniden boyutlandirma proc'u
+    SetWindowLongPtrW(d, GWLP_WNDPROC, (LONG_PTR)af_dlg_proc);
+    // 0.4.0/0.4.1: Manual Address grubu — Base + End (kullanici istegi;
     // listeden secilen fonksiyonun adresi Base'e, sonuna End yazilir)
-    mk_ctl(d, L"BUTTON", L(LS_MANUAL), BS_GROUPBOX, 0, 10, 12, 530, 58);
-    mk_ctl(d, L"STATIC", L(LS_BASE), 0, 0, 24, 36, 44, 18);
-    st.addr = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x501, 70, 33, 200, 22);
-    mk_ctl(d, L"STATIC", L(LS_END), 0, 0, 288, 36, 40, 18);
-    st.end = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x509, 330, 33, 200, 22);
+    st.grp_manual = mk_ctl(d, L"BUTTON", L(LS_MANUAL), BS_GROUPBOX, 0, 10, 8, 800, 58);
+    st.lbl_base = mk_ctl(d, L"STATIC", L(LS_BASE), 0, 0, 24, 34, 44, 18);
+    st.addr = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x501, 70, 31, 300, 22);
+    st.lbl_end = mk_ctl(d, L"STATIC", L(LS_END), 0, 0, 388, 34, 40, 18);
+    st.end = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x509, 432, 31, 340, 22);
     if (def_addr) { wchar_t b[32]; _snwprintf(b, 32, L"%llX", def_addr); set_txt(st.addr, b); }
-    HWND tab = mk_ctl(d, WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, 0x502, 10, 80, 530, 300);
+    st.tab = mk_ctl(d, WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, 0x502, 10, 74, 800, 440);
     TCITEMW ti; memset(&ti, 0, sizeof(ti)); ti.mask = TCIF_TEXT;
-    ti.pszText = (LPWSTR)L(LS_FUNCS); TabCtrl_InsertItem(tab, 0, &ti);
-    ti.pszText = (LPWSTR)L(LS_OPTIONS); TabCtrl_InsertItem(tab, 1, &ti);
+    ti.pszText = (LPWSTR)L(LS_FUNCS); TabCtrl_InsertItem(st.tab, 0, &ti);
+    ti.pszText = (LPWSTR)L(LS_OPTIONS); TabCtrl_InsertItem(st.tab, 1, &ti);
     // sayfa 0: fonksiyon listesi (PDB/MAP/stub/PDBScope dahil — Source kolonu)
-    st.filter = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x503, 20, 112, 300, 22);
-    HWND btn_scan = mk_ctl(d, L"BUTTON", L(LS_SCAN), WS_TABSTOP, 0x508, 330, 110, 80, 25);
-    (void)btn_scan;
+    st.filter = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x503, 22, 106, 560, 22);
+    st.scan = mk_ctl(d, L"BUTTON", L(LS_SCAN), WS_TABSTOP, 0x508, 600, 104, 190, 26);
     st.list = mk_ctl(d, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_TABSTOP |
-                     (goto_mode ? LVS_SINGLESEL : 0), 0x504, 20, 140, 505, 218);
+                     (goto_mode ? LVS_SINGLESEL : 0), 0x504, 22, 134, 768, 330);
     ListView_SetExtendedListViewStyle(st.list, LVS_EX_FULLROWSELECT);
     LVCOLUMNW c; memset(&c, 0, sizeof(c)); c.mask = LVCF_TEXT | LVCF_WIDTH;
     wchar_t* cols[5] = { (wchar_t*)L(LS_NAME), (wchar_t*)L(LS_ADDRESS), (wchar_t*)L(LS_SIZE),
                          (wchar_t*)L(LS_EXPORT), (wchar_t*)L(LS_SOURCE) };
-    int wds[5] = { 250, 90, 70, 50, 60 };
+    int wds[5] = { 420, 110, 90, 60, 80 };
     for (int i = 0; i < 5; i++) { c.pszText = cols[i]; c.cx = wds[i]; ListView_InsertColumn(st.list, i, &c); }
+    st.status = mk_ctl(d, L"STATIC", L"", 0, 0x50A, 22, 472, 760, 18);
     af_fill_list(&st);
     // sayfa 1: options (sadece add modu — VMProtect: smAddFunction)
-    HWND pg1 = mk_ctl(d, L"BUTTON", L(LS_PROTECTION), BS_GROUPBOX, 0x505, 20, 112, 505, 100);
-    HWND lbl_type = mk_ctl(d, L"STATIC", L(LS_COMPTYPE), 0, 0, 36, 140, 120, 18);
-    st.combo_type = mk_ctl(d, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0x506, 160, 136, 220, 120);
+    st.grp_prot = mk_ctl(d, L"BUTTON", L(LS_PROTECTION), BS_GROUPBOX, 0x505, 22, 106, 760, 110);
+    st.lbl_type = mk_ctl(d, L"STATIC", L(LS_COMPTYPE), 0, 0, 38, 136, 120, 18);
+    st.combo_type = mk_ctl(d, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0x506, 162, 132, 240, 120);
     ComboBox_AddString(st.combo_type, L(LS_VIRT));
     ComboBox_AddString(st.combo_type, L(LS_MUT));
     ComboBox_AddString(st.combo_type, (std::wstring(L(LS_ULTRA)) + L" (" + L(LS_MUT) + L" + " + L(LS_VIRT) + L")").c_str());
     ComboBox_SetCurSel(st.combo_type, 0);
-    HWND chk = mk_ctl(d, L"BUTTON", L(LS_LOCKKEY), BS_AUTOCHECKBOX | WS_TABSTOP, 0x507, 36, 170, 300, 20);
-    // 0.3.0 DUZELTME (UI bug #2): iki sekme sayfasi ayni anda gorunup
-    // ust uste biniyordu — sayfa-1 kontrolleri BASLANGICTA gizlenir.
-    ShowWindow(pg1, SW_HIDE);
-    ShowWindow(lbl_type, SW_HIDE);
+    mk_ctl(d, L"BUTTON", L(LS_LOCKKEY), BS_AUTOCHECKBOX | WS_TABSTOP, 0x507, 38, 168, 300, 20);
+    // 0.3.0 DUZELTME (UI bug #2) + 0.4.1 (x5): sayfa-1 kontrolleri BASLANGICTA
+    // gizli; sayfa gecisinde Tara dugmesi DAHIL tum sayfa kontrolleri
+    // gosterilip/gizlenir (eski kod Tara'yi iki sekmede de gosteriyordu).
+    ShowWindow(st.grp_prot, SW_HIDE);
+    ShowWindow(st.lbl_type, SW_HIDE);
     ShowWindow(st.combo_type, SW_HIDE);
+    HWND chk = GetDlgItem(d, 0x507);
     ShowWindow(chk, SW_HIDE);
-    mk_ctl(d, L"BUTTON", goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC), BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 350, 398, 96, 26);
-    mk_ctl(d, L"BUTTON", L(LS_CANCEL), WS_TABSTOP, IDCANCEL, 452, 398, 88, 26);
+    mk_ctl(d, L"BUTTON", goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC), BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 610, 578, 120, 28);
+    mk_ctl(d, L"BUTTON", L(LS_CANCEL), WS_TABSTOP, IDCANCEL, 738, 578, 92, 28);
     if (!g_pe.sym_note.empty())
         SetWindowTextW(d, (std::wstring(goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC)) + L"   [" + g_pe.sym_note + L"]").c_str());
     SetFocus(st.addr);
     // tab gecisi: TCN_SELCHANGE -> WM_APP+30 (dlg_proc)
     bool okout = false;
     EnableWindow(g_main, FALSE);
+    g_af = &st; g_af_dlg = d;
     ShowWindow(d, SW_SHOW); UpdateWindow(d);
+    af_layout(d);
+    SetTimer(d, 2, 100, NULL);   // 0.4.1: Tara ilerleme sayaci
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0)) {
         if (m.message == WM_APP_MODAL_OK && (m.hwnd == d || IsChild(d, m.hwnd))) { okout = true; break; }
         if (m.message == WM_APP_MODAL_CANCEL && (m.hwnd == d || IsChild(d, m.hwnd))) break;
-        // 0.4.0: Scan dugmesi — pdbscope ile tam tarama + listeyi yenile
+        // 0.4.1 (x5): Tara — IS PARCACIGIYLA (arayuz donmez); ilerleme
+        // WM_TIMER'da guncellenir; bitince liste tazelenir
         if (m.message == WM_COMMAND && m.hwnd == d && LOWORD(m.wParam) == 0x508) {
-            SetCursor(LoadCursor(NULL, IDC_WAIT));
-            std::wstring note;
-            merge_pdbscope(g_pe, g_proj.target, &note);
-            SetCursor(LoadCursor(NULL, IDC_ARROW));
-            if (!note.empty()) SetWindowTextW(d, (std::wstring(goto_mode ? L(LS_GOTO) : L(LS_ADDFUNC)) + L"   [" + note + L"]").c_str());
+            if (st.job) continue;
+            st.job = new ScanJob();
+            st.job->target = g_proj.target;
+            HANDLE th = CreateThread(NULL, 0, scan_thread, st.job, 0, NULL);
+            if (th) CloseHandle(th);
+            if (!th) { delete st.job; st.job = NULL; }
+            if (st.job) {
+                EnableWindow(st.scan, FALSE);
+                set_txt(st.status, L"Taranıyor...");
+            }
+            continue;
+        }
+        // 0.4.1 (x5): filtre — EN_CHANGE artik dogru sekilde yakalanir
+        // (eski kod EN_CHANGE'i WM_NOTIFY icinde ariyordu -> "sub" yazinca
+        // hicbir sey olmuyordu)
+        if (m.message == WM_COMMAND && m.hwnd == d && LOWORD(m.wParam) == 0x503 &&
+            HIWORD(m.wParam) == EN_CHANGE) {
             af_fill_list(&st);
+            continue;
+        }
+        if (m.message == WM_TIMER && m.wParam == 2 && st.job) {
+            int pc = (int)InterlockedCompareExchange(&st.job->percent, 0, 0);
+            int fd = (int)InterlockedCompareExchange(&st.job->found, 0, 0);
+            wchar_t sb[160];
+            _snwprintf(sb, 160, L"Taranıyor [%s]  %%%d — %d fonksiyon bulundu",
+                       st.job->mode.c_str(), pc, fd);
+            set_txt(st.status, sb);
+            if (InterlockedCompareExchange(&st.job->done, 0, 0)) {
+                std::wstring extra;
+                merge_funcs(g_pe, st.job->out, &extra);
+                wchar_t sb2[220];
+                _snwprintf(sb2, 220, L"%s%s", st.job->note.c_str(), extra.c_str());
+                set_txt(st.status, sb2);
+                EnableWindow(st.scan, TRUE);
+                af_fill_list(&st);
+                delete st.job; st.job = NULL;
+            }
             continue;
         }
         if (m.message == WM_APP + 30) {
             int p = (int)m.wParam;
             ShowWindow(st.filter, p == 0 ? SW_SHOW : SW_HIDE);
+            ShowWindow(st.scan, p == 0 ? SW_SHOW : SW_HIDE);
             ShowWindow(st.list, p == 0 ? SW_SHOW : SW_HIDE);
-            ShowWindow(pg1, p == 1 ? SW_SHOW : SW_HIDE);
-            ShowWindow(lbl_type, p == 1 && !goto_mode ? SW_SHOW : SW_HIDE);
+            ShowWindow(st.status, p == 0 ? SW_SHOW : SW_HIDE);
+            ShowWindow(st.grp_prot, p == 1 ? SW_SHOW : SW_HIDE);
+            ShowWindow(st.lbl_type, p == 1 && !goto_mode ? SW_SHOW : SW_HIDE);
             ShowWindow(st.combo_type, p == 1 && !goto_mode ? SW_SHOW : SW_HIDE);
             ShowWindow(chk, p == 1 && !goto_mode ? SW_SHOW : SW_HIDE);
+            af_layout(d);
             continue;
         }
-        // 0.3.0: liste bildirimleri — secim -> adres doldur (VMP davranisi),
-        // cift tiklama -> OK
+        // 0.3.0/0.4.1 (x4): liste bildirimleri — secim -> Base/End dolum
+        // (adres + adres+boyut; boyut yoksa +16), cift tiklama -> OK
         if (m.message == WM_NOTIFY && m.hwnd == d) {
             NMHDR* nm = (NMHDR*)m.lParam;
             if (nm && nm->hwndFrom == st.list) {
@@ -1675,7 +1878,6 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
                         it.mask = LVIF_PARAM; it.iItem = lv->iItem;
                         if (ListView_GetItem(st.list, &it) && (size_t)it.lParam < g_pe.funcs.size()) {
                             const PeFunc& pf = g_pe.funcs[it.lParam];
-                            // 0.4.0: secilen fonksiyonun adresi Base'e, sonuna End yazilir
                             wchar_t b[32]; _snwprintf(b, 32, L"%llX", pf.rva);
                             set_txt(st.addr, b);
                             _snwprintf(b, 32, L"%llX", pf.rva + (pf.size ? pf.size : 16));
@@ -1687,14 +1889,22 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
                     if (ia->iItem >= 0) { okout = true; break; }
                 }
             }
-            // filtre degisimi -> listeyi yeniden doldur
-            if (nm && nm->hwndFrom == st.filter && nm->code == EN_CHANGE) af_fill_list(&st);
             if (!IsDialogMessageW(d, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
             continue;
         }
         if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); break; }
         if (!IsDialogMessageW(d, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
     }
+    KillTimer(d, 2);
+    // 0.4.1: diyaloq kapanirken tarama hala yururse bitmesini bekleyip
+    // sonucu listeye kaydet (worker kendi tamponuna yazar, guvenli)
+    if (st.job) {
+        while (!InterlockedCompareExchange(&st.job->done, 0, 0)) Sleep(30);
+        merge_funcs(g_pe, st.job->out, NULL);
+        delete st.job; st.job = NULL;
+        af_fill_list(&st);
+    }
+    g_af = NULL; g_af_dlg = NULL;
     EnableWindow(g_main, TRUE); SetActiveWindow(g_main);
     // 0.3.0 DUZELTME (UI bug #1): kontrol degerleri YIKMADAN ONCE okunur
     std::wstring addr_txt; ctl_txt(st.addr, &addr_txt);
@@ -2195,6 +2405,20 @@ static void start_compile() {
     for (auto& f : g_proj.funcs) {
         if (f.excluded) continue;
         if (f.type != 0) any_mut = true;
+        // 0.4.1 (x6 DUZELTME): End (brk) BILINEN fonksiyonlar KESIN
+        // {rva, boyut, tip} olarak motora gider. 0.4.0'a kadar manuel adresler
+        // yalnizca tarayici aday eslesmesiyle iletiliyordu; aday bulunamazsa
+        // ULTRA secilse bile fonksiyona DOKUNULMIYORDU (kullanicinin
+        // "ULTRA sanallastirma uygulamiyor mu?" raporunun kok nedeni).
+        if (f.brk > f.rva + 16) {
+            ManFn mf;
+            mf.rva = (u32)f.rva;
+            mf.size = (u32)(f.brk - f.rva);
+            mf.ty = f.type;
+            mf.name = w2s(f.name);
+            opt.manual.push_back(mf);
+            continue;
+        }
         // 0.3.0: motor isim tabani export/COFF'tur; PDB/MAP/Stub kaynakli
         // fonksiyonlar RVA-hex olarak iletilir (motor RVA'dan da secer)
         bool engine_knows_name = (f.src == SYM_EXPORT || f.src == SYM_COFF);
@@ -2209,7 +2433,7 @@ static void start_compile() {
         // fonksiyon bazinda motora aktarilir — VMProtect davranisi
         opt.ftypes[key] = f.type;
     }
-    if (g_proj.funcs.empty() || opt.funcs.empty()) opt.all = true;
+    if (g_proj.funcs.empty() || (opt.funcs.empty() && opt.manual.empty())) opt.all = true;
     opt.antidebug = (g_proj.options & cpCheckDebugger) != 0;
     opt.strenc = (g_proj.options & cpCryptValues) != 0;
     opt.memprot = (g_proj.options & cpMemoryProtection) != 0;
@@ -2438,36 +2662,6 @@ static void fill_neighbor_sizes(PeInfo& pi) {
         }
     }
 }
-// 0.4.0: PDBScope taramasini mevcut listeye birlestir (rva bazli; ayni rva'da
-// isim/boyut zenginlestirilir, yeni RVA'lar eklenir). Not cikti parametresiyle doner.
-static void merge_pdbscope(PeInfo& pi, const std::wstring& path, std::wstring* note_out) {
-    std::vector<PeFunc> pf;
-    std::wstring note;
-    if (!pdbscope_scan(path, pf, &note)) {
-        if (note_out) *note_out = L"pdbscope: no result (tool not found or no functions)";
-        return;
-    }
-    size_t added = 0, enriched = 0;
-    for (auto& f : pf) {
-        PeFunc* hit = NULL;
-        for (auto& e : pi.funcs) if (e.rva == f.rva) { hit = &e; break; }
-        if (hit) {
-            if (!hit->size && f.size) { hit->size = f.size; enriched++; }
-            if ((hit->name.empty() || hit->name.rfind(L"sub_", 0) == 0) && !f.name.empty()) hit->name = f.name;
-        } else {
-            PeFunc nf = f;
-            if (nf.name.empty()) {
-                wchar_t b[32]; _snwprintf(b, 32, L"sub_%08llX", nf.rva);
-                nf.name = b;
-            }
-            pi.funcs.push_back(nf);
-            added++;
-        }
-    }
-    fill_neighbor_sizes(pi);
-    if (note_out)
-        *note_out = note + L"   [+" + numdec(added) + L" new, " + numdec(enriched) + L" enriched]";
-}
 static void open_target(const std::wstring& path) {
     SetCursor(LoadCursor(NULL, IDC_WAIT));   // 0.4.0: buyuk dosyalarda arayuz yanit verir gorunur
     PeInfo pi; std::wstring err;
@@ -2476,10 +2670,49 @@ static void open_target(const std::wstring& path) {
         MessageBoxW(g_main, (std::wstring(L"Cannot open file: ") + err).c_str(), L(LS_ERROR), MB_ICONERROR);
         return;
     }
-    // 0.4.0: TUM fonksiyonlar — PDBScope (kullanici araci) entegrasyonu.
-    // Tarama arayuz kurulmadan once tek subprocess ile yapilir.
-    std::wstring scope_note;
-    merge_pdbscope(pi, path, &scope_note);   // 0.4.0: selftest dahil — funcs= sayacı kanıtı
+    // 0.4.1 (x2): TARAMA IS PARCACIGI — arayuz donmaz; ilerleme yuzdesi +
+    // bulunan fonksiyon sayisi gosterilir. PDB ayni klasorde varsa "semboller"
+    // ile, yoksa "pdbless" ile taranir (worker karar verir).
+    ScanJob* job = new ScanJob();
+    job->target = path;
+    HANDLE th = CreateThread(NULL, 0, scan_thread, job, 0, NULL);
+    if (th) CloseHandle(th);
+    if (!th) {   // thread acilamazsa eski senkron yol (savunmaci)
+        std::wstring note;
+        merge_pdbscope(pi, path, &note);
+        delete job;
+    } else {
+        // ilerleme diyalogu (mesaj pompali — ana pencere canli kalir)
+        HWND pd = dlg_base(L(LS_SCANNING), 420, 130);
+        HWND st1 = mk_ctl(pd, L"STATIC", L"", 0, 0xF11, 20, 20, 380, 20);
+        HWND pb  = mk_ctl(pd, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE, 0xF12, 20, 50, 380, 22);
+        SendMessageW(pb, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+        HWND st2 = mk_ctl(pd, L"STATIC", L"", 0, 0xF13, 20, 82, 380, 20);
+        ShowWindow(pd, SW_SHOW); UpdateWindow(pd);
+        SetTimer(pd, 3, 100, NULL);   // 0.4.1: pump'i uyandirir (job->done kontrolu)
+        MSG m;
+        while (GetMessageW(&m, NULL, 0, 0)) {
+            if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); break; }
+            if (m.message == WM_TIMER && m.hwnd == pd && m.wParam == 3) {
+                int pc = (int)InterlockedCompareExchange(&job->percent, 0, 0);
+                int fd = (int)InterlockedCompareExchange(&job->found, 0, 0);
+                wchar_t b1[160], b2[96];
+                _snwprintf(b1, 160, L"PDBScope taraması  [%s]  %s", job->mode.c_str(), basename_of(path).c_str());
+                _snwprintf(b2, 96, L"%%%d — %d fonksiyon bulundu", pc, fd);
+                SetWindowTextW(st1, b1);
+                SetWindowTextW(st2, b2);
+                SendMessageW(pb, PBM_SETPOS, pc, 0);
+                if (InterlockedCompareExchange(&job->done, 0, 0)) break;
+            }
+            if (!IsDialogMessageW(pd, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
+        }
+        KillTimer(pd, 3);
+        DestroyWindow(pd);
+        std::wstring extra;
+        merge_funcs(pi, job->out, &extra);
+        g_scan_note = job->note + extra;
+        delete job;
+    }
     g_pe = pi;
     g_proj = Project();
     g_proj.open = true;
@@ -2491,7 +2724,7 @@ static void open_target(const std::wstring& path) {
     update_all();
     add_log(L"Opened: " + path + (pi.is64 ? L"  (x64)" : L"  (x86)"));
     if (!pi.sym_note.empty()) add_log(pi.sym_note);
-    if (!scope_note.empty()) add_log(scope_note);
+    if (!g_scan_note.empty()) add_log(g_scan_note);
     if (!pi.funcs.empty())
         add_log(std::wstring(L"Functions: ") + numdec(pi.funcs.size()) + L"  (" + src_name(pi.funcs[0].source) + L"...)");
     SetCursor(LoadCursor(NULL, IDC_ARROW));
@@ -2832,7 +3065,20 @@ static void layout() {
     MoveWindow(GetDlgItem(g_welcome, IDM_EXAMPLES), 400, 230, 210, 36, TRUE);
     MoveWindow(GetDlgItem(g_welcome, IDM_HELP), 400, 274, 210, 36, TRUE);
     MoveWindow(GetDlgItem(g_welcome, 0xA04), 40, 142, 320, body_h - 160 > 290 ? body_h - 160 : 290, TRUE);
-    ShowWindow(g_welcome, g_proj.open ? SW_HIDE : SW_SHOW);
+    // 0.4.1 (x1 DUZELTME): boot sayfasi VISIBLE iken calisma-alani panelleri
+    // TAMAMEN gizlenir — VMP boot_frame davranisi. Kardeş pencereler (agac/
+    // liste/prop/log/split) welcome'in ALTINDA kalinca gercek Windows'ta
+    // boyama/tiklama bulanikligi uretiyordu (kullanicinin "arkadakiyle buga
+    // giriyor" raporu). Tek kaynak: layout, her zaman.
+    bool boot = !g_proj.open;
+    ShowWindow(g_welcome, boot ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_tree,  (!boot && g_tab == 0) ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_func,  (!boot && g_tab == 1) ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_prop,  !boot ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_dir,   (!boot && g_rightmode == 1) ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_log,   !boot ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_split, !boot ? SW_SHOW : SW_HIDE);
+    if (g_filter) ShowWindow(g_filter, (!boot && g_tab == 1) ? SW_SHOW : SW_HIDE);
     depth--;   // 0.4.0: giris-koruma sayacini geri ver
 }
 
@@ -3558,6 +3804,21 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
                         opt.funcs.push_back(nm);
                         opt.ftypes[nm] = tv;
                         have_funcs = true;
+                    } else if (!wcscmp(argv[j], L"--add") && j + 1 < argc) {
+                        // 0.4.1: manuel fonksiyon — --add BASE:END:TYPE (hex RVA)
+                        std::string one = w2s(argv[++j]);
+                        size_t c1 = one.find(':'), c2 = (c1 == std::string::npos) ? std::string::npos : one.find(':', c1 + 1);
+                        if (c1 != std::string::npos && c2 != std::string::npos) {
+                            ManFn mf;
+                            mf.rva  = (u32)strtoul(one.substr(0, c1).c_str(), nullptr, 16);
+                            mf.size = (u32)strtoul(one.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 16) - mf.rva;
+                            std::string t = one.substr(c2 + 1);
+                            mf.ty = (t == "M") ? 1 : (t == "U" ? 2 : 0);
+                            char nb[40]; snprintf(nb, sizeof nb, "MANUAL_0x%X", mf.rva);
+                            mf.name = nb;
+                            opt.manual.push_back(mf);
+                            have_funcs = true;
+                        }
                     } else if (!wcscmp(argv[j], L"--antidebug")) opt.antidebug = true;
                     else if (!wcscmp(argv[j], L"--strenc")) opt.strenc = true;
                     else if (!wcscmp(argv[j], L"--memprot")) opt.memprot = true;
@@ -3645,7 +3906,7 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
         0, 0, 0, 0, g_main, (HMENU)IDC_MAIN_LOG, hI, NULL);
     g_split = CreateWindowExW(0, L"STATIC", NULL, WS_CHILD | WS_VISIBLE | SS_NOTIFY,
         0, 0, 0, 0, g_main, (HMENU)IDC_SPLIT_V, hI, NULL);
-    g_welcome = CreateWindowExW(0, L"XPROTECT_WELCOME", NULL, WS_CHILD,
+    g_welcome = CreateWindowExW(0, L"XPROTECT_WELCOME", NULL, WS_CHILD | WS_CLIPSIBLINGS,
         0, 0, 0, 0, g_main, (HMENU)IDC_MAIN_WELCOME, hI, NULL);
     // ---- 0.4.0: boot sayfasi — VMP boot_frame birebir yapi ----
     // ust: "Welcome to XProtect Ultimate"; sol: Recent Files (10); sag: Quick Start

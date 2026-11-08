@@ -262,6 +262,41 @@ static u64 vm_natcall(u64 t, const u64* regs) {
 #endif
 #endif
 
+#if defined(VM_IS_X86)
+/* 0.4.1: x86 natcall — stdcall VE cdecl destegi.
+   Kontrat: cagri aninda argumanlar misafir yiginindadir (OP_PUSH ile basilmis;
+   fiziksel adres = regs[RSP] - VM_DELTA). Misafir yiginina gecilip hedef
+   `call` ile cagrilarak callee'nin KENDI ret/ret imm'si yigini duzeltir
+   (stdcall imm16 + cdecl ikisi de otomatik). EAX donus degeri; yeni misafir
+   ESP = callee sonrasi gercek ESP + VM_DELTA.
+   Register guvenligi:
+     - edi: yorumlayici ESP'sini saklar (Win32 ABI callee korur; yine de
+       clobber bildirilir -> GCC canli degeri ezilmeden tasir)
+     - esi/edx: girdiler (esp_real / hedef); edx cagrildiktan sonra kullanilmaz
+     - ecx: cikti (callee sonrasi gercek ESP); eax: cikti (donus degeri)
+     - YIGIN: esp hedef cerceveye gecirilir; tum giris/cikis register bagli,
+       bellek operandi YOK (esp degisirken frame-goreli erisim bozulur). */
+static u32 vm_natcall_x86(u32 t, u32 guest_esp, u32 guest_ecx, u32 guest_edx,
+                          u32* new_guest_esp) {
+    u32 ret;
+    register u32 r_esp __asm__("esi") = guest_esp - (u32)VM_DELTA;
+    register u32 r_ecx __asm__("ecx") = guest_ecx;   /* thiscall/fastcall 1. arg */
+    register u32 r_edx __asm__("edx") = guest_edx;   /* fastcall 2. arg */
+    register u32 r_t   __asm__("edi") = t;
+    __asm__ volatile(
+        "movl %%esp, %%ebp \n\t"     /* yorumlayici ESP -> ebp (clobber) */
+        "movl %%esi, %%esp \n\t"     /* misafir yiginina gec */
+        "call *%%edi \n\t"           /* callee kendi ret/ret imm'si temizler */
+        "movl %%esp, %%esi \n\t"     /* callee sonrasi gercek ESP (cikti) */
+        "movl %%ebp, %%esp \n\t"     /* yorumlayici ESP geri */
+        : "+S"(r_esp), "=a"(ret)
+        : "c"(r_ecx), "d"(r_edx), "D"(r_t)
+        : "ebp", "memory", "cc");
+    *new_guest_esp = r_esp + (u32)VM_DELTA;
+    return ret;
+}
+#endif
+
 // --- yorumlayici ---
 static void vm_run(VMContext* c) {
     STRM s;
@@ -502,9 +537,22 @@ static void vm_run(VMContext* c) {
             v32 = sf32(&s);
 #ifdef VM_IS_X64
             c->regs[0] = vm_natcall(c->base + (u64)v32, c->regs);
+#elif defined(VM_IS_X86)
+            {
+                /* 0.4.1: x86 dis cagri — stdcall/cdecl/thiscall/fastcall;
+                   yigin argumanlari misafir yiginindadir, ECX/EDX register
+                   argumanlari gercek register'lara yuklenir (thiscall!). */
+                u32 newesp = 0;
+                u32 t = (u32)(c->base + (u64)v32);
+                u32 g = (u32)(c->regs[REG_RSP] & 0xFFFFFFFFu);
+                u32 gecx = (u32)(c->regs[1] & 0xFFFFFFFFu);
+                u32 gedx = (u32)(c->regs[2] & 0xFFFFFFFFu);
+                c->regs[0] = (u64)vm_natcall_x86(t, g, gecx, gedx, &newesp);
+                c->regs[REG_RSP] = (u64)newesp;
+            }
 #else
             (void)v32;
-            c->done = 1;   // x86: dis cagri desteklenmez (encoder engeller)
+            c->done = 1;   // diger hedefler: dis cagri desteklenmez
 #endif
 
         } else if (op == OP_RET) {

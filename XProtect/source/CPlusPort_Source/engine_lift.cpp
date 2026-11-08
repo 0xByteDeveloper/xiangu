@@ -96,7 +96,8 @@ struct Lift {
 
 VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                   u64 imagebase, u32 imagesize, bool allow_call,
-                  u32 rdata_rva, u32 rdata_size, int junk_level, u32 junk_seed) {
+                  u32 rdata_rva, u32 rdata_size, int junk_level, u32 junk_seed,
+                  bool pad_terminates) {
     VFn F; F.rva = rva; F.size = size;
 
     Lift L{ F.plain, F.fix, F.str_refs, is64, imagebase, rdata_rva, rdata_size };
@@ -131,6 +132,9 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
     while (pc < end) {
         Insn I = disasm(code + (pc - rva), (int)(end - pc), is64, pc, imagebase, imagesize);
         if (I.op == XP_UNKNOWN || I.len == 0) {
+            // 0.4.1: MUTANT girdide bilinmeyen bayt = sessiz kisalma riski ->
+            // sesli hata (yarim govde, VM'de erken cikis uretir).
+            if (!pad_terminates) { F.why = "pc=0x" + hex32(pc) + ": mutant icinde cozulemeyen bayt"; return F; }
             if (!saw_ret) { F.why = "pc=0x" + hex32(pc) + ": " + (I.text.empty() ? "cozulemedi" : I.text); return F; }
             break; // ret sonrasi padding/CC -> dur
         }
@@ -141,9 +145,9 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
             //    gercek talimat gelirse baska fonksiyona tasindik -> dur.
             //  - dolgu YOKKEN ret sonrasi kod gelirse AYNI fonksiyonun coklu
             //    cikis/yaln sonrasi blogudur (zig bunu uretir) -> taramaya devam.
-            if (I.op == XP_NOP) { body_ended = true; pc += I.len; continue; }
+            if (I.op == XP_NOP) { if (pad_terminates) body_ended = true; pc += I.len; continue; }
             if (I.op == XP_INT3) break;
-            if (body_ended) break;
+            if (body_ended && pad_terminates) break;
         }
 
         if (!F.plain.empty() && I.op != XP_RET) emit_junk();
@@ -310,6 +314,11 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
     }
 
     if (!saw_ret) { F.why = "ret bulunamadi"; return F; }
+
+    // 0.4.1 DÜZELTME (0.3.0 gizli bug): yerel retimm hicbir zaman F.retimm'e
+    // aktarilmiyordu -> tum x86 stub'lari sentinel ile uretiliyordu (C3).
+    // cdecl'de kazayla dogru; stdcall (ret imm16) fonksiyonlarda ESP kayiyordu.
+    F.retimm = retimm;
 
     // fixup'lari uygula: rel32 = hedef_bc - (site + 4)
     for (auto& fx : F.fix) {

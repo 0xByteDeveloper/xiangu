@@ -2,9 +2,11 @@
 // muttest.cpp — motor CLI test koşumu (Linux/wine bagimsiz)
 // Kullanim:
 //   ./muttest <girdi.exe> <cikti.exe> <V|M|U> [guc 1..3] [ad:TIP ...]
+//             [@BASE:END:TYPE ...]                       (0.4.1 manuel)
 // Ornegin:
 //   ./muttest Test.exe Test_M_vmp.exe M 2
 //   ./muttest Test.exe Test_mix.exe V 2 WrapPos:M MovePlayer:U
+//   ./muttest m2.exe m2_vmp.exe U 2 @D7610:D766C:U
 // ============================================================
 #include "engine.hpp"
 #include <cstdio>
@@ -14,7 +16,7 @@
 
 int main(int argc, char** argv) {
     if (argc < 4) {
-        printf("kullanim: %s <in> <out> <V|M|U> [strength] [ad:TIP ...]\n", argv[0]);
+        printf("kullanim: %s <in> <out> <V|M|U> [strength] [ad:TIP ...] [@BASE:END:TYPE ...]\n", argv[0]);
         return 2;
     }
     Options o;
@@ -24,6 +26,20 @@ int main(int argc, char** argv) {
     if (argc > 4) o.mut_strength = atoi(argv[4]);
     for (int i = 5; i < argc; i++) {
         std::string s = argv[i];
+        if (s[0] == '@') {
+            // 0.4.1: manuel fonksiyon @BASE:END:TYPE (hex)
+            size_t c1 = s.find(':', 1), c2 = (c1 == std::string::npos) ? std::string::npos : s.find(':', c1 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos) { printf("kotu manuel: %s\n", s.c_str()); return 2; }
+            ManFn m;
+            m.rva  = (u32)strtoul(s.substr(1, c1 - 1).c_str(), nullptr, 16);
+            m.size = (u32)strtoul(s.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 16) - m.rva;
+            std::string t = s.substr(c2 + 1);
+            m.ty = (t == "M") ? 1 : (t == "U" ? 2 : 0);
+            char nb[40]; snprintf(nb, sizeof nb, "MANUAL_0x%X", m.rva);
+            m.name = nb;
+            o.manual.push_back(m);
+            continue;
+        }
         size_t c = s.find_last_of(':');
         if (c == std::string::npos) { o.funcs.push_back(s); continue; }
         std::string name = s.substr(0, c);

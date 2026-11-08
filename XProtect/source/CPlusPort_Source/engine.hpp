@@ -101,9 +101,14 @@ struct VFn {
 
 // lifter: fonksiyonun makine kodunu VM bayt-koduna cevirir.
 // junk_level: 0=kapali, 2=mutation junk; junk_seed: deterministik uretim
+// pad_terminates: 0.4.1 — true: ret sonrasi dolgu (nop/int3) govdeyi bitirir
+// (tarayici fonksiyonlari; komsuya tasma korumasi). false: MUTANT girdi —
+// mutasyon junk'i dolgu benzeri bayt uretebilir; yuruyus kesin boyuta kadar
+// devam eder, bilinmeyen opcode sessiz kisalma YERINE sesli hata verir.
 VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                   u64 imagebase, u32 imagesize, bool allow_call,
-                  u32 rdata_rva, u32 rdata_size, int junk_level, u32 junk_seed);
+                  u32 rdata_rva, u32 rdata_size, int junk_level, u32 junk_seed,
+                  bool pad_terminates = true);
 
 // ---------------- Mutasyon cekirdegi (0.3.0) ----------------
 // VMProtect "Mutation" tipinin yerli uygulaması: fonksiyon makine
@@ -141,6 +146,12 @@ std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva,
                                u64 key, u32 bc_rva, u32 bc_len, u32 retimm);
 
 // ---------------- Orkestrasyon ----------------
+struct ManFn {               // 0.4.1: MANUEL fonksiyon (UI Add Function Base/End)
+    u32 rva = 0, size = 0;   // Base ve End-Base (kesin boyut — tarayici tahmini degil)
+    int  ty = 0;             // 0=V 1=M 2=U
+    std::string name;        // log/dokumante icin (bos olabilir)
+};
+
 struct Options {
     int  level = 1;            // LEGACY 0.2.0: 1=Virt 2=UltraVirt+VMjunk (ftypes yoksa U fallback)
     int  default_type = 0;     // 0.3.0: 0=Virtualization 1=Mutation 2=Ultra (ftypes disi varsayilan)
@@ -152,6 +163,7 @@ struct Options {
     bool vmenc = true;
     std::vector<std::string> funcs;   // isim ya da rva(hex) listesi; bos -> hepsi uygun olanlar
     bool all = false;
+    std::vector<ManFn> manual;        // 0.4.1: kesin {rva,boyut,tip} listesi — tarayici adayina bakilmaksizin derlenir
 };
 
 struct FnInfo {

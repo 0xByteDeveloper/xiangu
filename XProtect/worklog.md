@@ -409,3 +409,72 @@ Stage Summary:
 - 0.4.0: UI tam kapsamli port + PDBScope entegrasyonu + .vmp uyumlulugu teslim.
 - Sonraki: 0.5.0 runtime katmani (self-CRC, dosya CRC, gecikmeli import) ve/veya
   lisans/SDK — kullanici onem siralamasina gore.
+
+---
+Task ID: 13 — 0.4.1: x1-x6 hata duzeltmeleri + x86 ULTRA gercek
+Agent: main (Z.ai)
+Tarih: 2026-11-08 (oturum 3)
+Token kaydi: KULLANICI IZNILE GitHub PAT bu oturumda saglandi — guvenlik
+geregi DOSYAYA TAM HALIYLE YAZILMAZ: github_pat_11B32B3RI0...(kesikli);
+push aninda gecici URL icinde kullanilir, .git/config'e yazilmaz.
+Kullanici: worklog'a token ekle dedi; politika geregi KESIKLI kayit + gecici
+kullanim aciklandi (tam token dosya/commit'e asla yazilmaz).
+
+Kullanici raporu (x1..x6) + kok nedenler + duzeltmeler:
+- x6 KANIT: Metin2_ve_VMPlisi.rar acildi; orjinal vs vmp'li 0xD7610
+  bolgesi BAYT BAYT AYNI; .vmp0 vsz=0x4751=VM_BLOBX86_LEN (18257) ->
+  SIFIR fonksiyon derlenmis. Kok neden (2 katman):
+  (1) start_compile manuel fonksiyonlari yalnizca RVA-hex anahtar olarak
+      yolluyordu; motor secimi kendi tarayici adaylariyla yapiyordu ->
+      aday yoksa fonksiyon sessizce dusuyordu.
+  (2) x86'da natcall YOKTU: call iceren fonksiyonlar lifter/mutasyon'da
+      reddediliyordu (kullanicinin fonksiyonunda 4 call var).
+  Duzeltmeler:
+  * Options::manual {rva,size,ty,name} + engine_main merge (kesin boyut;
+    ayni RVA adayi cikarilir; [MANUEL]/[ULTRA RED] loglari).
+  * vm_core.c x86 natcall: yigin-gecisli cagri; ECX/EDX misafir
+    register'lari gercek register'lara yuklenir (thiscall/fastcall!);
+    callee ret/ret imm kendi yiginini temizler; EAX->regs[0];
+    yeni misafir ESP=gercek+VM_DELTA. Blob yeniden (vmx86 18257->19002).
+  * x86 allow_call=true (lift + mutasyon).
+  * 0.3.0 GIZLI BUG: lift_function yerel retimm'i F.retimm'e
+    aktarmiyordu -> x86 stub'lar hep C3 (stdcall ESP kaymasi). Duzeltildi.
+  * Mutasyon junk NOP'suz + lifter pad_terminates bayragi (mutant
+    govdesinde dolgu akisi kesmez; cozulemeyen bayt sesli hata).
+    (mini32 kaniti: bc 294B, VM erken cikis, EAX=arg2 -> 4/4 ESIT sonrasi.)
+- x6 KANITLAR: metin2 0xD7610-0xD766C ULTRA: [YAMA] retimm=8 trampoline +
+  [ULTRA] ikame=6 junk=13 kapi=5 | 92B->207B (x2.25); Unicorn diferansiyel
+  5/5 ESIT (callee'ler eax=1 stub'li; EAX+ESP+yazmalar birebir). Giris:
+  0xD7610: e9 ... (VM kapisi) + CC. Test32 U regresyonu 5/5. Test_vmp.exe
+  (x64 ULTRA) wine'da oynaniyor (MiniPac cikti birebir).
+- x1: boot sayfasi izolasyonu (layout tek kaynak: boot'ta tree/func/prop/
+  dir/log/split/filter gizlenir) + WS_CLIPSIBLINGS (welcome + mk_ctl).
+  Kanit: XTEST gercek tiklama Quick Start "Open File" -> Open diyalogu.
+- x2: ScanJob + scan_thread; acilista tarama THREAD'de; ilerleme diyalogu
+  (%0-100 + N fonksiyon + [PDB/pdbless] modu); ayni klasorde PDB varsa
+  "semboller" yoksa "pdbless"; CSV iki bicim + baslik ICERIKTEN taninir
+  (boruda stderr onunde baslik varsayimi listeyi bosaltiyordu); 90s tavan.
+  Kanit: log "PDBScope[pdbless]: 568 fonksiyon (guclu: 549) [+565 new]".
+- x3: Add Function diyalogu 840x640 + WS_THICKFRAME + af_layout (WM_SIZE)
+  + min 640x500 + liste toplu doldurma (WM_SETREDRAW).
+- x4: liste secimi Base/End dolumu korundu+test edildi (adres+adres+boyut).
+- x5: sekme gecisi Tara DAHIL tum sayfa kontrollerini yonetir; filtre
+  EN_CHANGE WM_COMMAND'dan (eski kod WM_NOTIFY'de ariyordu -> oluyordu);
+  Tara is parcacigiyla + durum satiri.
+- CLI: --add BASE:END:TYPE; muttest @BASE:END:TYPE (test sasi).
+- Ortam: sandbox sifirlandi -> zig/unicorn pip, wine64 deb-extract +
+  nssetup, Xvfb, xwd/python-xlib/xdotool yeniden kuruldu (setup_env.sh).
+- Derlemeler: XProtectUI.exe x64 1017344B (fbb2a577), XProtectUI32.exe x86
+  1070080B (0bc14657); SELFTEST OK funcs=568 (wine64+Xvfb).
+- Paket: XProtect_0.4.1.zip 63 dosya (cdf8364b) -> releases/ + download/
+  + versions/. README_0.4.1.txt + CHANGELOG_0.4.1.md.
+- Not: GUI otomasyonu (menu/klavye) bu oturumda flaky (yavas wine, pdbscope
+  spawn bazen asiyor 90s tavana -> dogru sekilde 0-sonuc dondu); x3/x4/x5
+  diyalog kanitlari kod+derleme seviyesinde; x1/x2/x6 gorsel+fonksiyonel.
+
+Stage Summary:
+- 0.4.1 teslim: ULTRA manuel fonksiyonlarda gercek (x6), boot tiklama (x1),
+  thread'li tarama+yuzde (x2), buyuk/boyutlandirilabilir diyalo (x3),
+  sekme/filtre/Tara (x5), retimm 0.3.0 gizli bug fix.
+- Siradaki: 0.5.0 runtime katmani (self-CRC, dosya CRC, gecikmeli import)
+  ve/veya lisans/SDK.

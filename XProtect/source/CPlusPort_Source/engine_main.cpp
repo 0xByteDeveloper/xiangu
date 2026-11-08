@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <set>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -210,9 +212,45 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     snprintf(b, sizeof b, "[FONKSIYON] %zu aday (.text)", fns.size());
     L(b);
 
+    // --- 0.4.1: MANUEL fonksiyonlar (UI Manual Address Base/End) ---
+    // Kullanici Base/End ile kesin {rva, boyut, tip} verir. 0.4.0'a kadar bu
+    // liste motora hic ulasmadigindan (yalnizca tarayici adaylari eslestirilirdi)
+    // ULTRA (M+V) secilse bile fonksiyona DOKUNULMIYORDU (.vmp0 yalnizca VM blob
+    // tasiyordu). Artik aday-aramadan bagimsiz derlenir; ayni RVA'daki tarayici
+    // adayi kesin boyut lehine cikarilir.
+    for (auto& m : opt.manual) {
+        Section* ms = NULL;
+        for (auto& s : pe.secs)
+            if ((s.chars & 0x20000000) && m.rva >= s.va && m.rva < s.va + s.vsz) { ms = &s; break; }
+        if (!ms) { L("[MANUEL] RED: 0x" + hex32(m.rva) + " yurutulebilir bolumde degil"); continue; }
+        u32 sz = m.size;
+        if (!sz || sz > 0x100000) { L("[MANUEL] RED: gecersiz boyut 0x" + hex32(sz)); continue; }
+        if (m.rva + sz > ms->va + ms->vsz) {
+            sz = (ms->va + ms->vsz) - m.rva;
+            L("[MANUEL] uyari: End bolum sonunu asti -> 0x" + hex32(sz) + " kirpildi");
+        }
+        bool replaced = false;
+        for (size_t i = 0; i < fns.size(); ) {
+            if (fns[i].rva == m.rva) { fns.erase(fns.begin() + i); replaced = true; }
+            else i++;
+        }
+        FnInfo f; f.rva = m.rva; f.size = sz;
+        f.name = m.name.empty() ? ("MANUAL_0x" + hex32(m.rva)) : m.name;
+        f.selected = true;
+        fns.push_back(f);
+        snprintf(b, sizeof b, "[MANUEL] %s @RVA=0x%06X boyut=0x%X tip=%s%s",
+                 f.name.c_str(), f.rva, sz,
+                 m.ty == 0 ? "V" : (m.ty == 1 ? "M" : "U"),
+                 replaced ? " (tarayici adayi degisti)" : "");
+        L(b);
+    }
+
     // --- secim ---
+    std::set<u32> man_rva; std::map<u32,int> man_ty;   // 0.4.1: manuel fonksiyonlar
+    for (auto& m : opt.manual) { man_rva.insert(m.rva); man_ty[m.rva] = m.ty; }
     for (auto& f : fns) {
-        if (opt.all || opt.funcs.empty()) { f.selected = (f.size >= 24 && f.size <= 8192); continue; }
+        if (man_rva.count(f.rva)) continue;   // manuel: kesin secili (asla ezilmez)
+        if (opt.manual.empty() && (opt.all || opt.funcs.empty())) { f.selected = (f.size >= 24 && f.size <= 8192); continue; }
         for (auto& want : opt.funcs) {
             if (want == f.name) { f.selected = true; break; }
             u32 rv = (u32)strtoul(want.c_str(), nullptr, 16);
@@ -223,6 +261,8 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     // --- 0.3.0: TIP SEVKI (V/M/U) — ftypes anahtarlari opt.funcs
     // ile ayni formattadir (isim ya da buyuk-harf RVA-hex) ---
     auto ftype_of = [&](const FnInfo& f) -> int {
+        auto itm = man_ty.find(f.rva);          // 0.4.1: manuel tip onceligi
+        if (itm != man_ty.end()) return itm->second;
         auto it = opt.ftypes.find(f.name);
         if (it != opt.ftypes.end()) return it->second;
         char rb[24]; snprintf(rb, sizeof rb, "%X", f.rva);
@@ -264,7 +304,8 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
             // --- MUTASYON (native): makine kodu kalir, yeniden uretilir ---
             MutFn m = mutate_function(&pe.buf[raw], f.rva, f.size, pe.is64,
                                       pe.imagebase, pe.sizeofimage,
-                                      pe.is64 /*allow_call*/, opt.mut_strength,
+                                      true /* 0.4.1: x86 dis-cagri rel32 fixup zaten destekli */,
+                                      opt.mut_strength,
                                       f.rva ^ 0x9E3779B9u, 0 /*olcum gecisi*/);
             if (!m.ok) { f.note = "RED: mutasyon " + m.why; continue; }
             Compiled c; c.f = &f; c.ty = 1; c.mut = m;
@@ -281,7 +322,8 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         if (ty == 2) {
             MutFn m = mutate_function(&pe.buf[raw], f.rva, f.size, pe.is64,
                                       pe.imagebase, pe.sizeofimage,
-                                      pe.is64, opt.mut_strength,
+                                      true /* 0.4.1: x86 dis-cagri rel32 fixup zaten destekli */,
+                                      opt.mut_strength,
                                       f.rva ^ 0x9E3779B9u, f.rva /*base=fonksiyon RVA*/);
             if (m.ok) {
                 mbuf = m.code; lcode = mbuf.data(); lsize = (u32)mbuf.size();
@@ -289,6 +331,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                 nU++;
             } else {
                 // mutasyon mumkun degil: 0.2.0 U davranisina dus (VM junk)
+                L("[ULTRA] on-mutasyon RED: " + m.why + " -> saf V ye dusuluyor");
                 ty = 0; nUf++;
             }
             jl = 2;
@@ -300,9 +343,10 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         }
         VFn v = lift_function(lcode, f.rva, lsize, pe.is64,
                               pe.imagebase, pe.sizeofimage,
-                              pe.is64 /* x86: call iceren red */,
+                              true /* 0.4.1: x86 natcall eklendi — call iceren fonksiyonlar da sanallastirilir */,
                               rdata_rva, rdata_sz,
-                              jl, f.rva ^ 0x9E3779B9u);
+                              jl, f.rva ^ 0x9E3779B9u,
+                              mbuf.empty() /* 0.4.1: mutant girdide dolgu akisi kesmez */);
         if (!v.ok) { f.note = "RED: " + v.why; continue; }
         Compiled c; c.f = &f; c.ty = ty; c.v = v;
         if (ty == 2) c.mut = mkeep;
@@ -486,9 +530,10 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
             for (u32 i = (u32)st.size(); i < f.size; i++) pe.buf[raw + i] = 0xCC;
         }
         f.virtualized = true;
-        snprintf(b, sizeof b, "[YAMA] %s @RVA=0x%06X boyut=0x%X | bc=%uB key=0x%llX | stubRVA=0x%06X %s",
+        snprintf(b, sizeof b, "[YAMA] %s @RVA=0x%06X boyut=0x%X | bc=%uB key=0x%llX | stubRVA=0x%06X retimm=%u %s",
                  f.name.c_str(), f.rva, f.size, (u32)c.enc.size(),
-                 (unsigned long long)c.key, c.stub_rva, c.tramp ? "(trampoline)" : "(yerinde)");
+                 (unsigned long long)c.key, c.stub_rva, c.v.retimm,
+                 c.tramp ? "(trampoline)" : "(yerinde)");
         L(b);
         if (c.ty == 2 && c.mut.ok) {
             snprintf(b, sizeof b, "  [ULTRA] on-mutasyon: ikame=%u junk=%u kapi=%u | %uB->%uB (x%.2f)",

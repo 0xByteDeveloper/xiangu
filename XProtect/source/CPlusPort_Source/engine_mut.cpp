@@ -407,21 +407,24 @@ MutFn mutate_function(const u8* code, u32 rva, u32 size, bool is64,
         return -1;
     };
 
-    // calisan junk (bayrak-nötr zorunlu degil: bayraklar oluyorsa ALU serbest)
+    // calisan junk (bayrak-noruz zorunlu degil: bayraklar oluyorsa ALU serbest)
+    // 0.4.1: NOP JUNK YOK — lifter "ret sonrasi dolgu = govde bitti" sezgisine
+    // guvenir; mutantin ortasina serpilten 0x90/0F1F govdeyi yarida keser.
+    // Olü register yoksa junk uretilmez (bos gec).
     auto junk_item = [&](u32 live, bool gate) {
         // kapi junk'i HIC CALISMAZ -> liveness kosulu yok (yine gecerli kod);
         // calisan junk ise OLU register ister
         int r = gate ? pick_dead(0) : pick_dead(live);
         bool fdead = gate || !(live & FFLAG);
         u32 roll = rnd() & 15;
-        if (r < 0) { if (roll < 8) E.nop5(); else E.nop1(); return; }
+        if (r < 0) return;
         if (roll < 4)       E.mov_r_imm32(r, rnd());
         else if (roll < 6)  { E.push_imm32(rnd()); E.pop_r(r); }
         else if (roll < 9 && fdead) E.alu_r_imm(ALU_ADD, r, (i32)rnd(), 4);
         else if (roll < 11 && fdead) E.alu_rr(ALU_TEST, r, r, 4);
         else if (roll < 13) E.lea_self(r, (i32)(rnd() % 64) - 32, 4);
         else if (roll < 14 && is64) E.mov_r_imm64(r, ((u64)rnd() << 32) | rnd());
-        else E.nop5();
+        else if (fdead)     E.alu_rr(ALU_TEST, r, r, 4);
     };
 
     // JMP kapi: EB rel8 + atlanan junk (rel8 = junk uzunlugu)
