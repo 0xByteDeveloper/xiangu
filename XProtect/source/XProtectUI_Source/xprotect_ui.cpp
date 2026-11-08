@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -32,8 +33,8 @@
 
 // ---------------- surum ----------------
 #define XPROTECT_EDITION  L"XProtect Ultimate"
-#define XPROTECT_VERSION  L"0.4.0"
-#define XPROTECT_BUILD    L"2026-11-07"
+#define XPROTECT_VERSION  L"0.4.3"
+#define XPROTECT_BUILD    L"2026-11-08"
 
 // ---------------- dil tablosu (en.lng birebir + TR) ----------------
 enum LS {
@@ -830,13 +831,22 @@ static DWORD WINAPI scan_thread(LPVOID p) {
 // isim/boyut zenginlestirilir, yeni RVA'lar eklenir). Is parcacigi sonucuyla
 // calisir — is parcacigi g_pe/g_proj'e DOKUNMAZ.
 static void merge_funcs(PeInfo& pi, const std::vector<PeFunc>& pf, std::wstring* note_out) {
+    // 0.4.3 FIX (kullanici x1: buyuk exelerde tarama bitince UI saniyelerce
+    // bloklaniyordu): eski dongu her aday icin tum listeyi dogrusal ariyordu
+    // — O(N*M). metin2client gibi on binlerce fonksiyonlu dosyalarda bu,
+    // ilerleme diyalogu kapandiktan SONRA ana thread'i bloklayip beyaz ekrana
+    // yol aciyordu. rva -> index hash map ile O(N+M).
     size_t added = 0, enriched = 0;
+    pi.funcs.reserve(pi.funcs.size() + pf.size() + 8);   // isaretci gecerliligi
+    std::unordered_map<unsigned long long, PeFunc*> idx;
+    idx.reserve(pi.funcs.size() * 2 + 16);
+    for (auto& e : pi.funcs) idx.emplace(e.rva, &e);
     for (auto& f : pf) {
-        PeFunc* hit = NULL;
-        for (auto& e : pi.funcs) if (e.rva == f.rva) { hit = &e; break; }
-        if (hit) {
-            if (!hit->size && f.size) { hit->size = f.size; enriched++; }
-            if ((hit->name.empty() || hit->name.rfind(L"sub_", 0) == 0) && !f.name.empty()) hit->name = f.name;
+        auto hit = idx.find(f.rva);
+        if (hit != idx.end()) {
+            if (!hit->second->size && f.size) { hit->second->size = f.size; enriched++; }
+            if ((hit->second->name.empty() || hit->second->name.rfind(L"sub_", 0) == 0) && !f.name.empty())
+                hit->second->name = f.name;
         } else {
             PeFunc nf = f;
             if (nf.name.empty()) {
@@ -844,6 +854,7 @@ static void merge_funcs(PeInfo& pi, const std::vector<PeFunc>& pf, std::wstring*
                 nf.name = b;
             }
             pi.funcs.push_back(nf);
+            idx.emplace(nf.rva, &pi.funcs.back());
             added++;
         }
     }
@@ -997,39 +1008,30 @@ static void tree_fill() {
 
 // ---------------- fonksiyon listesi doldurma ----------------
 static std::wstring g_filter_txt;
+// 0.4.3: SANAL LISTVIEW (LVS_OWNERDATA) — metin2 gibi ~100k satirli listelerde
+// satir objesi URETILMEZ; metin istendiginde LVN_GETDISPINFO ile saglanir.
+// (a) Windows'ta 10 sn'lik acilis kasilmasini kokten coker (InsertItem/
+//     SetItemText mesaj firtinasi yok), (b) wine'in WM_SETREDRAW toplu
+//     doldurmada listeyi hic boyamama bozukluguna takilmaz (kullanicinin
+//     "fonksiyon listesi bos" raporunun bu oturumda yeniden uretilen kok
+//     nedeni), (c) VMP'nin buyuk liste davranisina uygun.
+static std::vector<size_t> g_func_rows;   // gorunen satir -> g_pe.funcs index (1) / ozellik-bolum id (2)
+static int g_func_mode = 1;               // 1=Fonksiyonlar 2=Details
 static void func_fill() {
-    ListView_DeleteAllItems(g_func);
-    if (!g_proj.open) return;
-    static std::wstring tbuf[2];
-    wchar_t* cols[5];
-    LV_COLUMNW lc; memset(&lc, 0, sizeof(lc));
-    // kolonlar bir kez kurulur (WM_INIT icinde)
-    int shown = 0;
+    if (!g_proj.open) { g_func_rows.clear(); ListView_SetItemCount(g_func, 0); return; }
+    g_func_mode = 1;
+    g_func_rows.clear();
     for (size_t i = 0; i < g_pe.funcs.size(); i++) {
         const PeFunc& f = g_pe.funcs[i];
         if (!g_filter_txt.empty() && f.name.find(g_filter_txt) == std::wstring::npos)
             continue;
-        int pidx = g_proj.find_func(f.name);
-        wchar_t tb[3] = { 0,0,0 };
-        wchar_t tc = pidx >= 0 ? (g_proj.funcs[pidx].type == 0 ? L'V' : (g_proj.funcs[pidx].type == 1 ? L'M' : L'U')) : L'-';
-        tb[0] = tc;
-        LVITEMW it; memset(&it, 0, sizeof(it));
-        it.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
-        it.iItem = shown;
-        it.iImage = pidx >= 0 ? (g_proj.funcs[pidx].type == 0 ? ICO_V : (g_proj.funcs[pidx].type == 1 ? ICO_M : ICO_U)) : ICO_FILE;
-        it.lParam = (LPARAM)i;
-        it.pszText = (LPWSTR)f.name.c_str();
-        int idx = ListView_InsertItem(g_func, &it);
-        ListView_SetItemText(g_func, idx, 1, tb);
-        static wchar_t a1[32], s1[32];
-        _snwprintf(a1, 32, L"0x%08llX", f.rva);
-        _snwprintf(s1, 32, L"%llu", f.size);
-        ListView_SetItemText(g_func, idx, 2, a1);
-        ListView_SetItemText(g_func, idx, 3, s1);
-        ListView_SetItemText(g_func, idx, 4, (LPWSTR)(f.is_export ? L"Yes" : L"-"));
-        ListView_SetItemText(g_func, idx, 5, (LPWSTR)src_name(f.source));
-        shown++;
+        g_func_rows.push_back(i);
     }
+    ListView_SetItemCount(g_func, 0);   // eski gorunumu dusur
+    ListView_SetItemCount(g_func, (int)g_func_rows.size());
+    // 0.4.3: zaten gorunen listede wine SetItemCount sonrasi kendi kendine
+    // yeniden boyamiyor (satirlar mantiksal, piksel yok) — boya zorla
+    InvalidateRect(g_func, NULL, TRUE);
 }
 
 // ---------------- ozellik ızgarasi (property editor) ----------------
@@ -1557,50 +1559,77 @@ static void details_cols_setup() {
     for (int i = 0; i < 6; i++) { c.pszText = cols[i]; c.cx = wds[i]; ListView_InsertColumn(g_func, i, &c); }
 }
 static void details_fill_rows() {
-    ListView_DeleteAllItems(g_func);
-    if (!g_proj.open) return;
-    int shown = 0;
-    wchar_t v1[64], v2[64], v3[64], v4[64], v5[64];
-    struct Row { const wchar_t* k; const wchar_t* v; };
-    std::wstring mb = g_pe.is64 ? L"x64" : L"x86";
-    _snwprintf(v1, 64, L"0x%04X", g_pe.machine);
-    _snwprintf(v2, 64, g_pe.is64 ? L"0x%012llX" : L"0x%08llX", g_pe.imagebase);
-    _snwprintf(v3, 64, L"0x%08llX", g_pe.ep);
-    Row rows[] = {
-        { L"Machine", mb.c_str() },
-        { L"Machine (raw)", v1 },
-        { L"Image Base", v2 },
-        { L"Entry Point", v3 },
-        { L"Subsystem", g_pe.subsystem == 2 ? L"GUI" : (g_pe.subsystem == 3 ? L"Console" : L"other") },
-        { L"ASLR (DYNAMIC_BASE)", (g_pe.dllchars & 0x40) ? L"Yes" : L"No" },
-        { L"DEP (NX_COMPAT)", (g_pe.dllchars & 0x100) ? L"Yes" : L"No" },
-        { L"CFG (GUARD_CF)", (g_pe.dllchars & 0x4000) ? L"Yes" : L"No" },
-        { L"Sections", NULL },
-    };
-    for (int i = 0; i < 9; i++) {
-        LVITEMW it; memset(&it, 0, sizeof(it));
-        it.mask = LVIF_TEXT; it.iItem = shown; it.pszText = (LPWSTR)rows[i].k;
-        int idx = ListView_InsertItem(g_func, &it);
-        if (rows[i].v) ListView_SetItemText(g_func, idx, 1, (LPWSTR)rows[i].v);
-        shown++;
+    // 0.4.3: sanal doldurma (g_func artik LVS_OWNERDATA) — satirlar DISPINFO
+    // ile saglanir; rows: 0..8 ozellikler, 100+i bolumler
+    g_func_mode = 2;
+    g_func_rows.clear();
+    for (size_t i = 0; i < 9; i++) g_func_rows.push_back(i);
+    for (size_t i = 0; i < g_pe.secs.size(); i++) g_func_rows.push_back(100 + i);
+    ListView_SetItemCount(g_func, 0);
+    ListView_SetItemCount(g_func, (int)g_func_rows.size());
+    InvalidateRect(g_func, NULL, TRUE);   // 0.4.3: wine yeniden-boyama zorlamasi
+}
+// 0.4.3: sanal liste metin/imge saglayici — g_func LVN_GETDISPINFO icin
+static void func_dispinfo(NMLVDISPINFOW* di) {
+    if (!(di->item.mask & (LVIF_TEXT | LVIF_IMAGE))) return;
+    long r = di->item.iItem;
+    if (r < 0 || (size_t)r >= g_func_rows.size()) return;
+    size_t id = g_func_rows[r];
+    wchar_t tmp[64];
+    const wchar_t* txt = L"";
+    int ico = -1;
+    if (g_func_mode == 1) {
+        if (id >= g_pe.funcs.size()) return;
+        const PeFunc& f = g_pe.funcs[id];
+        int pidx = g_proj.find_func(f.name);
+        wchar_t tc = pidx >= 0 ? (g_proj.funcs[pidx].type == 0 ? L'V' : (g_proj.funcs[pidx].type == 1 ? L'M' : L'U')) : L'-';
+        ico = pidx >= 0 ? (g_proj.funcs[pidx].type == 0 ? ICO_V : (g_proj.funcs[pidx].type == 1 ? ICO_M : ICO_U)) : ICO_FILE;
+        switch (di->item.iSubItem) {
+        case 0: txt = f.name.c_str(); break;
+        case 1: tmp[0] = tc; tmp[1] = 0; txt = tmp; break;
+        case 2: _snwprintf(tmp, 64, L"0x%08llX", f.rva); txt = tmp; break;
+        case 3: _snwprintf(tmp, 64, L"%llu", f.size); txt = tmp; break;
+        case 4: txt = f.is_export ? L"Yes" : L"-"; break;
+        case 5: txt = src_name(f.source); break;
+        }
+    } else {
+        // details modu: id 0..8 ozellik, 100+i bolum (details_fill_rows ayni sirayla)
+        static const wchar_t* keys[9] = {
+            L"Machine", L"Machine (raw)", L"Image Base", L"Entry Point", L"Subsystem",
+            L"ASLR (DYNAMIC_BASE)", L"DEP (NX_COMPAT)", L"CFG (GUARD_CF)", L"Sections"
+        };
+        if (id < 9) {
+            switch (di->item.iSubItem) {
+            case 0: txt = keys[id]; break;
+            case 1:
+                switch (id) {
+                case 0: txt = g_pe.is64 ? L"x64" : L"x86"; break;
+                case 1: _snwprintf(tmp, 64, L"0x%04X", g_pe.machine); txt = tmp; break;
+                case 2: _snwprintf(tmp, 64, g_pe.is64 ? L"0x%012llX" : L"0x%08llX", g_pe.imagebase); txt = tmp; break;
+                case 3: _snwprintf(tmp, 64, L"0x%08llX", g_pe.ep); txt = tmp; break;
+                case 4: txt = g_pe.subsystem == 2 ? L"GUI" : (g_pe.subsystem == 3 ? L"Console" : L"other"); break;
+                case 5: txt = (g_pe.dllchars & 0x40) ? L"Yes" : L"No"; break;
+                case 6: txt = (g_pe.dllchars & 0x100) ? L"Yes" : L"No"; break;
+                case 7: txt = (g_pe.dllchars & 0x4000) ? L"Yes" : L"No"; break;
+                default: txt = L""; break;
+                }
+                break;
+            }
+        } else if (id >= 100) {
+            size_t si = id - 100;
+            if (si >= g_pe.secs.size()) return;
+            const PeSection& s = g_pe.secs[si];
+            switch (di->item.iSubItem) {
+            case 0: txt = s.name.c_str(); break;
+            case 2: _snwprintf(tmp, 64, L"0x%08llX", s.va); txt = tmp; break;
+            case 3: _snwprintf(tmp, 64, L"0x%llX", s.vsz); txt = tmp; break;
+            case 4: _snwprintf(tmp, 64, L"0x%llX", s.rawsz); txt = tmp; break;
+            case 5: _snwprintf(tmp, 64, L"0x%08llX", s.chars); txt = tmp; break;
+            }
+        }
     }
-    for (size_t i = 0; i < g_pe.secs.size(); i++) {
-        const PeSection& s = g_pe.secs[i];
-        LVITEMW it; memset(&it, 0, sizeof(it));
-        it.mask = LVIF_TEXT; it.iItem = shown; it.pszText = (LPWSTR)s.name.c_str();
-        int idx = ListView_InsertItem(g_func, &it);
-        static wchar_t b1[8][40], b2[8][40], b3[8][40], b4[8][40];
-        int k = shown % 8;
-        _snwprintf(b1[k], 40, L"0x%08llX", s.va);
-        _snwprintf(b2[k], 40, L"0x%llX", s.vsz);
-        _snwprintf(b3[k], 40, L"0x%llX", s.rawsz);
-        _snwprintf(b4[k], 40, L"0x%08llX", s.chars);
-        ListView_SetItemText(g_func, idx, 2, b1[k]);
-        ListView_SetItemText(g_func, idx, 3, b2[k]);
-        ListView_SetItemText(g_func, idx, 4, b3[k]);
-        ListView_SetItemText(g_func, idx, 5, b4[k]);
-        shown++;
-    }
+    if ((di->item.mask & LVIF_IMAGE) && ico >= 0) di->item.iImage = ico;
+    if (di->item.mask & LVIF_TEXT) lstrcpynW(di->item.pszText, txt, di->item.cchTextMax);
 }
 static void switch_tab(int t) {
     g_tab = t;
@@ -1683,9 +1712,9 @@ static void uistate_dump(const wchar_t* tag, HWND dlg, HWND list, HWND tab) {
         GetClassNameW(c, cls, 64); GetWindowTextW(c, txt, 96);
         RECT r; GetWindowRect(c, &r);
         POINT pt = { r.left, r.top }; ScreenToClient(dlg, &pt);
-        fwprintf(f, L"  child[%d] cls=%s txt='%.24s' vis=%d at(%ld,%ld %ldx%ld)\n",
+        fwprintf(f, L"  child[%d] cls=%s txt='%.24s' vis=%d at(%ld,%ld %ldx%ld) scr=(%ld,%ld %ldx%ld)\n",
                  n, cls, txt, IsWindowVisible(c) ? 1 : 0,
-                 pt.x, pt.y, r.right - r.left, r.bottom - r.top);
+                 pt.x, pt.y, r.right - r.left, r.bottom - r.top, r.left, r.top, r.right - r.left, r.bottom - r.top);
         c = GetWindow(c, GW_HWNDNEXT); n++;
     }
     if (list) {
@@ -1713,6 +1742,7 @@ struct AFState {
     HWND combo_type, chk_lock;
     HWND scan, grp_manual, lbl_base, lbl_end, grp_prot, lbl_type, status, tab;
     ScanJob* job = NULL;          // 0.4.1: Tara is parcacigi
+    std::vector<size_t> rows;     // 0.4.3: sanal liste — gorunen satir -> g_pe.funcs idx
     int type; bool lock;
 };
 static AFState* g_af = NULL;      // 0.4.1: yeniden boyutlandirma icin aktif durum
@@ -1749,6 +1779,51 @@ static void af_layout(HWND d) {
 // 0.4.1 (x3): fonksiyon listesi diyalog proc'u — WM_SIZE/WM_GETMINMAXINFO
 // af_layout'a yonlendirir, gerisi paylasilan dlg_proc'e gider
 static LRESULT CALLBACK af_dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    // 0.4.3 FIX (kullanici x2: listeden satir secilince Base/End dolmuyordu):
+    // bildirim isleme pump'dan (mesaj dongusunden) WNDPROC seviyesine tasindi.
+    // Pump kopyasi bazi mesaj siniflandirma durumlariyla (IsDialogMessageW ic
+    // pompalama, gonderilen bildirimlerin Get(MSG) sirasi) kacirabiliyordu;
+    // WM_NOTIFY diyalogun wndproc'una HER ZAKAN ulasir. Ayrica format artik
+    // kullanici istegi gibi 0x onekli hex: Base=0x1000, End=Base+boyut=0x1040.
+    if (msg == WM_NOTIFY && g_af && g_af_dlg == h) {
+        NMHDR* nm = (NMHDR*)lp;
+        if (nm && nm->hwndFrom == g_af->list) {
+            if (nm->code == LVN_GETDISPINFO) {
+                // 0.4.3: sanal liste metin saglayici (5 kolon: Name/Address/Size/Export/Source)
+                NMLVDISPINFOW* di = (NMLVDISPINFOW*)lp;
+                long r = di->item.iItem;
+                if ((di->item.mask & LVIF_TEXT) && r >= 0 && (size_t)r < g_af->rows.size()) {
+                    const PeFunc& pf = g_pe.funcs[g_af->rows[r]];
+                    wchar_t tmp[48];
+                    const wchar_t* txt = L"";
+                    switch (di->item.iSubItem) {
+                    case 0: txt = pf.name.c_str(); break;
+                    case 1: _snwprintf(tmp, 48, L"0x%08llX", pf.rva); txt = tmp; break;
+                    case 2: _snwprintf(tmp, 48, L"%llu", pf.size); txt = tmp; break;
+                    case 3: txt = pf.is_export ? L"Yes" : L"-"; break;
+                    case 4: txt = src_name(pf.source); break;
+                    }
+                    lstrcpynW(di->item.pszText, txt, di->item.cchTextMax);
+                }
+            } else if (nm->code == LVN_ITEMCHANGED) {
+                NMLISTVIEW* lv = (NMLISTVIEW*)lp;
+                if ((lv->uNewState & LVIS_SELECTED) && lv->iItem >= 0 &&
+                    (size_t)lv->iItem < g_af->rows.size()) {
+                    // 0.4.3: sanal listede lParam yok — rows haritasindan coz
+                    const PeFunc& pf = g_pe.funcs[g_af->rows[lv->iItem]];
+                    wchar_t b[32];
+                    _snwprintf(b, 32, L"0x%llX", pf.rva);
+                    set_txt(g_af->addr, b);
+                    _snwprintf(b, 32, L"0x%llX", pf.rva + (pf.size ? pf.size : 16));
+                    set_txt(g_af->end, b);
+                }
+            } else if (nm->code == NM_DBLCLK) {
+                NMITEMACTIVATE* ia = (NMITEMACTIVATE*)lp;
+                if (ia->iItem >= 0) PostMessageW(h, WM_APP_MODAL_OK, 0, 0);
+            }
+        }
+        // tab bildirimleri (TCN_SELCHANGE) dlg_proc'e dusmeye devam eder
+    }
     if (msg == WM_SIZE) { if (g_af && g_af_dlg == h) af_layout(h); return 0; }
     if (msg == WM_GETMINMAXINFO) {
         MINMAXINFO* mm = (MINMAXINFO*)lp;
@@ -1758,30 +1833,27 @@ static LRESULT CALLBACK af_dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return dlg_proc(h, msg, wp, lp);
 }
 static void af_fill_list(AFState* st) {
-    // 0.4.2 FIX: 0.4.1'deki WM_SETREDRAW toplu doldurma wine'da liste
-    // kaydirma/boyama tutarsizligina yol aciyordu (satirlar sayfanin altinda
-    // kayiyor, ust bosh). 0.4.0'in kanitlanmis duz doldurmasina donuldu;
-    // 568 satir ~50 ms — takilma riski yok.
-    ListView_DeleteAllItems(st->list);
-    if (!g_proj.open) return;
+    // 0.4.3 FIX: SANAL doldurma (LVS_OWNERDATA). Bu oturumda kullanici
+    // raporunun (metin2: 39078 fonksiyon) wine yeniden uretiminde iki kok
+    // neden ayni anda yakalandi: (a) 100k satirin tek-tek InsertItem+
+    // SetItemText akisi Windows'ta ~10 sn suruyor ("Fonksyon ekle 10 sn
+    // kasiyor"), (b) WM_SETREDRAW toplu doldurmasi ise wine'da listeyi HIC
+    // boyamiyor (satirlar mantiksal olarak var, piksel YOK — 0.4.1'in ayni
+    // bozuklugu). Sanal listede satir objesi uretilmez; metin istendiginde
+    // LVN_GETDISPINFO ile saglanir -> aninda acilis + wine/Windows ayni davranis.
+    if (!g_proj.open) { st->rows.clear(); ListView_SetItemCount(st->list, 0); return; }
     std::wstring flt; ctl_txt(st->filter, &flt);
-    int shown = 0;
+    st->rows.clear();
     for (size_t i = 0; i < g_pe.funcs.size(); i++) {
         const PeFunc& f = g_pe.funcs[i];
         if (!flt.empty() && f.name.find(flt) == std::wstring::npos) continue;
-        LVITEMW it; memset(&it, 0, sizeof(it));
-        it.mask = LVIF_TEXT | LVIF_PARAM; it.iItem = shown; it.lParam = (LPARAM)i;
-        it.pszText = (LPWSTR)f.name.c_str();
-        int idx = ListView_InsertItem(st->list, &it);
-        static wchar_t ab[512], sb[512];
-        _snwprintf(ab, 512, L"0x%08llX", f.rva);
-        _snwprintf(sb, 512, L"%llu", f.size);
-        ListView_SetItemText(st->list, idx, 1, ab);
-        ListView_SetItemText(st->list, idx, 2, sb);
-        ListView_SetItemText(st->list, idx, 3, (LPWSTR)(f.is_export ? L"Yes" : L"-"));
-        ListView_SetItemText(st->list, idx, 4, (LPWSTR)src_name(f.source));
-        shown++;
+        st->rows.push_back(i);
     }
+    ListView_SetItemCount(st->list, 0);   // eski gorunumu dusur
+    ListView_SetItemCount(st->list, (int)st->rows.size());
+    // 0.4.3: gorunen listede wine yeniden boyamiyor — boya zorla (bu oturumun
+    // wine yeniden uretiminde bos-liste goruntusunun kok nedeni)
+    InvalidateRect(st->list, NULL, TRUE);
 }
 static bool addr_in_exec(unsigned long long a) {
     for (auto& s : g_pe.secs)
@@ -1816,7 +1888,7 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
     // sayfa 0: fonksiyon listesi (PDB/MAP/stub/PDBScope dahil — Source kolonu)
     st.filter = mk_ctl(d, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 0x503, 22, 106, 560, 22);
     st.scan = mk_ctl(d, L"BUTTON", L(LS_SCAN), WS_TABSTOP, 0x508, 600, 104, 190, 26);
-    st.list = mk_ctl(d, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_TABSTOP |
+    st.list = mk_ctl(d, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA | WS_TABSTOP |
                      (goto_mode ? LVS_SINGLESEL : 0), 0x504, 22, 134, 768, 330);
     ListView_SetExtendedListViewStyle(st.list, LVS_EX_FULLROWSELECT);
     LVCOLUMNW c; memset(&c, 0, sizeof(c)); c.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -1861,9 +1933,9 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
     af_layout(d);
     af_fill_list(&st);           // 0.4.2 FIX: son geometri oturduktan SONRA doldur
     SetTimer(d, 2, 100, NULL);   // 0.4.1: Tara ilerleme sayaci
-    // 0.4.2 tani: --uistate — acilis aninda ic-durum dokumu + 1.5 sn sonra
-    // ikinci dokum (ilk boyama/WM_SIZE sonrasi) ve otomatik kapanis
-    if (g_uistate) { uistate_dump(L"AF-OPEN", d, st.list, st.tab); SetTimer(d, 4, 1500, NULL); }
+    // 0.4.2 tani: --uistate — acilis aninda ic-durum dokumu; 0.4.3: iki dokum
+    // (T1500 + T5000) — arada dis XTEST tiklamasi icin diyalog acik kalir
+    if (g_uistate) { uistate_dump(L"AF-OPEN", d, st.list, st.tab); SetTimer(d, 4, 1500, NULL); SetTimer(d, 5, 5000, NULL); }
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0)) {
         if (m.message == WM_APP_MODAL_OK && (m.hwnd == d || IsChild(d, m.hwnd))) { okout = true; break; }
@@ -1891,10 +1963,17 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
             af_fill_list(&st);
             continue;
         }
-        // 0.4.2 tani: 1.5 sn sonra durum dokumu + diyaloqi kapat + cik
+        // 0.4.3 tani: T1500 dokumu (diyalog acik kalir — dis tiklama testi)
         if (m.message == WM_TIMER && m.wParam == 4 && g_uistate) {
             KillTimer(d, 4);
             uistate_dump(L"AF-T1500", d, st.list, st.tab);
+            continue;
+        }
+        // 0.4.3 tani: T5000 son dokum (dis XTEST tiklamasi SONRASI — secim ->
+        // Base/End dolumunun kaniti) + temiz cikis
+        if (m.message == WM_TIMER && m.wParam == 5 && g_uistate) {
+            KillTimer(d, 5);
+            uistate_dump(L"AF-T5000", d, st.list, st.tab);
             PostMessageW(d, WM_APP_MODAL_CANCEL, 0, 0);
             continue;
         }
@@ -1930,32 +2009,9 @@ static void dlg_addfunction(bool goto_mode, unsigned long long def_addr) {
             af_layout(d);
             continue;
         }
-        // 0.3.0/0.4.1 (x4): liste bildirimleri — secim -> Base/End dolum
-        // (adres + adres+boyut; boyut yoksa +16), cift tiklama -> OK
-        if (m.message == WM_NOTIFY && m.hwnd == d) {
-            NMHDR* nm = (NMHDR*)m.lParam;
-            if (nm && nm->hwndFrom == st.list) {
-                if (nm->code == LVN_ITEMCHANGED) {
-                    NMLISTVIEW* lv = (NMLISTVIEW*)m.lParam;
-                    if ((lv->uNewState & LVIS_SELECTED) && lv->iItem >= 0) {
-                        LVITEMW it; memset(&it, 0, sizeof(it));
-                        it.mask = LVIF_PARAM; it.iItem = lv->iItem;
-                        if (ListView_GetItem(st.list, &it) && (size_t)it.lParam < g_pe.funcs.size()) {
-                            const PeFunc& pf = g_pe.funcs[it.lParam];
-                            wchar_t b[32]; _snwprintf(b, 32, L"%llX", pf.rva);
-                            set_txt(st.addr, b);
-                            _snwprintf(b, 32, L"%llX", pf.rva + (pf.size ? pf.size : 16));
-                            set_txt(st.end, b);
-                        }
-                    }
-                } else if (nm->code == NM_DBLCLK) {
-                    NMITEMACTIVATE* ia = (NMITEMACTIVATE*)m.lParam;
-                    if (ia->iItem >= 0) { okout = true; break; }
-                }
-            }
-            if (!IsDialogMessageW(d, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
-            continue;
-        }
+        // 0.4.3: liste bildirimleri (secim -> Base/End, cift-tik -> OK)
+        // WNDPROC seviyesine tasindi (af_dlg_proc) — pump kopyasi bazi
+        // durumlarda bildirimi kaciriyordu; wndproc her zaman alir.
         if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); break; }
         if (!IsDialogMessageW(d, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
     }
@@ -2344,10 +2400,9 @@ static void open_disasm_for_selection() {
     if (g_tab == 1 && g_func) {
         int sel = ListView_GetNextItem(g_func, -1, LVNI_SELECTED);
         if (sel >= 0) {
-            LVITEMW it; memset(&it, 0, sizeof(it));
-            it.mask = LVIF_PARAM; it.iItem = sel;
-            if (ListView_GetItem(g_func, &it) && (size_t)it.lParam < g_pe.funcs.size()) {
-                const PeFunc& f = g_pe.funcs[it.lParam];
+            // 0.4.3: sanal liste — rows haritasindan coz
+            if ((size_t)sel < g_func_rows.size() && g_func_rows[sel] < g_pe.funcs.size()) {
+                const PeFunc& f = g_pe.funcs[g_func_rows[sel]];
                 dlg_disasm(f.name, f.rva, f.size);
                 return;
             }
@@ -2550,6 +2605,17 @@ static void start_compile() {
                         XPROTECT_EDITION, MB_YESNO | MB_ICONQUESTION) == IDYES) {
             ShellExecuteW(g_main, L"open", pp.c_str(), g_proj.exec_params.c_str(), exe_dir().c_str(), SW_SHOWNORMAL);
         }
+    } else if (done_rc > 0) {
+        // 0.4.3 FIX (x4 dolayli): derleme BASARISIZ ise eski cikti dosyasi diskte
+        // kalir — kullanici eski dosyayi yeni modun ciktisi sanabiliyordu
+        // (uc-mod denemesinde Mutation dosyasi aslinda eski Virtualization
+        // ciktisiydi). Basarisizlik simdi acikca bildirilir.
+        MessageBoxW(g_main,
+            (std::wstring(L"Derleme BASARISIZ (rc=") + numdec((unsigned long long)done_rc) +
+             L").\nLog bolumundeki [HATA] satirlarina bakin.\nESKI cikti dosyasi diskte "
+             L"kalabilir — onu bu denemenin sonucu SANMAYIN.\n\nCiktilan dosya: " +
+             protected_path()).c_str(),
+            XPROTECT_EDITION, MB_OK | MB_ICONERROR);
     }
 }
 
@@ -2727,6 +2793,10 @@ static void fill_neighbor_sizes(PeInfo& pi) {
         }
     }
 }
+// 0.4.3: acilis taramasi surerken Add Function/GoTo kilitle — tarama bitmeden
+// acilan diyalog yalnizca export adaylarini gorur ve tarama bitiminde liste
+// tazelenemez (ic-ice pompa) -> kullaniciya "bos liste" olarak gorunur.
+static bool g_scanning = false;
 static void open_target(const std::wstring& path) {
     SetCursor(LoadCursor(NULL, IDC_WAIT));   // 0.4.0: buyuk dosyalarda arayuz yanit verir gorunur
     PeInfo pi; std::wstring err;
@@ -2740,12 +2810,14 @@ static void open_target(const std::wstring& path) {
     // ile, yoksa "pdbless" ile taranir (worker karar verir).
     ScanJob* job = new ScanJob();
     job->target = path;
+    g_scanning = true;                     // 0.4.3: tarama kilidi acik
     HANDLE th = CreateThread(NULL, 0, scan_thread, job, 0, NULL);
     if (th) CloseHandle(th);
     if (!th) {   // thread acilamazsa eski senkron yol (savunmaci)
         std::wstring note;
         merge_pdbscope(pi, path, &note);
         delete job;
+        g_scanning = false;
     } else {
         // ilerleme diyalogu (mesaj pompali — ana pencere canli kalir)
         HWND pd = dlg_base(L(LS_SCANNING), 420, 130);
@@ -2777,6 +2849,7 @@ static void open_target(const std::wstring& path) {
         merge_funcs(pi, job->out, &extra);
         g_scan_note = job->note + extra;
         delete job;
+        g_scanning = false;                // 0.4.3: tarama kilidi kapandi
     }
     g_pe = pi;
     g_proj = Project();
@@ -2792,6 +2865,11 @@ static void open_target(const std::wstring& path) {
     if (!g_scan_note.empty()) add_log(g_scan_note);
     if (!pi.funcs.empty())
         add_log(std::wstring(L"Functions: ") + numdec(pi.funcs.size()) + L"  (" + src_name(pi.funcs[0].source) + L"...)");
+    // 0.4.3 FIX (x1): ilerleme diyalogu kapaninca acilan bolge + boot->workspace
+    // gecisi tam boyanir (kullanici resize yapmadan beyaz ekran gormesin —
+    // resize'in yaptigi tam boyama burada programatik olarak zorlanir)
+    InvalidateRect(g_main, NULL, TRUE);
+    UpdateWindow(g_main);
     SetCursor(LoadCursor(NULL, IDC_ARROW));
 }
 static void open_project_file(const std::wstring& path) {
@@ -3051,7 +3129,13 @@ static void update_all() {
     if (g_rightmode == 1) dir_fill();
     else fill_prop();
     update_caption();
-    ShowWindow(g_welcome, g_proj.open ? SW_HIDE : SW_SHOW);
+    // 0.4.3 FIX (kullanici x1: tarama bitince ekran bembeyaz kaliyor, paneller
+    // ancak maximize/restore sonrasi gorunuyor): 0.4.1 x1 "boot izolasyonu" ile
+    // panel gorunurlugunun TEK kaynagi layout() oldu; layout yalnizca WM_SIZE'da
+    // cagrildigi icin dosya acilisinda welcome gizleniyor ama agac/prop/log
+    // HIC gosterilmiyordu — ilk WM_SIZE'a kadar beyaz ekran. update_all artik
+    // layout() uygular (VMP'nin boot_frame->workspace gecisi birebir).
+    layout();
     std::wstring t = g_proj.open ? (g_proj.path.empty() ? g_proj.target : g_proj.path) : L(LS_READY);
     if (g_proj.open && !g_pe.sym_note.empty()) t += std::wstring(L"  |  ") + g_pe.sym_note;
     SendMessageW(g_status, SB_SETTEXTW, 0, (LPARAM)t.c_str());
@@ -3574,8 +3658,15 @@ static LRESULT CALLBACK main_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case IDM_SEARCH: if (g_filter) SetFocus(g_filter); return 0;
-        case IDM_GOTO: dlg_addfunction(true, 0); return 0;
-        case IDM_ADDFUNC: dlg_addfunction(false, 0); return 0;
+        case IDM_GOTO:
+        case IDM_ADDFUNC:
+            // 0.4.3: acilis taramasi bitmeden liste diyaloqlari acilmaz
+            // (tarama sonrasi liste bayat kaliyor — "bos liste" raporu)
+            if (g_scanning && !g_uistate) {
+                add_log(L"Tarama sürüyor — tarama bitince fonksiyon ekleyebilirsiniz.");
+                return 0;
+            }
+            dlg_addfunction(id == IDM_GOTO, 0); return 0;
         case IDM_ADDLIC: dlg_addlicense(); return 0;
         case IDM_ADDFILE:
         case IDM_ADDFOLDER:
@@ -3685,18 +3776,23 @@ static LRESULT CALLBACK main_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (nm->hwndFrom == g_func) {
+            if (nm->code == LVN_GETDISPINFO) {
+                // 0.4.3: sanal liste (LVS_OWNERDATA) metin/imge saglayici
+                func_dispinfo((NMLVDISPINFOW*)lp);
+                return 0;
+            }
             if (nm->code == NM_DBLCLK) {
                 NMITEMACTIVATE* ia = (NMITEMACTIVATE*)lp;
                 if (ia->iItem >= 0 && g_tab == 1) {
-                    LVITEMW it; memset(&it, 0, sizeof(it));
-                    it.mask = LVIF_PARAM; it.iItem = ia->iItem;
-                    ListView_GetItem(g_func, &it);
-                    size_t fi = (size_t)it.lParam;
-                    if (fi < g_pe.funcs.size()) {
-                        const PeFunc& f = g_pe.funcs[fi];
-                        int pidx = g_proj.find_func(f.name);
-                        if (pidx < 0) dlg_addfunction(false, f.rva);
-                        else { g_prop_sel_kind = 2; g_prop_sel_idx = pidx; fill_prop(); }
+                    // 0.4.3: sanal listede lParam yok — rows haritasindan coz
+                    if ((size_t)ia->iItem < g_func_rows.size()) {
+                        size_t fi = g_func_rows[ia->iItem];
+                        if (fi < g_pe.funcs.size()) {
+                            const PeFunc& f = g_pe.funcs[fi];
+                            int pidx = g_proj.find_func(f.name);
+                            if (pidx < 0) dlg_addfunction(false, f.rva);
+                            else { g_prop_sel_kind = 2; g_prop_sel_idx = pidx; fill_prop(); }
+                        }
                     }
                 }
             } else if (nm->code == NM_RCLICK) {
@@ -3970,7 +4066,7 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
         WS_CHILD | WS_TABSTOP | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP,
         0, 0, 0, 0, g_main, (HMENU)IDC_MAIN_TREE, hI, NULL);
     g_func = CreateWindowExW(0, WC_LISTVIEWW, NULL,
-        WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
+        WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA,
         0, 0, 0, 0, g_main, (HMENU)IDC_MAIN_FUNC, hI, NULL);
     g_prop = CreateWindowExW(0, WC_LISTVIEWW, NULL,
         WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,

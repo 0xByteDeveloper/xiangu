@@ -472,8 +472,16 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     for (auto& c : comps) if (c.ty == 1) {
         bool okraw2; u32 raw2 = pe.rva2raw(c.f->rva, &okraw2);
         if (!okraw2) { L("[HATA] mutasyon yeniden uretim raw yok"); return 1; }
+        // 0.4.3 FIX (kullanici x4: Mutation ciktisi V ile ayni cikiyordu):
+        // ikinci geciste allow_call YANLISLIKLA pe.is64 yollaniyordu — x86'da
+        // (is64=false) yeniden-uretim "call desteklenmiyor" diyerek dusuyor,
+        // olcum gecisi ise true ile govde uretip tutarsizlik tetikliyor ->
+        // [HATA] + rc=1 -> CIKTI DOSYASI HIC YAZILMIYOR. GUI eski V ciktisini
+        // diskte birakip kullanici onu "mutation" saniyor (uc dosyadan ikisi
+        // bayt-bayt ayni). Olcum gecisiyle AYNI parametre: allow_call=true
+        // (0.4.1 x86 rel32 dis-cagri fixup'i destekliyor).
         MutFn m2 = mutate_function(&pe.buf[raw2], c.f->rva, c.f->size, pe.is64,
-                                   pe.imagebase, pe.sizeofimage, pe.is64,
+                                   pe.imagebase, pe.sizeofimage, true,
                                    opt.mut_strength, c.f->rva ^ 0x9E3779B9u,
                                    c.mut_rva /* GERCEK base */);
         if (!m2.ok || m2.code.size() != c.mut.code.size()) {

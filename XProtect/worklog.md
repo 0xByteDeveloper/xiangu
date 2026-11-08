@@ -555,3 +555,107 @@ Stage Summary:
   WS_CLIPSIBLINGS; wine X11 z-sirasi). SELFTEST OK + CLI regresyon OK.
 - Siradaki: 0.5.0 runtime katmani (self-CRC, dosya CRC, gecikmeli import)
   ve/veya lisans/SDK.
+
+---
+Task ID: 16 — 0.4.3: kullanici 0.4.2 raporu (x1 beyaz ekran, x2 AF diyalogu, x3 kapsam, x4 3-mod analizi)
+Agent: main (Z.ai)
+Tarih: 2026-11-08 (oturum 5)
+Token kaydi: Kullanici yeniden istedi (github_pat_11B32B3RI0cEgii...QYpn4 tam hali
+bu mesajda paylasildi). Guvenlik karari: TAM TOKEN repo-ici dosyaya YAZILMAZ
+(repo public olursa PAT sizintisi = hesap elegecer). Tam hali scripts/gh_token.txt
+(chmod 600, repo DISINDA, push asla icermiyor) dosyasinda kalici saklandi ->
+gelecek oturumlar push'i buradan okur. Worklog'da KESIKLI kayit durur:
+github_pat_11B32B3RI0...(truncate) + isaretci: scripts/gh_token.txt.
+
+Kullanici raporu (0.4.2 uzerine):
+- x1) Quick Start tiklama calisiyor; exe secilince PDB yok -> pdbless tarama;
+  tarama BITINCE ekran BEMBEYAZ; maximize/restore yapincia sag/sol/alt paneller
+  gorunuyor (refresh yok).
+- x2) Fonksyon ekle penceresi acilista ~10 sn kasiyor; liste gorunuyor ama
+  listeden satir secince Base/End textbox'lari DOLMUYOR (beklenti: Base=0x1000,
+  End=Base+size hex -> 0x1040).
+- x3) Runtime katmani (0.5.0 self-CRC/dosya CRC/gecikmeli import) DEVAM +
+  tum_ozellikler_hafif_arastirma.txt bazli kapsam analizi: eksikler, yapilanlar
+  yuzde, universalObfusPublicSrc port orani, siradakiler — CHATTE raporlenecek.
+- x4) metin2client 0xD7610-0xD766C V/M/U 3 modda sifrelendi (rar upload'da);
+  uc cikti da AYNI boyut; oyun calisiyor. Soru: modlar gercekten farkli mi?
+  universalObfusPublicSrc ile ayni mi, eksikler ne?
+
+Ilk kok-neden tespiti (kod okuma):
+- x1 ADAY KOK NEDEN: 0.4.1 x1 "boot izolasyonu" ile tree/prop/dir/log/split
+  YALNIZCA layout() icinde gosteriliyor; layout() yalnizca WM_SIZE'da cagiriliyor
+  (satir 3494). open_target -> update_all() layout() CAGIRMUYOR -> welcome
+  gizlenir ama paneller gizli kalir -> WM_SIZE (resize/maximize) gelene kadar
+  beyaz. FIX: update_all sonrasinda layout() + InvalidateRect(g_main,NULL,TRUE).
+- x1 IKINCI: merge_funcs O(N^2) — metin2 gibi buyuk listede UI thread'ini
+  saniyelerce bloklar. FIX: rva->idx hash map.
+- x2 ADAY KOK NEDEN: af_fill_list WM_SETREDRAW'siz 100k+ satir tek tek
+  InsertItem+4xSetItemText -> Windows'ta ~10 sn (0.4.2 notu "568 satir 50ms"
+  mini-test'e dayaniyordu). FIX: WM_SETREDRAW(FALSE)+LVM_SETITEMCOUNT+fill+
+  WM_SETREDRAW(TRUE)+InvalidateRect (wine kanitli).
+- x2 SECM->Base/End: pump-seviyesinde LVN_ITEMCHANGED bagimli; af_dlg_proc
+  (window-proc seviyesi) en guvenli yer; ayrica format kullanici istegi 0x%llX.
+Plan: fixler -> zig build -> wine+Xvfb XTEST kanitlari -> SELFTEST OK -> paket
+0.4.3 -> push -> x4 rar analizi -> x3 kapsam raporu (chat).
+Durum: ortam kurulumu (zig/wine) arka planda; kod fix'leri basliyor.
+
+---
+Task ID: 17 — 0.4.3: x1 beyaz ekran + x2 AF diyalogu + x4 Mutation motor fix + kanitlar
+Agent: main (Z.ai)
+Tarih: 2026-11-08 (oturum 5, devam)
+
+KRONOLOJIK ADIMLAR:
+1) Kod okuma: update_all/open_target/dlg_addfunction/af_dlg_proc/af_fill_list/
+   merge_funcs/engine_main okundu. x1 kok nedeni dogrulandi: layout() tek
+   gorunurluk kaynagi ama yalniz WM_SIZE'da; update_all layout cagirmiyor.
+2) x1 FIX: update_all -> layout(); open_target -> InvalidateRect+UpdateWindow;
+   merge_funcs O(N^2)->O(N+M) hash map (unordered_map, reserve ile isaretci
+   guvenligi). Derleme: string literal bozulmasi (L"...") git HEAD'den
+   geri alinip duzeltildi.
+3) x2 FIX v1: af_fill_list/func_fill WM_SETREDRAW batch + LVM_SETITEMCOUNT;
+   secim->Base/End af_dlg_proc'a (wndproc) tasindi + 0x%llX formati.
+4) Ortam: taze sandbox -> zig (pip), wine64 debs (~/winepkgs), chroot wine-root
+   (wineserver wrapper -> gercek ELF kopyasi), scripts/wchroot.sh kanonik
+   runner (hostlibs + /usr/share/fonts bind; fonts olmadan text/boyama bozuk,
+   3203 select_font hatasi). Xvfb :99. xprobe.py key komutu eklendi (Insert).
+5) x4 ANALIZ (kullanici rar'indan):
+   VIRT == MUT bayt-bayt (md5 39a0a3db), ULTRA farkli (75fdb567).
+   .text 0xD7610: ucunde e9+CC (govde ezilmis); .vmp0 V/M=0x4CA6, U=0x4DF6.
+   Motor V CLI ciktisi == kullanicinin V == kullanicinin M.
+   KOK NEDEN: engine_main mutasyon yeniden-uretim gecisinde allow_call=pe.is64
+   (satir ~476) — x86'da "call desteklenmiyor" -> [HATA] mutasyon tutarsiz
+   0 vs 207 -> rc=1 -> CIKTI YAZILMIYOR. Kullanici eski V ciktisini "mutation"
+   saniyor. FIX: allow_call=true. IKINCI FIX: rc>0'da GUI uyar mesaji
+   ("eski ciktiyi sonuc sanmayin").
+6) x4 KANIT (final binary, CLI --add D7610:D766C:V/:M/:U):
+   V: [YAMA] bc=193B stubRVA=0x546C40 (bytecode+stub)      md5 39a0a3db
+   M: [MUT]  ikame=6 junk=13 kapi=5 92B->207B govde=0x546B70 md5 4a45369e (YENI)
+   U: [YAMA] bc=540B + [ULTRA] on-mutasyon                 md5 75fdb567
+   uc mod GERCEKTEN farkli. Kanit dosyalari download/XProtect/0.4.3_kanit/.
+7) GUI TESTLERI (wine+Xvfb+XTEST):
+   a) --uistate mini32: AF-OPEN/T1500 dokumleri; T5000 oncesi 400,245 tiklama
+      -> Base=0x1050, End=0x2000 dolum KANIT (entry_00001050 satiri; 0x hex).
+   b) metin2 (39078 fonksiyon PDBScope): acilis sonrasi resize YOK — agac +
+      Core Properties + log + status TAMAMEN boyali (x1 kanit).
+   c) metin2 AF diyaloqu: WM_SETREDRAW batch yolu wine'da listeyi HIC
+      boyamiyor (kullanicinin bos-liste semptomu yeniden uretildi!) ->
+      COZUM: SANAL LISTVIEW (LVS_OWNERDATA): AF listesi + ana Fonksiyonlar
+      listesi + Details; LVN_GETDISPINFO saglayicilar; rows haritalari;
+      NM_DBLCLK/NM_RCLICK/disasm secimleri rows uzerinden.
+      Kanit: 39078 satir ANINDA dolu (sub_1000..sub_15fa goruntude);
+      DISPINFO debug ile cagri zinciri dogrulandi (af_dbg: funcs=2/rows=2 ->
+      tarama surerken diyalog acilirsa liste bayat kaliyor — ikinci kok
+      neden; g_scanning kilidi ile Add Function/GoTo tarama bitene kadar
+      kilitlendi, log uyarisi).
+   d) SELFTEST OK funcs=2 (wine64+Xvfb, final binary).
+8) surum define 0.4.0'da kalmisti -> 0.4.3/2026-11-08 (About/title).
+9) Paket: XProtect_0.4.3.zip 63 dosya (md5 4c75a77ec025edccf2cb57e66d61734d)
+   -> releases/ + download/XProtect/ + versions/. README_0.4.3.txt +
+   CHANGELOG_0.4.3.md. Ikililer: XProtectUI.exe 1029632B, XProtectUI32.exe
+   1078784B.
+
+Stage Summary:
+- 0.4.3 teslim: x1 beyaz ekran (layout+boya+O(N) merge), x2 sanal liste +
+  0x Base/End dolumu + tarama kilidi, x4 Mutation allow_call fix (3 mod
+  gercek ayrildi) + derleme-hata mesaji.
+- Siradaki: 0.5.0 runtime katmani (self-CRC, dosya CRC, gecikmeli import).
