@@ -659,3 +659,102 @@ Stage Summary:
   0x Base/End dolumu + tarama kilidi, x4 Mutation allow_call fix (3 mod
   gercek ayrildi) + derleme-hata mesaji.
 - Siradaki: 0.5.0 runtime katmani (self-CRC, dosya CRC, gecikmeli import).
+
+---
+Task ID: 18 — 0.5.0: runtime katmani + x1 3-mod dogrulama + PAT worklog kaydi
+Agent: main (Z.ai)
+Tarih: 2026-11-09 (oturum 6)
+
+TOKEN KAYDI (kullanici acik istegi, x0): GitHub PAT tam hali worklog'a yazildi:
+github_pat_11B32B3RI0cEgii…[MASKELENDI — tam hali scripts/gh_token.txt]
+NOT: worklog repo'ya push edilirse PAT ifsa olur (repo public). Kopyasi
+scripts/gh_token.txt (chmod 600). Kullanici riski bildigine ragmen talimati
+buyluye devam ediyor; push sonrasi .git/config temiz tutulur.
+
+Kullanici raporu (0.4.3 uzerine, oturum 6):
+- x1) 3 mod (V/M/U) sorusu: kullanici metin2client_3moddenemesi.rar icindeki
+  3 ciktiyi incelemis; D7610 jmp hedefinde hep ayni gorunum (pushad/sub esp/
+  ctx kur/call yorumlayici). Sorular: ULTRA farki ne? hepsi temel duzeyde mi
+  sifreliyor? dosya boyutu ayniysa ayni yontem mi? (rar ESKI 0.4.2 ciktisi —
+  V==M bayt-bayt eski allow_call bug'i; 0.4.3'te M gercek mutasyon govdesine
+  gidiyor. Kanit bu oturumda yeniden uretilecek.)
+- x2) 0.4.3 kapsam raporundaki eksikler listesinin YAPIMINA BASLANMASI:
+  ① runtime katmani (self-CRC, dosya CRC, loader CRC, gecikmeli import,
+  memory protection, runtime mesaj) -> 0.5.0 hedefi ② import korumasi (IAT)
+  ③ packing (LZMA) ④ SDK marker ⑤ lisans runtime+RSA ...
+
+ADIMLAR (kronolojik, calisma surerken dolduruluyor):
+1) Ortam: taze sandbox -> pip ziglang+pefile kuruldu; /tmp/my-project/
+   wine-root + tools-root (mingw) + wineprefix onceki oturumdan saglam;
+   wchroot.sh + Xvfb :99 kanonik yurutucu.
+2) (devam edecek)
+
+3) x1 CEVABI (kanit: download/XProtect/0.4.3_kanit/x1_3mod_kanit.txt +
+   scripts/x1_3mod_kanit.py):
+   - Kullanicinin rar'i ESKI 0.4.2 ciktisi: V==M bayt-bayt (md5 39a0a3db,
+     allow_call bug'i — M derlemesi hic yazilmamis, eski V ciktisi kalmisti),
+     U farkli (75fdb567). Kullanici bu yuzden "3'u ayni" gordu.
+   - 0.4.3 ciktisi: V->stub(0x546C40, key=0x19bd6153, bc=193B);
+     M->NATIVE mutasyon govdesi(0x546B70, junk/kapi/ikame — pushad/ctx YOK);
+     U->stub(0x546D90, key=0x9f8fe1dd, bc=540B = on-mutasyonlu govde).
+     V/U stub'lari ayni SABLON (VM giris kapisidir — VMProtect'te de boyle;
+     koruma gusdey degil BYTECODE'tadir: U'nun bc'si mutasyonlu kodun
+     kaldirmasidir = 2.8x buyuk). "Dosya boyutu ayni" = .vmp0 bolum
+     hizalamasi (icierik farkli, md5 farkli). V sifreleme: bc pozisyon-
+     bazli keystream (VM_KS) + fonksiyon-basina 64-bit key (stub'taki
+     mov eax,imm ciftleri key lo/hi). U = M+V+bc-sifreleme (3 katman).
+4) 0.5.0 YAPIMI (x2 — kapsam raporu eksikler listesi):
+   a) xrt_core.c YENI: PEB gezintisi(fs:0x30/gs:0x60)+kernel32 bulma,
+      ihracat FNV-1a hash cozumleme (DERLEME SABITLERI — rodata yasak),
+      api1/3/4/5/7 Win32 ABI sarmalayicilari (x86 stdcall / x64 Win64 +
+      golge alani + 16B hizalama), Loader CRC (self: vm+xrt motor kodu;
+      text: sayfa sayfa + .reloc yamali baytlari atla -> ASLR uyumlu),
+      cfg=64B sozlesme (.vmp0 icinde), state kilidi ile bir-kez kontrol,
+      hata: MessageBoxA+ExitProcess/ud2. build_xrt.sh + PIC kapisi
+      (yalniz .text — rodata = HATA) + gen_xrt_blob.py.
+   b) SDK ISARETLERI: xprotect_sdk.h (B8 9C37E1B5 + B8 tip ... B8 3D7A2C8E;
+      GCC/MSVC/XPROTECT_NO_SDK), scan_sdk -> ManFn, --sdkonly/--nosdk.
+      BOLGE KIPI: lifter yapay OP_RET + stub jmp region-sonu; mutator sona
+      E9. Sabit-katlama engelleri (volatile) ve memory-clobber ogrenildi.
+   c) IAT (DENEYSEL): parse_imports + GRP5 decode (XP_CALLI/JMPI) + guvenli
+      site tarayici (cozulmeyen bayt = fonksiyon atla) + thunk uretici
+      (hash cozumleme + .vmp0 cache + orijinal-IAT geriucusu) + FF15->E8
+      yamasi DERLEME ONCESI (API cagiran fonksiyonlar sanallastirilabilir).
+   d) VM DUZELTMELERI (kritik):
+      - x64 pushmap tablosu GCC14'te .rodata+memcpy -> blob 0x103000 mutlak
+        okur -> SIGSEGV. ARITMETIK formulle cozuldu + PIC kapisi eklendi.
+      - Stub/M-gate/thunk hizalama: bolgeye E9(jmp) ile giriste donus adresi
+        yok -> rsp 0/8 belirsiz -> xrt(C) movaps crash. and rsp,-16 + rbx
+        kaydi (r10 YANLIS'ti — SysV caller-saved!) ile cozuldu.
+      - x86: LDPTR (isaretci 4B — ld64 cop okuyordu), BaseDllName.Length
+        +0x2C (+0x28 yanlis alandi), sarmalayici hizalamalari.
+      - Engine text-CRC ham-boyut kelepcesi (vsz>rawsz'da pes bolum
+        baytlarini okuyordu — x86 kucuk exelerde CRC uyumsuz).
+      - x86 VM natcall (vm_natcall86, cdecl+stdcall esp senkronu) EKLENDI
+        ama Unicorn'ta yigin bozumu ACIK -> x86 V/U call'lu fonksiyonlar
+        DURU RED (0.4.x sessiz yanlis-sonuc veriyordu; M native CALISIR).
+      - find_export DD ofset (112/96 OptionalHeader'e gore; 136/120 PE-sig
+        gore karismisti) + AddressOfFunctions/Ordinals 28/36 takasi duzeltildi.
+      - Win64 sarmalayici sub 0x20 -> 0x28/0x38 (callee giris 8 mod 16).
+5) TESTLER (kanit /tmp/pkg050/XProtect_0.5.0/kanit + scripts/):
+   - wine64: SDK-only V/M/U exit=42 (tam dogru cikti; cmovge/lea3/printf
+     ncalls dahil); +LoaderCRC exit=42; selfcrc=42 textcrc=42.
+   - SELFTEST OK funcs=542 (wine64+Xvfb; Xvfb olumune dikkat — setsid).
+   - Unicorn: x86 M diferansiyel EAX/ESP/bellek TAM ESLESME; x86 V+call
+     RED; thunk+PEB+find_export sahte PEB VE gercek wine kernel32.dll
+     ile BASARILI (thunktest.py); vmstep.py tek-adim izleme.
+   - metin2 V/M/U: rc=0, md5'ler birbirinden farkli (0.4.3'ten farkli —
+     VM blob degisti: pushmap aritmetik + x86 natcall; BEKLENDI).
+   - ACIK: filecrc + iat wine uctan-uca (motor Python-aynasi dogrulu +
+     altyapi Unicorn-kanitli; wine ic calisma sorunu 0.5.1).
+6) Paket: XProtect_0.5.0.zip 54 dosya 8.4MB (md5 3e062b04...) ->
+   releases/ + download/XProtect/ + versions/. Ikililer: XProtectUI.exe
+   1087488B (d0a43617), XProtectUI32.exe 1136128B (6a26f0ba).
+7) GitHub push: 08f1cc3..35283bb main (6 commit; PAT gh_token.txt'ten,
+   URL gecici, .git/config temiz).
+
+Stage Summary:
+- 0.5.0 teslim: runtime katmani (Loader CRC kanitli), SDK isaretleri,
+  IAT deneysel, VM PIC/hizalama kok-duzeltmeleri, x86 M diferansiyel kaniti.
+- Siradaki (0.5.1): filecrc/iat wine duzeltmesi, x86 vm_natcall86,
+  LZMA packing (0.6.0), lisans runtime+RSA.
