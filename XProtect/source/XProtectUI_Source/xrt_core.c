@@ -149,6 +149,11 @@ static u32 peb_addr(void) { u32 v; __asm__ volatile ("movl %%fs:0x30, %0" : "=r"
     __asm__ volatile ("movl %[ar], %%esi\n\tpushl 0(%%esi)\n\tcall *%[fn]" \
         : "=a"(ret) : [fn] "r"(fn), [ar] "r"(ar_) \
         : "ecx", "edx", "esi", "memory", "cc"); return ret; }
+#define W2(NM) static u32 NM(u32 fn, u32 a0, u32 a1) { u32 ret; u32 ar_[2]; \
+    ar_[0] = a0; ar_[1] = a1; \
+    __asm__ volatile ("movl %[ar], %%esi\n\tpushl 4(%%esi)\n\tpushl 0(%%esi)\n\tcall *%[fn]" \
+        : "=a"(ret) : [fn] "r"(fn), [ar] "r"(ar_) \
+        : "ecx", "edx", "esi", "memory", "cc"); return ret; }
 #define W3(NM) static u32 NM(u32 fn, u32 a0, u32 a1, u32 a2) { u32 ret; u32 ar_[3]; \
     ar_[0] = a0; ar_[1] = a1; ar_[2] = a2; \
     __asm__ volatile ("movl %[ar], %%esi\n\tpushl 8(%%esi)\n\tpushl 4(%%esi)\n\tpushl 0(%%esi)\n\tcall *%[fn]" \
@@ -170,6 +175,7 @@ static u32 peb_addr(void) { u32 v; __asm__ volatile ("movl %%fs:0x30, %0" : "=r"
         : "=a"(ret) : [fn] "r"(fn), [ar] "r"(ar_) \
         : "ecx", "edx", "esi", "memory", "cc"); return ret; }
 W1(api1)
+W2(api2)
 W3(api3)
 W4(api4)
 W5(api5)
@@ -184,6 +190,15 @@ W7(api7)
     ar_[0] = a0; \
     __asm__ volatile ("pushq %%rbp\n\tmovq %%rsp, %%rbp\n\tandq $-16, %%rsp\n\tsubq $0x20, %%rsp\n\t" \
         "movq 0(%%r14), %%rcx\n\tcall *%%r15\n\t" \
+        "movq %%rbp, %%rsp\n\tpopq %%rbp" \
+        : "=a"(ret) : "r"(rfn), "r"(rar) \
+        : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc"); return ret; }
+#define W2(NM) static u64 NM(u64 fn, u64 a0, u64 a1) { u64 ret; u64 ar_[2]; \
+    register u64 rfn __asm__("r15") = fn; \
+    register u64 rar __asm__("r14") = (u64)(unsigned long)(void*)ar_; \
+    ar_[0] = a0; ar_[1] = a1; \
+    __asm__ volatile ("pushq %%rbp\n\tmovq %%rsp, %%rbp\n\tandq $-16, %%rsp\n\tsubq $0x20, %%rsp\n\t" \
+        "movq 0(%%r14), %%rcx\n\tmovq 8(%%r14), %%rdx\n\tcall *%%r15\n\t" \
         "movq %%rbp, %%rsp\n\tpopq %%rbp" \
         : "=a"(ret) : "r"(rfn), "r"(rar) \
         : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc"); return ret; }
@@ -227,6 +242,7 @@ W7(api7)
         : "=a"(ret) : "r"(rfn), "r"(rar) \
         : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc"); return ret; }
 W1(api1)
+W2(api2)
 W3(api3)
 W4(api4)
 W5(api5)
@@ -616,3 +632,6 @@ u32 xrt_unpack(void* cfgp) {
     if (bad) { rt_fatal(k32, 5, flags); return bad; }   /* 5+kod: 1=rec 2=alloc 3=decode 4=protect */
     return 0;
 }
+
+// ---- 0.7.0: lisans cekirdegi (lic_sdk_core + xrt_sdk_entry asm kapilari) ----
+#include "xrt_license.c"

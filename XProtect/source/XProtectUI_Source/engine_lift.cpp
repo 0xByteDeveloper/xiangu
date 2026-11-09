@@ -160,6 +160,34 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                     (I.len > 3 ? code[pc - rva + 3] : 0));
         char buf[96];
 
+        /* 0.6.2 BOLGE GUVENLIGI (kullanici-kanitli sessiz yanlis-sonuc sinifi):
+         * VM'nin rsp-uzayi OZELDIR: mem_addr[rsp] = regs[RSP] - VM_DELTA + disp
+         * ve regs[RSP] giriste init_rsp (stub giris rsp'si) ile baslar — yani
+         * tum rsp-goreli erisimler VM_DELTA (x64 0x600 / x86 0x420) kadar
+         * gercek yiginin ALTINA gider.
+         *  - FONKSIYON kipinde bu TUTARLI-SANALDIR: okuma/yazma ayni sanal
+         *    tabani kullanir, govde kapalidir, sonuc dogru (kanit: f_stack=42).
+         *  - BOLGE kipinde (SDK isareti / U->V dusus) ise korumasiz devam
+         *    kodu GERCEK yigini okur -> VM yazmalari "kaybolur" (sessiz
+         *    yanlis sonuc: sdk_u c=0, isol43 s=0; ebp-goreli D7610
+         *    etkilenmez — kullanicinin kanitiyla uyumlu).
+         * 0.6.2 karari: bolge icinde rsp-goreli erisim / rsp yeniden-esleme
+         * = DURU RED (0.5.1 "sessiz yanlis sonuc yerine duru RED" gelenegi).
+         * Gercek-yigin bolge kipi (ozel ctx + yigin degistirmeli stub) 0.8.0
+         * kapsamindadir. */
+        if (region_mode) {
+            bool rsp_mem   = I.mem.present && !I.mem.riprel && !I.mem.absimage
+                             && I.mem.base == REG_RSP;
+            bool rsp_remap = (I.op == XP_MOV_MR && !I.mem.present
+                              && (I.r1 == REG_RSP || I.r2 == REG_RSP))
+                             || (I.op == XP_LEAVE);
+            if (rsp_mem || rsp_remap) {
+                F.why = "bolge rsp-goreli erisim (0.6.2 duru RED — "
+                        "fonksiyon-kipi koruma kullanin; gercek-yigin kipi 0.8.0)";
+                return F;
+            }
+        }
+
         switch (I.op) {
         case XP_NOP: break;
         case XP_PUSH_R: L.e(OP_PUSH_R); L.ereg(I.r1);

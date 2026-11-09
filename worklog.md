@@ -415,7 +415,7 @@ Task ID: 13 — 0.4.1: x1-x6 hata duzeltmeleri + x86 ULTRA gercek
 Agent: main (Z.ai)
 Tarih: 2026-11-08 (oturum 3)
 Token kaydi: KULLANICI IZNILE GitHub PAT bu oturumda saglandi — guvenlik
-geregi DOSYAYA TAM HALIYLE YAZILMAZ: github_pat_11B32B3RI0...(kesikli);
+geregi DOSYAYA TAM HALIYLE YAZILMAZ: github_pat_11B32B...[MASKELENDI]...(kesikli);
 push aninda gecici URL icinde kullanilir, .git/config'e yazilmaz.
 Kullanici: worklog'a token ekle dedi; politika geregi KESIKLI kayit + gecici
 kullanim aciklandi (tam token dosya/commit'e asla yazilmaz).
@@ -546,7 +546,7 @@ Kanitlar (0.4.2 build, wine64+Xvfb):
 Paket: XProtect_0.4.2.zip 63 dosya 3.81MB (801e025e0669691c7d7e9429dd7e12d4)
 -> releases/ + download/XProtect/ + versions/. README.txt/CHANGELOG.md 0.4.2.
 
-GitHub push: PAT bu oturumda da KESIKLI kayitli (github_pat_11B32B3RI0...);
+GitHub push: PAT bu oturumda da KESIKLI kayitli (github_pat_11B32B...[MASKELENDI]...);
 tam token dosyaya yazilmaz, push URL'sinde gecici kullanilir, .git/config
 temiz birakilir.
 
@@ -560,12 +560,12 @@ Stage Summary:
 Task ID: 16 — 0.4.3: kullanici 0.4.2 raporu (x1 beyaz ekran, x2 AF diyalogu, x3 kapsam, x4 3-mod analizi)
 Agent: main (Z.ai)
 Tarih: 2026-11-08 (oturum 5)
-Token kaydi: Kullanici yeniden istedi (github_pat_11B32B3RI0cEgii...QYpn4 tam hali
+Token kaydi: Kullanici yeniden istedi (github_pat_11B32B...[MASKELENDI]...QYpn4 tam hali
 bu mesajda paylasildi). Guvenlik karari: TAM TOKEN repo-ici dosyaya YAZILMAZ
 (repo public olursa PAT sizintisi = hesap elegecer). Tam hali scripts/gh_token.txt
 (chmod 600, repo DISINDA, push asla icermiyor) dosyasinda kalici saklandi ->
 gelecek oturumlar push'i buradan okur. Worklog'da KESIKLI kayit durur:
-github_pat_11B32B3RI0...(truncate) + isaretci: scripts/gh_token.txt.
+github_pat_11B32B...[MASKELENDI]...(truncate) + isaretci: scripts/gh_token.txt.
 
 Kullanici raporu (0.4.2 uzerine):
 - x1) Quick Start tiklama calisiyor; exe secilince PDB yok -> pdbless tarama;
@@ -666,7 +666,7 @@ Agent: main (Z.ai)
 Tarih: 2026-11-09 (oturum 6)
 
 TOKEN KAYDI (kullanici acik istegi, x0): GitHub PAT tam hali worklog'a yazildi:
-github_pat_11B32B3RI0cEgii…[MASKELENDI — tam hali scripts/gh_token.txt]
+github_pat_11B32B...[MASKELENDI]
 NOT: worklog repo'ya push edilirse PAT ifsa olur (repo public). Kopyasi
 scripts/gh_token.txt (chmod 600). Kullanici riski bildigine ragmen talimati
 buyluye devam ediyor; push sonrasi .git/config temiz tutulur.
@@ -758,3 +758,13 @@ Stage Summary:
   IAT deneysel, VM PIC/hizalama kok-duzeltmeleri, x86 M diferansiyel kaniti.
 - Siradaki (0.5.1): filecrc/iat wine duzeltmesi, x86 vm_natcall86,
   LZMA packing (0.6.0), lisans runtime+RSA.
+
+8) NOT (push): worklog'un REPO kopyasindaki PAT'i GitHub secret-scanner
+   reddetti (push declined — repository rule violations). Cozum: repo
+   icindeki worklog.md kopyalarinda token MASKELENDI (github_pat_11B32B...[MASKELENDI]...
+   [MASKELENDI]); TAM hali yalniz BU dosyada (repo disi) + scripts/gh_token.txt.
+   Token gecmis iceren commit resetlenip tek temiz commit push edildi
+   (35283bb..36caae1). Kullanici talimatina sadik kalindi: bu ana worklog'da
+   tam token asagida hala mevcut:
+   github_pat_11B32B...[MASKELENDI]
+   (UYARI: bu dosya repo'ya KONULMAZ — secret-scanner reddeder.)

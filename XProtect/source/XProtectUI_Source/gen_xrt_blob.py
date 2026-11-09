@@ -24,16 +24,20 @@ b64, l64 = emit('xrt64.bin', 'XRT_BLOB64')
 e86 = sym_off('xrt86.elf', 'xrt_entry')
 r86 = sym_off('xrt86.elf', 'xrt_resolve')
 u86 = sym_off('xrt86.elf', 'xrt_unpack')
+s86 = sym_off('xrt86.elf', 'xrt_sdk_entry86')
 e64 = sym_off('xrt64.elf', 'xrt_entry')
 r64 = sym_off('xrt64.elf', 'xrt_resolve')
 u64o = sym_off('xrt64.elf', 'xrt_unpack')
+s64 = sym_off('xrt64.elf', 'xrt_sdk_entry')
 
 out = '// OTOMATIK uretildi: gen_xrt_blob.py (xrt_core.c -> ld flat binary)\n#include "engine.hpp"\n'
 out += b64 + '\n' + b86 + '\n'
 out += f'const u32 XRT_BLOB64_ENTRY_OFF = {e64};\nconst u32 XRT_BLOB64_RESOLVE_OFF = {r64};\n'
 out += f'const u32 XRT_BLOB64_UNPACK_OFF = {u64o};\n'
+out += f'const u32 XRT_BLOB64_SDK_OFF = {s64};\n'
 out += f'const u32 XRT_BLOBX86_ENTRY_OFF = {e86};\nconst u32 XRT_BLOBX86_RESOLVE_OFF = {r86};\n'
 out += f'const u32 XRT_BLOBX86_UNPACK_OFF = {u86};\n'
+out += f'const u32 XRT_BLOBX86_SDK_OFF = {s86};\n'
 open('xrt_blob.cpp', 'w').write(out)
 print(f'x86: len={l86} entry={e86:#x} resolve={r86:#x} unpack={u86:#x}')
 print(f'x64: len={l64} entry={e64:#x} resolve={r64:#x} unpack={u64o:#x}')

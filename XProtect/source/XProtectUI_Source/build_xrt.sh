@@ -4,7 +4,7 @@
 set -e
 cd "$(dirname "$0")"
 
-CFL="-O2 -ffreestanding -fno-stack-protector -fno-jump-tables -fno-asynchronous-unwind-tables -fomit-frame-pointer -fno-ident -fno-pie -Wall"
+CFL="-O2 -fno-tree-vectorize -ffreestanding -fno-stack-protector -fno-jump-tables -fno-asynchronous-unwind-tables -fomit-frame-pointer -fno-ident -fno-pie -Wall"
 
 echo "== [1/4] x86 =="
 gcc -m32 $CFL -DXRT_IS_X86 -c xrt_core.c -o xrt86.o

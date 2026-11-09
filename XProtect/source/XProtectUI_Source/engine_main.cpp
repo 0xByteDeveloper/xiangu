@@ -168,10 +168,63 @@ static void scan_sdk(const PEFile& pe, std::vector<ManFn>& out, std::vector<std:
     (void)found;
 }
 
+// ---- 0.7.0: SDK LISANS API tarayicisi ----
+// xprotect_sdk.h API fonksiyonlari: B8 <APIMAGIC> B8 <fnid> ...govde... B8 <END>
+// Bulunan blogun TAMAMI (BEG basi -> END sonu) lisans dispatch'ine yamanir.
+struct ApiSite { u32 beg_rva; u32 span; u32 fnid; };
+static void scan_sdk_api(const PEFile& pe, std::vector<ApiSite>& out,
+                         std::vector<std::string>& log) {
+    const Section* t = pe.secbyname_c(".text");
+    if (!t) return;
+    bool ok; u32 raw = pe.rva2raw(t->va, &ok);
+    if (!ok) return;
+    u32 maxn = t->vsz;
+    if (raw + maxn > pe.buf.size()) maxn = (u32)(pe.buf.size() - raw);
+    if (maxn < 16) return;
+    static const u32 API_MAGIC = 0x4C415058u;   // 'XAPL' (B8 58 50 41 4C)
+    const u8* p = pe.buf.data() + raw;
+    u32 i = 0;
+    while (i + 10 <= maxn) {
+        if (p[i] == 0xB8) {
+            u32 mg; memcpy(&mg, p + i + 1, 4);
+            if (mg == API_MAGIC && p[i + 5] == 0xB8) {
+                u32 fnid; memcpy(&fnid, p + i + 6, 4);
+                if (fnid >= 1 && fnid <= 37) {   /* 0.7.0-final SDK-40: 1..37 */
+                    u32 j = i + 10;
+                    u32 end_at = 0;
+                    while (j + 5 <= maxn) {
+                        if (p[j] == 0xB8) {
+                            u32 me; memcpy(&me, p + j + 1, 4);
+                            if (me == SDK_END_MAGIC) { end_at = j; break; }
+                        }
+                        j++;
+                    }
+                    /* 0.7.0: API bloklari GOVDESIZDIR (yalniz 3 mov):
+                       END tam i+10'da olmali — ortadaki govde boslugu
+                       sahte-pozitifi imkansiz kilar (CRT rastgele
+                       baytlarinda B8 58 50 41 4C ... B8 8E 2C 7A 3D
+                       dizisi gorulebilir; araya govde giren eseyseler
+                       gercek degildir). */
+                    if (end_at == i + 10) {
+                        ApiSite st;
+                        st.beg_rva = t->va + i;
+                        st.span    = (end_at + 5) - i;
+                        st.fnid    = fnid;
+                        out.push_back(st);
+                        log.push_back("[SDK-API] fnid=" + std::to_string(fnid) +
+                                      " @0x" + hex32(st.beg_rva) +
+                                      " span=" + std::to_string(st.span) + "B");
+                        i = end_at + 5;
+                        continue;
+                    }
+                }
+            }
+        }
+        i++;
+    }
+}
+
 // ---- IAT dolayli-cagri noktasi tarayicisi ----
-// Kesfedilmis fonksiyonlari disasm ile yurur; FF15/FF25 (XP_CALLI/XP_JMPI)
-// uzerinden IAT yuvasina isaret edenleri toplar. Cozulemeyen bayt gorulurse
-// O fonksiyon gvenli olmayan kabul edilir (yama yok — crash riski sifir).
 struct IatSite { u32 site_rva; u32 iat_rva; bool is_jmp; u32 insn_len; };
 static void scan_iat_sites(const PEFile& pe, const std::vector<FnInfo>& fns,
                             const std::map<u32, ImpSlot>& by_rva,
@@ -498,11 +551,14 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     }
 
     bool rt_any  = opt.rt_selfcrc || opt.rt_textcrc || opt.rt_filecrc;
+    // 0.7.0: lisans API'leri xrt dispatch ister
+    bool lic_any = !opt.lic_pubkey.empty() || !opt.lic_watermark.empty();
     // 0.6.0: paketleme xrt_unpack ister (EP stub cagirir)
-    bool rt_blob = rt_any || opt.iat_prot || opt.pack;
+    bool rt_blob = rt_any || opt.iat_prot || opt.pack || lic_any;
     u32 xrt_len      = pe.is64 ? (u32)XRT_BLOB64_LEN : (u32)XRT_BLOBX86_LEN;
     u32 xrt_code_off = 0, cfg_off = 0;
     u32 xrt_entry_rva = 0, xrt_resolve_rva = 0, cfg_rva = 0, xrt_unpack_rva = 0;
+    u32 xrt_sdk_rva = 0, lsd_rva = 0;
     if (rt_blob) {
         xrt_code_off = ((u32)blob_len + 15) & ~15u;
         cfg_off      = (xrt_code_off + xrt_len + 15) & ~15u;
@@ -510,7 +566,24 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         xrt_entry_rva   = xrt_rva + (pe.is64 ? XRT_BLOB64_ENTRY_OFF : XRT_BLOBX86_ENTRY_OFF);
         xrt_resolve_rva = xrt_rva + (pe.is64 ? XRT_BLOB64_RESOLVE_OFF : XRT_BLOBX86_RESOLVE_OFF);
         xrt_unpack_rva  = xrt_rva + (pe.is64 ? XRT_BLOB64_UNPACK_OFF : XRT_BLOBX86_UNPACK_OFF);
+        xrt_sdk_rva     = xrt_rva + (pe.is64 ? XRT_BLOB64_SDK_OFF  : XRT_BLOBX86_SDK_OFF);
         cfg_rva         = newva_guess + cfg_off;
+    }
+
+    // ---- 0.7.0: LSD (License SeDiketi) — cfg sonrasi rezerve edilir ----
+    // Duzen: [cfg 0x48][LSD 0x12C][bytecode...]
+    #define LSD_SIZE_E 0x12C
+    #define LSD_CACHE_E 0x104   /* 0.7.0-final: serial em önbelleği (flag+256B) */
+    std::vector<u8> lsd;
+    if (!opt.lic_pubkey.empty()) {
+        if (opt.lic_pubkey.size() != 512) {
+            L("[HATA] --pubkey 512 hex (256 bayt modulus BE) olmali — cikti YAZILMADI");
+            return 2;
+        }
+        if (opt.lic_prodcode.size() != 16) {
+            L("[HATA] --prodcode 16 hex (8 bayt urun kodu) olmali — cikti YAZILMADI");
+            return 2;
+        }
     }
 
     // ---- IAT korumasi: tarama + thunk planlama + cagri noktasi yamasi ----
@@ -522,7 +595,9 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     // rezerv 0x40'ta kaldı -> cfg'nin son 8B (pack_rva+reserved=0)
     // İLK bytecode'un ilk 8 baytını EZİYORDU -> VM çöp opcode okuyor,
     // fonksiyon sessizce no-op'a düşüyor (crash YOK, yanlış sonuç VAR).
-    u32 thunk_area_end = rt_blob ? (cfg_off + XCFG_SIZE_E) : (u32)blob_len;
+    u32 lsd_area = (lic_any && rt_blob) ? (LSD_SIZE_E + LSD_CACHE_E) : 0;
+    if (lsd_area) lsd_rva = cfg_rva + XCFG_SIZE_E;
+    u32 thunk_area_end = rt_blob ? (cfg_off + XCFG_SIZE_E + lsd_area) : (u32)blob_len;
     u32 n_iat_sites = 0, n_iat_funcs_skip = 0;
     if (opt.iat_prot) {
         std::map<u32, ImpSlot> by_rva;
@@ -583,6 +658,33 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         }
     }
 
+    // 0.7.0: SDK lisans API yamasi (.text icindeki isaret govdeyi degistirir).
+    // CRC hesaplarindan ONCE yapilmali (text-CRC yamali .text uzerinden).
+    {
+        std::vector<ApiSite> apis;
+        if (opt.sdk_scan) scan_sdk_api(pe, apis, log);
+        u32 n_apis = 0;
+        for (auto& st : apis) {
+            u32 stub_len = pe.is64 ? 11u : 10u;
+            if (st.span < stub_len) {
+                L("[SDK-API] UYARI: span kisa (" + std::to_string(st.span) + "B) — atlandi");
+                continue;
+            }
+            bool okr; u32 sraw = pe.rva2raw(st.beg_rva, &okr);
+            if (!okr || sraw + st.span > pe.buf.size()) continue;
+            std::vector<u8> sb = pe.is64
+                ? build_api_stub_x64(st.beg_rva, st.fnid, lsd_rva, xrt_sdk_rva, st.span)
+                : build_api_stub_x86(st.beg_rva, st.fnid, lsd_rva, xrt_sdk_rva, st.span);
+            memcpy(&pe.buf[sraw], sb.data(), st.span);
+            n_apis++;
+        }
+        if (!apis.empty()) {
+            snprintf(b, sizeof b, "[SDK-API] %zu isaret / %u API lisans dispatch'ine yamandi (fnid 1..37; LSD imaj taramasi)",
+                     apis.size(), n_apis, lsd_rva, xrt_sdk_rva);
+            L(b);
+        }
+    }
+
     // --- lift / mutasyon ---
     struct Compiled {
         FnInfo* f; VFn v; std::vector<u8> plain, enc;
@@ -636,7 +738,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
             } else {
                 // mutasyon mumkun degil: 0.2.0 U davranisina dus (VM junk)
                 L("[ULTRA] on-mutasyon RED: " + m.why + " -> saf V ye dusuluyor" + (is_region ? " (bolge)" : ""));
-                ty = 0; nUf++;
+                ty = 0; nUf++; nV++;   /* 0.6.2: OZET sayaci — dusus bir V derlemesidir */
             }
             jl = 2;
         } else {
@@ -793,6 +895,46 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     }
     while (secimg.size() < (size_t)state_off - (nstate ? 0 : 0)) secimg.push_back(0);
     secimg.resize(cache_off + (u32)thunk_slots.size() * psz, 0);
+    // 0.7.0: LSD (lisans sedeti) — cfg'nin hemen sonrasi
+    if (lsd_area) {
+        size_t lsd_off = (size_t)(lsd_rva - newva_guess);
+        if (secimg.size() < lsd_off + LSD_SIZE_E + LSD_CACHE_E)
+            secimg.resize(lsd_off + LSD_SIZE_E + LSD_CACHE_E, 0);
+        lsd.assign(LSD_SIZE_E, 0);
+        lsd[0] = 'X'; lsd[1] = 'L'; lsd[2] = 'S'; lsd[3] = 'D'; lsd[4] = 1;
+        if (!opt.lic_pubkey.empty()) {
+            for (u32 i = 0; i < 256; i++)
+                lsd[0x08 + i] = (u8)std::stoul(opt.lic_pubkey.substr(i * 2, 2), nullptr, 16);
+            for (u32 i = 0; i < 8; i++)
+                lsd[0x110 + i] = (u8)std::stoul(opt.lic_prodcode.substr(i * 2, 2), nullptr, 16);
+            lsd[0x108] = 0x01; lsd[0x109] = 0x00; lsd[0x10A] = 0x01; lsd[0x10B] = 0x00;  // e=65537
+        }
+        u32 bd = opt.lic_builddate ? opt.lic_builddate : 0x07EA0B09u; /* 2026-11-09 */
+        lsd[0x10C] = (u8)bd; lsd[0x10D] = (u8)(bd >> 8);
+        lsd[0x10E] = (u8)(bd >> 16); lsd[0x10F] = (u8)(bd >> 24);
+        if (!opt.lic_watermark.empty()) {
+            u64 w = 0xCBF29CE484222325ull;
+            for (size_t wi = 0; wi < opt.lic_watermark.size(); wi++) {
+                w ^= (u64)(u8)opt.lic_watermark[wi];
+                w *= 0x100000001B3ull;
+            }
+            for (int wi = 0; wi < 8; wi++) lsd[0x118 + wi] = (u8)(w >> (8 * wi));
+        }
+        /* 0.7.0-final FIX: CRC SADECE 0x000..0x11F (LSD_CRC_LEN) — state(0x120)
+           /tick(0x124) runtime-yazılabilir; CRC'ye dahil edilirse ilk SetSerial
+           CRC'yi bozup tüm lisans API'lerini CORRUPTED'a düşürüyordu. */
+        u32 lcrc = 0xFFFFFFFFu;
+        for (u32 wi = 0; wi < 0x120; wi++) lcrc = xcrc_up(lcrc, lsd[wi]);
+        lcrc = ~lcrc;
+        lsd[0x128] = (u8)lcrc; lsd[0x129] = (u8)(lcrc >> 8);
+        lsd[0x12A] = (u8)(lcrc >> 16); lsd[0x12B] = (u8)(lcrc >> 24);
+        memcpy(&secimg[lsd_off], lsd.data(), LSD_SIZE_E);
+        snprintf(b, sizeof b, "[LSD] lisans blok: modulus=%s urun=%s watermark=%s build_date=0x%X lsd_rva=0x%X",
+                 opt.lic_pubkey.empty() ? "yok" : "256B",
+                 opt.lic_prodcode.empty() ? "yok" : opt.lic_prodcode.c_str(),
+                 opt.lic_watermark.empty() ? "yok" : "var", bd, lsd_rva);
+        L(b);
+    }
     for (auto& c : comps) {
         if (c.ty == 1) continue;              // M: bc/stub kopyasi yok
         u32 o = c.bc_rva - newva_guess;
@@ -985,6 +1127,16 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         u32 ddoff = pe.is64 ? 112 : 96;
         memcpy(&xr_reloc_rva, &pe.buf[pe.e_lfanew + 24 + ddoff + 40], 4);
         memcpy(&xr_reloc_sz,  &pe.buf[pe.e_lfanew + 24 + ddoff + 44], 4);
+        // --- 0.7.0 FIX ("butunluk kontrolu kod = #2") ----------------------
+        // cpStripFixups .reloc'u SILIYOR (veri memset-0 + dizin 0/0 + ASLR
+        // bayraklari temiz). Strip sonrasi yukleyici delta UYGULAMAZ; fakat
+        // cfg'ye strip-ONCESI rva/sz yaziliyordu: runtime silinmis (sifir)
+        // tabloyu okuyup bsz<8 ile HICBIR bayti atlamaz, derleme-tarzi ise
+        // ESKI tablo ile yamali baytlari atliyordu -> iki CRC farkli ->
+        // xrt_entry err=2 (metin2 D7610 U+loadercrc+stripfixups kaniti:
+        // saklanan 0x01ED0622 != runtime 0x42E27385). Cozum: strip varsa
+        // iki taraf da ATLAMASIZ duz bayt CRC'si kullanir (cfg'ye 0/0).
+        if (opt.strip_fixups) { xr_reloc_rva = 0; xr_reloc_sz = 0; }
         // --- self CRC: vm blob + xrt kodu (cfg haric) ---
         xr_self_len = xrt_code_off + xrt_len;
         u32 c = 0xFFFFFFFFu;
@@ -1135,7 +1287,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     /* 0.5.1 SAHTE-BASARI KORUMASI: secili fonksiyonlarin HICBIRI
     uygulanamadiysa cikti dosyasi HIC YAZILMAZ (0.5.0 sessiz "korunmus"
     kopya yaziyordu). rc=3 -> GUI uyari kutusu + CLI net hata. */
-    if (comps.empty() && !opt.pack && !opt.strip_fixups && !opt.strip_debug) {
+    if (comps.empty() && !opt.pack && !opt.strip_fixups && !opt.strip_debug && !lic_any) {
         L("[HATA] HICBIR FONKSIYON UYGULANAMADI - cikti dosyasi YAZILMADI.");
         L("[HATA] Nedenler yukarida [RED] satirlarinda.");
         return 3;

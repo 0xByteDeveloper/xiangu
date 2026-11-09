@@ -33,7 +33,7 @@
 
 // ---------------- surum ----------------
 #define XPROTECT_EDITION  L"XProtect Ultimate"
-#define XPROTECT_VERSION  L"0.6.1"
+#define XPROTECT_VERSION  L"0.7.0"
 #define XPROTECT_BUILD    L"2026-11-09"
 
 // ---------------- dil tablosu (en.lng birebir + TR) ----------------
@@ -4045,6 +4045,23 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
                     else if (!wcscmp(argv[j], L"--sdkonly")) opt.sdk_only = true;
                     // 0.6.0: LZMA paketleme + PE temizligi
                     else if (!wcscmp(argv[j], L"--pack")) opt.pack = true;
+                    /* 0.7.0: lisans (RSA serial + HWID + watermark) */
+                    else if (!wcscmp(argv[j], L"--pubkey") && j + 1 < argc) {
+                        std::string v = w2s(argv[++j]);
+                        opt.lic_pubkey = v;
+                    }
+                    else if (!wcscmp(argv[j], L"--prodcode") && j + 1 < argc) {
+                        std::string v = w2s(argv[++j]);
+                        opt.lic_prodcode = v;
+                    }
+                    else if (!wcscmp(argv[j], L"--watermark") && j + 1 < argc) {
+                        std::string v = w2s(argv[++j]);
+                        opt.lic_watermark = v;
+                    }
+                    else if (!wcscmp(argv[j], L"--builddate") && j + 1 < argc) {
+                        std::string v = w2s(argv[++j]);
+                        opt.lic_builddate = (u32)strtoul(v.c_str(), nullptr, 16);
+                    }
                     else if (!wcscmp(argv[j], L"--stripfixups")) opt.strip_fixups = true;
                     else if (!wcscmp(argv[j], L"--stripdebug")) opt.strip_debug = true;
                 }

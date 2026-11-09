@@ -368,3 +368,32 @@ std::vector<u8> build_thunk_x64(u32 thunk_rva, u32 resolve_rva, u32 cache_rva,
     for (int k = 0; k < 4; k++) s[xr + 1 + k] = (u8)((u32)r1 >> (8 * k));
     return s;
 }
+
+// ============================================================
+// 0.7.0 — SDK lisans API yamasi
+// API fonksiyon govdesi (isaret blogu) su sekilde degisir:
+//   mov r10d/ecx, fnid ; mov r11d/edx, lsd_rva ; jmp xrt_sdk_entry
+// xrt_sdk_entry (blob): Win32 ABI -> SysV C (xrt_sdk_dispatch).
+// ============================================================
+std::vector<u8> build_api_stub_x64(u32 site_rva, u32 fnid, u32 lsd_rva,
+                                   u32 sdk_entry_rva, u32 span) {
+    (void)lsd_rva;                               // LSD dispatch'te imaj taramasıyla bulunur
+    std::vector<u8> s;
+    put(s, {0x41, 0xBA}); put32(s, fnid);        // mov r10d, fnid
+    put(s, {0xE9, 0, 0, 0, 0});                  // jmp xrt_sdk_entry
+    i32 rel = (i32)(sdk_entry_rva - (site_rva + 11));
+    for (int k = 0; k < 4; k++) s[7 + k] = (u8)((u32)rel >> (8 * k));
+    while (s.size() < span) s.push_back(0x90);   // nop dolgu
+    return s;
+}
+std::vector<u8> build_api_stub_x86(u32 site_rva, u32 fnid, u32 lsd_rva,
+                                   u32 sdk_entry_rva, u32 span) {
+    (void)lsd_rva;
+    std::vector<u8> s;
+    put(s, {0xB9}); put32(s, fnid);              // mov ecx, fnid
+    put(s, {0xE9, 0, 0, 0, 0});                  // jmp xrt_sdk_entry86
+    i32 rel = (i32)(sdk_entry_rva - (site_rva + 10));
+    for (int k = 0; k < 4; k++) s[6 + k] = (u8)((u32)rel >> (8 * k));
+    while (s.size() < span) s.push_back(0x90);
+    return s;
+}

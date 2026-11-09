@@ -154,6 +154,13 @@ std::vector<u8> build_thunk_x86(u32 thunk_rva, u32 resolve_rva, u32 cache_rva,
                                 u32 dll_hash, u32 name_hash, u32 iat_rva);
 std::vector<u8> build_thunk_x64(u32 thunk_rva, u32 resolve_rva, u32 cache_rva,
                                 u32 dll_hash, u32 name_hash, u32 iat_rva);
+// 0.7.0: SDK lisans API yamasi (isaret blogu -> lisans dispatch)
+std::vector<u8> build_api_stub_x64(u32 site_rva, u32 fnid, u32 lsd_rva,
+                                   u32 sdk_entry_rva, u32 span);
+std::vector<u8> build_api_stub_x86(u32 site_rva, u32 fnid, u32 lsd_rva,
+                                   u32 sdk_entry_rva, u32 span);
+// 0.7.0: XRT lisans dispatch ofsetleri
+// (gen_xrt_blob.py XRT_BLOB*_SDK_OFF uretir)
 // 0.5.0: XProtect Runtime blob'u (xrt_core.c'den uretilir)
 extern const unsigned char XRT_BLOB64[];
 extern const unsigned char XRT_BLOBX86[];
@@ -166,6 +173,9 @@ extern const u32 XRT_BLOBX86_RESOLVE_OFF;
 // 0.6.0: LZMA paket acici (xrt_unpack) blob ofsetleri
 extern const u32 XRT_BLOB64_UNPACK_OFF;
 extern const u32 XRT_BLOBX86_UNPACK_OFF;
+// 0.7.0: lisans dispatch (xrt_sdk_entry / xrt_sdk_entry86)
+extern const u32 XRT_BLOB64_SDK_OFF;
+extern const u32 XRT_BLOBX86_SDK_OFF;
 
 // ---------------- 0.6.0: Paketleme (cpPack) + strip ----------------
 // LZMA1 (end-mark) ile sikistirir; props 5 bayt + sozluk boyutu doner.
@@ -222,6 +232,11 @@ struct Options {
     bool pack        = false;  // cpPack: LZMA paketleme (.vmp1 + EP redirect)
     bool strip_fixups = false; // cpStripFixups: .reloc kaldir + ASLR temizle
     bool strip_debug  = false; // cpStripDebugInfo: debug dizini + COFF sembol
+    // --- 0.7.0: lisans (RSA serial + HWID + watermark; cpIncludeWatermark) ---
+    std::string lic_pubkey;    // 512 hex (256B modulus BE); bos = lisans yok
+    std::string lic_prodcode;  // 16 hex (8B urun kodu); pubkey varken zorunlu
+    std::string lic_watermark; // watermark metni (FNV-64 gomulur)
+    u32 lic_builddate = 0;     // 0xYYYYMMDD; 0 = derleme gunu (2026-11-09 sabiti)
 };
 
 struct FnInfo {
