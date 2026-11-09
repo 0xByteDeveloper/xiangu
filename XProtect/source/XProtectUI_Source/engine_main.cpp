@@ -517,7 +517,12 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     std::vector<ImpSlot> imps;
     std::vector<u32> thunk_rvas;          // benzersiz IAT yuvasi basina bir thunk
     std::vector<ImpSlot> thunk_slots;     // thunk ile eslesen slot
-    u32 thunk_area_end = rt_blob ? (cfg_off + 0x40) : (u32)blob_len;
+    // 0.6.1 DÜZELTME (kullanıcı bulgusu: metin2 ULTRA+loaderCRC'te sessiz
+    // no-op): 0.6.0'da XCFG 0x40 -> 0x48 büyüdü (XCFG_OFF_PACKRVA) ama
+    // rezerv 0x40'ta kaldı -> cfg'nin son 8B (pack_rva+reserved=0)
+    // İLK bytecode'un ilk 8 baytını EZİYORDU -> VM çöp opcode okuyor,
+    // fonksiyon sessizce no-op'a düşüyor (crash YOK, yanlış sonuç VAR).
+    u32 thunk_area_end = rt_blob ? (cfg_off + XCFG_SIZE_E) : (u32)blob_len;
     u32 n_iat_sites = 0, n_iat_funcs_skip = 0;
     if (opt.iat_prot) {
         std::map<u32, ImpSlot> by_rva;
@@ -784,7 +789,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         secimg.resize(xrt_code_off, 0);
         const u8* xblob = pe.is64 ? XRT_BLOB64 : XRT_BLOBX86;
         secimg.insert(secimg.end(), xblob, xblob + xrt_len);
-        secimg.resize(cfg_off + 0x40, 0);   // cfg (degerler son asamada yazilir)
+        secimg.resize(cfg_off + XCFG_SIZE_E, 0);   // cfg (0.6.1: 0x48 — 0x40 rezervi bc ezdi!)
     }
     while (secimg.size() < (size_t)state_off - (nstate ? 0 : 0)) secimg.push_back(0);
     secimg.resize(cache_off + (u32)thunk_slots.size() * psz, 0);
@@ -1098,6 +1103,23 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         cwr(0x3C, cfg_rva);
         cwr(0x40, pack_rva);                    // 0.6.0: XPK1 blok RVA (.vmp1)
         memcpy(&pe.buf[cfg_raw], cfg, 0x48);
+        // ---- 0.6.1 SAHTE-BASARI KORUMASI ----
+        // cfg yazımı (0x48B) bytecode/stub uzerine tasmamali. 0.6.0'da
+        // rezerv 0x40 kaldi: son 8B (pack_rva=0 + reserved=0) ilk bc'nin
+        // ilk 8 baytını eziyordu (metin2 ULTRA+loaderCRC = sessiz no-op).
+        // Yazım SONRASI enc baytlarını diskten doğrula — tasma varsa
+        // cikti YAZILMAZ (0.5.1 sahte-başarı koruması geleneği).
+        for (auto& c2 : comps) {
+            if (c2.ty == 1) continue;
+            if ((u32)c2.enc.size() < 16) continue;
+            bool okv; u32 braw2 = pe.rva2raw(c2.bc_rva, &okv);
+            if (!okv || braw2 + 16 > pe.buf.size()) continue;
+            if (memcmp(&pe.buf[braw2], c2.enc.data(), 16) != 0) {
+                L("[HATA] XRT cfg yazımı bytecode üzerine taştı (0.6.0 rezerv bug) — ÇIKTI YAZILMADI");
+                L("[HATA] bc RVA=0x" + hex32(c2.bc_rva) + " ilk 16B ezildi. Rezerv XCFG_SIZE_E=0x48 olmalı.");
+                return 5;
+            }
+        }
         snprintf(b, sizeof b,
                  "[XRT] runtime katmani: flags=0x%X | self=0x%08X (%uB) | text=0x%08X (0x%X, reloc-atla %uB) | file=0x%08X (atla: cksum+%u, .vmp0 %u..%u) | pack=0x%X",
                  fl, xr_sc, xr_self_len, xr_tc, text ? text->vsz : 0, xr_reloc_sz, fc,

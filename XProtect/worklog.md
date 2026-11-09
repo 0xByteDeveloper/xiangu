@@ -851,3 +851,30 @@ Kronolojik adimlar:
     m2_vmp.exe, Test_strip.exe, kanit_060.txt).
 Durum: 0.6.0 teslim. Kalan (0.7.0): RSA lisans+serial+HWID+watermark+
     SDK-40; IAT v2 olgunlastirma; resource protection (0.6.0'dan kaydi).
+
+Task 21 — 0.6.1: XRT CFG REZERV TASMASI DÜZELTMESI (2026-11-09):
+- Kullanici kaniti: metin2 d7610 ULTRA+loaderCRC -> oyun aciliyor, cokme
+  YOK ama damage YOK (korunan fonksiyon sessiz no-op).
+- Kok neden (bayt-duzeyi): 0.6.0'da XCFG 0x40->0x48 buyudu (PACKRVA) ama
+  engine rezervi (thunk_area_end, secimg.resize) 0x40 kaldi -> cfg'nin
+  son 8B'si (pack_rva=0+reserved=0) ILK bc'nin ilk 8B'sini eziyor ->
+  VM cop opcode -> interpreter sessiz cikis -> fonksiyon no-op.
+  Kanit: motor sifrelemesi DOGRU (enc16=E35483C8...) ama diskte
+  bc[0..8]=00000000; wine'da tekrar-derlenen cikti ile kullanici
+  dosyasinin bc bolgesi birebir ayni (hata tekrar edildi).
+- Düzeltme: vm_opcodes.h XCFG_SIZE_E=0x48 (xrt_core.c XCFG_SIZE
+  sözleşmesi); engine_main.cpp iki rezerv XCFG_SIZE_E; cfg yazimi
+  SONRASI her bc'nin ilk 16B diskten dogrulanir -> tasarsa rc=5 ve
+  CIKTI YAZILMAZ (sahte-basari korumasi).
+- Neden selftest kaçirdi: 0.6.0 testlerinde VM fonksiyonu YOKTU
+  (mini42c pack-only/pack+CRC) — VM+CRC kombinasyonu hic kosulmadi.
+- Kanitlar: (1) regresyon: 0.6.1 seceneksiz ULTRA md5=6cc9efefee06...
+  (kullanicinin CALISAN baseline'i birebir); (2) fix: loadercrc build
+  bc ilk 16B = e35483c8ec34da76... = calisan baseline bc ile BAYT-BAYT
+  (md5 637c56b7...); (3) SELFTEST OK funcs=0 proj=0 lics=0 (x64+Xvfb);
+  (4) mini42c pack+CRC XPK1 bagimsiz python-LZMA dogrulama TAM;
+  (5) metin2 cfg CRC'leri (file 0x126E0556 / self 0x628CC283) bagimsiz
+  ESLESTI.
+- Paket: XProtect_0.6.1.zip -> releases/; kanit/kanit_061.txt +
+  metin2client_vmp_d7610_Ultra_loaderCRC_061.exe.
+Durum: 0.6.1 teslim. Sirada: 0.7.0 RSA lisans+serial+HWID+watermark+SDK-40.

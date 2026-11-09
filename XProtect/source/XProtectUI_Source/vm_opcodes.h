@@ -129,6 +129,14 @@
 #define VMOFF_SCRATCH   0xC8      // 8 x 8
 #define VMSIZE          0xE8      // toplam (align 0x10)
 
+// --- XRT cfg sözleşme boyutu (0.6.1) ---
+// xrt_core.c'deki XCFG_SIZE (0x48) ile BIREBIR ayni olmali. 0.6.0'da
+// XCFG 0x40->0x48 büyütüldü ama engine rezervi 0x40'ta kalmisti: cfg'nin
+// son 8B'si (pack_rva + reserved) ilk bytecode'un ilk 8 baytini eziyor,
+// VM çöp opcode okuyor ve fonksiyon SESSIZCE no-op'a düşüyordu
+// (kullanıcı kanıtı: metin2 ULTRA+loaderCRC = damage yok, crash yok).
+#define XCFG_SIZE_E     0x48
+
 // --- stub'in yigin rezervi (fonksiyonun kendi push/literal alani) ---
 #define VM_CTX_SZ   0xE8
 // Stub yigin duzeni (olcumlu):
