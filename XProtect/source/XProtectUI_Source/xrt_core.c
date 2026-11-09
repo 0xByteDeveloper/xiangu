@@ -43,7 +43,8 @@ typedef unsigned long long u64;
 #define XCFG_OFF_VMPRAW1 0x34
 #define XCFG_OFF_CKSUM   0x38
 #define XCFG_OFF_CFGRVA  0x3C
-#define XCFG_SIZE        0x40
+#define XCFG_OFF_PACKRVA 0x40   // 0.6.0: XPK1 paket bilgi blok RVA (.vmp1)
+#define XCFG_SIZE        0x48
 
 #define XFLAG_SELFCRC 0x01
 #define XFLAG_TEXTCRC 0x02
@@ -92,6 +93,9 @@ static u32 fnv_w(const u16* s, u32 n) {
 #define XH_EXITPROCESS   0x0E80FD3Au
 #define XH_MESSAGEBOXA   0x23A979E4u
 #define XH_LOADLIBRARYA  0x53B2070Fu
+#define XH_VIRTUALALLOC  0x03285501u   // "VirtualAlloc"
+#define XH_VIRTUALFREE   0x3A9ACC72u   // "VirtualFree"
+#define XH_VIRTUALPROTECT 0x820621F3u  // "VirtualProtect"
 
 // volatile 4-karakter yazisi — GCC bunlari memcpy'ye cevireMEZ (PIC guvenli)
 #define VP4(d, off, w) do { \
@@ -529,5 +533,86 @@ u64 xrt_resolve(u32 dllhash, u32 namehash, u64 fallback_abs) {
         return (u64)ld32((const u8*)(unsigned long)fallback_abs);
 #endif
     }
+    return 0;
+}
+
+// ============================================================
+// 0.6.0 — xrt_unpack: LZMA paket acici (cpPack)
+// EP stub'ı cagirir: .vmp1'deki XPK1 blok'taki akislari LZMA'dan
+// cozer, bolum belleklerine yazar (VirtualProtect RW gecisi ile),
+// sonra OEP'ye donulur (stub jmp). Referans: runtime/loader.cc
+// "unpack regions" + third-party/lzma LzmaDecode (birebir port).
+// Donus: 0 = tamam; 5 = acma hatasi (rt_fatal cagirildi)
+// ============================================================
+#define XPK_MAGIC 0x31504B58u   // 'XPK1'
+
+#include "lzma/LzmaDecode.cc"   /* C olarak derlenir — statik veri yok (PIC kapisi) */
+
+static void xcopy(u8* d, const u8* s, u32 n) { while (n--) *d++ = *s++; }
+
+u32 xrt_unpack(void* cfgp) {
+    u8* cfg = (u8*)cfgp;
+    if (ld32(cfg + XCFG_OFF_MAGIC) != XCFG_MAGIC) return 0;
+    u32 flags = ld32(cfg + XCFG_OFF_FLAGS);
+    u32 packrva = ld32(cfg + XCFG_OFF_PACKRVA);
+    if (!packrva) return 0;                     // paket yok — hizli cikis
+    u64 cfgva = (u64)(unsigned long)cfg;
+    u32 cfg_rva = ld32(cfg + XCFG_OFF_CFGRVA);
+    u8* base = (u8*)(unsigned long)(cfgva - cfg_rva);
+
+    u64 k32 = peb_module(XH_KERNEL32);
+    if (!k32) return 5;                         // kernel32 yok: acilamaz
+    u64 f_alloc = find_export(k32, XH_VIRTUALALLOC);
+    u64 f_free  = find_export(k32, XH_VIRTUALFREE);
+    u64 f_prot  = find_export(k32, XH_VIRTUALPROTECT);
+    if (!f_alloc || !f_free || !f_prot) { rt_fatal(k32, 6, flags); return 6; }
+
+    const u8* pk = base + packrva;
+    if (ld32(pk) != XPK_MAGIC) { rt_fatal(k32, 7, flags); return 7; }
+    u32 count = ld32(pk + 4);
+    u32 props_rva = ld32(pk + 8);
+    if (!count || count > 64 || !props_rva) { rt_fatal(k32, 8, flags); return 8; }
+
+    CLzmaDecoderState st;
+    if (LzmaDecodeProperties(&st.Properties, base + props_rva, LZMA_PROPERTIES_SIZE)
+        != LZMA_RESULT_OK) { rt_fatal(k32, 9, flags); return 9; }
+    {
+        u64 probs = api4(f_alloc, 0, (u64)LzmaGetNumProbs(&st.Properties) * 2u, 0x3000u, 0x04u /*PAGE_READWRITE*/);
+        if (!probs) { rt_fatal(k32, 10, flags); return 10; }
+        st.Probs = (CProb*)(unsigned long)probs;
+    }
+
+    u32 bad = 0;
+    u32 rec = packrva + 16;
+    for (u32 i = 0; i < count; i++, rec += 12) {
+        u32 src = ld32(base + rec);
+        u32 dst = ld32(base + rec + 4);
+        u32 dsz = ld32(base + rec + 8);
+        if (!src || !dst || !dsz || dst > 0xFFFF0000u) { bad = 1; break; }
+        u64 tmp = api4(f_alloc, 0, (u64)dsz, 0x3000u, 0x04u /*PAGE_READWRITE*/);
+        if (!tmp) { bad = 2; break; }
+        SizeT sp = 0, dp = 0;
+        int rc = LzmaDecode(&st, base + src, (SizeT)(0xFFFFFFFFu), &sp,
+                            (unsigned char*)(unsigned long)tmp, (SizeT)dsz, &dp);
+        if (rc != LZMA_RESULT_OK || dp != (SizeT)dsz) {
+            bad = 3;
+        } else {
+            u8* dptr = base + dst;
+            u32 oldp = 0, tmp2 = 0;
+            u64 dva = (u64)(unsigned long)dptr;
+            /* sayfa korumasini RW'ye al, yaz, eski haline don */
+            if (!api4(f_prot, dva, (u64)dsz, 0x04u /*PAGE_READWRITE*/,
+                      (u64)(unsigned long)&oldp)) { bad = 4; }
+            if (!bad) {
+                xcopy(dptr, (const u8*)(unsigned long)tmp, dsz);
+                api4(f_prot, dva, (u64)dsz, oldp ? oldp : 0x20u /*EXEC_READ*/,
+                     (u64)(unsigned long)&tmp2);
+            }
+        }
+        api3(f_free, tmp, 0, 0x8000u /*MEM_RELEASE*/);
+        if (bad) break;
+    }
+    api3(f_free, (u64)(unsigned long)st.Probs, 0, 0x8000u);
+    if (bad) { rt_fatal(k32, 5, flags); return bad; }   /* 5+kod: 1=rec 2=alloc 3=decode 4=protect */
     return 0;
 }

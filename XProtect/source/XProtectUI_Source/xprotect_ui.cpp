@@ -33,7 +33,7 @@
 
 // ---------------- surum ----------------
 #define XPROTECT_EDITION  L"XProtect Ultimate"
-#define XPROTECT_VERSION  L"0.5.1"
+#define XPROTECT_VERSION  L"0.6.0"
 #define XPROTECT_BUILD    L"2026-11-09"
 
 // ---------------- dil tablosu (en.lng birebir + TR) ----------------
@@ -2573,6 +2573,11 @@ static void start_compile() {
     opt.rt_textcrc = (g_proj.options & cpLoaderCRC) != 0;
     opt.rt_filecrc = (g_proj.options & cpFileCRC) != 0;
     opt.iat_prot   = (g_proj.options & cpImportProtection) != 0;
+    // 0.6.0: paketleme + PE temizligi (satirlar zaten Properties'te vardi —
+    // cpPack/cpStripFixups/cpStripDebugInfo artik motor tarafina bagli)
+    opt.pack         = (g_proj.options & cpPack) != 0;
+    opt.strip_fixups = (g_proj.options & cpStripFixups) != 0;
+    opt.strip_debug  = (g_proj.options & cpStripDebugInfo) != 0;
     opt.sdk_scan   = true;   // SDK isaretleri otomatik (VMProtect davranisi)
     // 0.3.0: level artik ftypes oncelikli; "tumunu derle" yolu 0.2.0 uyumu
     // icin level=2 birakilir (ftypes bosken VM junk aktif)
@@ -4038,6 +4043,10 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
                     else if (!wcscmp(argv[j], L"--import") || !wcscmp(argv[j], L"--iat")) opt.iat_prot = true;
                     else if (!wcscmp(argv[j], L"--nosdk")) opt.sdk_scan = false;
                     else if (!wcscmp(argv[j], L"--sdkonly")) opt.sdk_only = true;
+                    // 0.6.0: LZMA paketleme + PE temizligi
+                    else if (!wcscmp(argv[j], L"--pack")) opt.pack = true;
+                    else if (!wcscmp(argv[j], L"--stripfixups")) opt.strip_fixups = true;
+                    else if (!wcscmp(argv[j], L"--stripdebug")) opt.strip_debug = true;
                 }
                 if (!have_funcs && !opt.all) opt.all = true;
                 std::vector<std::string> log;

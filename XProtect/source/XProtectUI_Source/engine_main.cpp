@@ -498,16 +498,18 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     }
 
     bool rt_any  = opt.rt_selfcrc || opt.rt_textcrc || opt.rt_filecrc;
-    bool rt_blob = rt_any || opt.iat_prot;
+    // 0.6.0: paketleme xrt_unpack ister (EP stub cagirir)
+    bool rt_blob = rt_any || opt.iat_prot || opt.pack;
     u32 xrt_len      = pe.is64 ? (u32)XRT_BLOB64_LEN : (u32)XRT_BLOBX86_LEN;
     u32 xrt_code_off = 0, cfg_off = 0;
-    u32 xrt_entry_rva = 0, xrt_resolve_rva = 0, cfg_rva = 0;
+    u32 xrt_entry_rva = 0, xrt_resolve_rva = 0, cfg_rva = 0, xrt_unpack_rva = 0;
     if (rt_blob) {
         xrt_code_off = ((u32)blob_len + 15) & ~15u;
         cfg_off      = (xrt_code_off + xrt_len + 15) & ~15u;
         u32 xrt_rva  = newva_guess + xrt_code_off;
         xrt_entry_rva   = xrt_rva + (pe.is64 ? XRT_BLOB64_ENTRY_OFF : XRT_BLOBX86_ENTRY_OFF);
         xrt_resolve_rva = xrt_rva + (pe.is64 ? XRT_BLOB64_RESOLVE_OFF : XRT_BLOBX86_RESOLVE_OFF);
+        xrt_unpack_rva  = xrt_rva + (pe.is64 ? XRT_BLOB64_UNPACK_OFF : XRT_BLOBX86_UNPACK_OFF);
         cfg_rva         = newva_guess + cfg_off;
     }
 
@@ -961,35 +963,37 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     }
 
     // ============================================================
-    // 0.5.0 — XRT runtime cfg kurulumu + butunluk degerleri
-    // Sira onemli: .text yamalari + reloc filtresi + bolum bayraklari
-    // + checksum TAMAMLANDI; cfg degerleri bu son duruma gore hesaplanir.
-    // cfg .vmp0 icinde (dosya CRC'sinin atladigi bolge) -> yazmasi CRC'yi
-    // gecersiz kilmaz.
+    // 0.5.0/0.6.0 — XRT butunlik degerleri + paketleme (SIRA KRITIK):
+    //   1) reloc dizini + self CRC + text CRC  -> PRE-PACK .text baytlari
+    //      (runtime acilmis bellek uzerinden hesaplar; sikistirilmis
+    //       dosya uzerinden hesaplansaydi hicbir zaman eslesmezdi)
+    //   2) 0.6.0 cpPack + cpStripFixups + cpStripDebugInfo
+    //      (dosya compaction: file CRC'nin final dosya uzerinden
+    //       hesaplanmasi icin cfg yazimindan once olmali)
+    //   3) file CRC (final dosya) + cfg yazimi (0x48: pack_rva dahil)
+    // NOT: add_section push_back secs vector'unu realloc eder -> pack
+    // sonrasi text/rdata isaretcileri secbyname ile TAZELENIR.
     // ============================================================
+    u32 xr_reloc_rva = 0, xr_reloc_sz = 0;
+    u32 xr_self_len = 0, xr_sc = 0, xr_tc = 0;
     if (rt_any) {
-        // reloc dizini (xrt crc_text ile ayni atlama icin)
-        u32 reloc_rva = 0, reloc_sz = 0;
-        {
-            u32 ddoff = pe.is64 ? 112 : 96;
-            memcpy(&reloc_rva, &pe.buf[pe.e_lfanew + 24 + ddoff + 40], 4);
-            memcpy(&reloc_sz,  &pe.buf[pe.e_lfanew + 24 + ddoff + 44], 4);
-        }
+        u32 ddoff = pe.is64 ? 112 : 96;
+        memcpy(&xr_reloc_rva, &pe.buf[pe.e_lfanew + 24 + ddoff + 40], 4);
+        memcpy(&xr_reloc_sz,  &pe.buf[pe.e_lfanew + 24 + ddoff + 44], 4);
         // --- self CRC: vm blob + xrt kodu (cfg haric) ---
-        u32 self_len = xrt_code_off + xrt_len;
-        u32 sc = 0xFFFFFFFFu;
-        for (u32 i = 0; i < self_len && i < secimg.size(); i++) sc = xcrc_up(sc, secimg[i]);
-        sc = ~sc;
-        // --- text CRC: sayfa sayfa, reloc yamalarini atlayarak ---
-        u32 tc = 0;
+        xr_self_len = xrt_code_off + xrt_len;
+        u32 c = 0xFFFFFFFFu;
+        for (u32 i = 0; i < xr_self_len && i < secimg.size(); i++) c = xcrc_up(c, secimg[i]);
+        xr_sc = ~c;
+        // --- text CRC: sayfa sayfa, reloc yamalarini atlayarak (PRE-PACK) ---
         if (text && text->vsz) {
             bool okt; u32 traw = pe.rva2raw(text->va, &okt);
             const u8* rraw = 0;
-            if (reloc_rva && reloc_sz) {
-                bool okr; u32 rr = pe.rva2raw(reloc_rva, &okr);
-                if (okr && rr + reloc_sz <= pe.buf.size()) rraw = &pe.buf[rr];
+            if (xr_reloc_rva && xr_reloc_sz) {
+                bool okr; u32 rr = pe.rva2raw(xr_reloc_rva, &okr);
+                if (okr && rr + xr_reloc_sz <= pe.buf.size()) rraw = &pe.buf[rr];
             }
-            u32 c = 0xFFFFFFFFu;
+            u32 c2 = 0xFFFFFFFFu;
             u8 flag[4096 + 16];
             for (u32 pg = 0; pg < text->vsz; pg += 0x1000) {
                 u32 pgrva = text->va + pg;
@@ -997,10 +1001,10 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                 for (u32 i = 0; i < plen + 8 && i < sizeof flag; i++) flag[i] = 0;
                 if (rraw) {
                     u32 ro = 0;
-                    while (ro + 8 <= reloc_sz) {
+                    while (ro + 8 <= xr_reloc_sz) {
                         u32 page_rva; memcpy(&page_rva, rraw + ro, 4);
                         u32 bsz;     memcpy(&bsz, rraw + ro + 4, 4);
-                        if (bsz < 8 || ro + bsz > reloc_sz) break;
+                        if (bsz < 8 || ro + bsz > xr_reloc_sz) break;
                         if (page_rva == pgrva) {
                             for (u32 eo = 8; eo + 2 <= bsz; eo += 2) {
                                 u16 e; memcpy(&e, rraw + ro + eo, 2);
@@ -1017,20 +1021,39 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                 }
                 for (u32 i = 0; i < plen; i++) {
                     if (flag[i]) continue;
-                    // 0.5.0 DUZELTME: ham-boyut kelepcesi — vsz > rawsz oldugunda
-                    // (kucuk x86 exeler) yuklenen goruntude sonrası SIFIRDIR;
-                    // eski kod pes bolumlerin ham baytlarini okuyordu -> CRC
-                    // calisma zamaniyla uyusmazdi.
+                    // 0.5.0 DUZELTME: ham-boyut kelepcesi — vsz > rawsz
+                    // oldugunda yuklenen goruntude sonrasi SIFIRDIR.
                     u8 by = 0;
                     u32 off = pg + i;
                     if (okt && off < text->rawsz && traw + off < pe.buf.size())
                         by = pe.buf[traw + off];
-                    c = xcrc_up(c, by);
+                    c2 = xcrc_up(c2, by);
                 }
             }
-            tc = ~c;
+            xr_tc = ~c2;
         }
-        // --- file CRC: tum dosya (CheckSum alani + .vmp0 ham araligi atla) ---
+    }
+
+    // ---------------- 0.6.0: cpPack + strip ----------------
+    u32 pack_rva = 0;
+    if (opt.pack) {
+        std::string perr;
+        int prc = do_pack(pe, cfg_rva, xrt_unpack_rva, log, pack_rva, perr);
+        if (prc != 0) {
+            L(std::string("[HATA] PACK: ") + perr);
+            L("[HATA] Paketleme tamamlanamadi — cikti dosyasi YAZILMADI.");
+            return 4;
+        }
+    }
+    if (opt.strip_fixups) strip_fixups(pe, log);
+    if (opt.strip_debug)  strip_debug(pe, log);
+    text = pe.secbyname(".text");   // add_section realloc -> tazele
+    rdata = pe.secbyname(".rdata");
+
+    if (rt_any || opt.pack) {
+        // 0.6.0: pack-only derlemede bile cfg YAZILMALI (xrt_unpack cfg
+        // okur; magic yoksa unpack hic calismaz -> .text sikisik kalir).
+        // --- file CRC: FINAL dosya (CheckSum alani + .vmp0 ham araligi atla) ---
         u32 cksum_off = pe.e_lfanew + 24 + 64;   // OptionalHeader.CheckSum
         u32 vraw0 = 0, vraw1 = 0;
         {
@@ -1044,12 +1067,12 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
             fc = xcrc_up(fc, pe.buf[i]);
         }
         fc = ~fc;
-        // --- cfg'yi pe.buf icine yaz ---
+        // --- cfg'yi pe.buf icine yaz (0.6.0: 0x48, pack_rva dahil) ---
         bool okc2; u32 cfg_raw = pe.rva2raw(cfg_rva, &okc2);
-        if (!okc2 || cfg_raw + 0x40 > pe.buf.size()) {
+        if (!okc2 || cfg_raw + 0x48 > pe.buf.size()) {
             L("[HATA] XRT cfg yerlesimi raw yok"); return 1;
         }
-        u8 cfg[0x40]; memset(cfg, 0, sizeof cfg);
+        u8 cfg[0x48]; memset(cfg, 0, sizeof cfg);
         u32 fl = 0;
         if (opt.rt_selfcrc) fl |= 0x01;
         if (opt.rt_textcrc) fl |= 0x02;
@@ -1061,23 +1084,24 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         cwr(0x04, fl);
         cwr(0x08, 0);                           // state: 0 (ilk cagrida kontrol)
         cwr(0x0C, vmp_rva);                     // self_rva (vm blob basi)
-        cwr(0x10, self_len);
-        cwr(0x14, sc);
+        cwr(0x10, xr_self_len);
+        cwr(0x14, xr_sc);
         cwr(0x18, text ? text->va : 0);
         cwr(0x1C, text ? text->vsz : 0);
-        cwr(0x20, tc);
-        cwr(0x24, reloc_rva);
-        cwr(0x28, reloc_sz);
+        cwr(0x20, xr_tc);
+        cwr(0x24, xr_reloc_rva);
+        cwr(0x28, xr_reloc_sz);
         cwr(0x2C, fc);
         cwr(0x30, vraw0);
         cwr(0x34, vraw1);
         cwr(0x38, cksum_off);
         cwr(0x3C, cfg_rva);
-        memcpy(&pe.buf[cfg_raw], cfg, 0x40);
+        cwr(0x40, pack_rva);                    // 0.6.0: XPK1 blok RVA (.vmp1)
+        memcpy(&pe.buf[cfg_raw], cfg, 0x48);
         snprintf(b, sizeof b,
-                 "[XRT] runtime katmani: flags=0x%X | self=0x%08X (%uB) | text=0x%08X (0x%X, reloc-atla %uB) | file=0x%08X (atla: cksum+%u, .vmp0 %u..%u)",
-                 fl, sc, self_len, tc, text ? text->vsz : 0, reloc_sz, fc,
-                 cksum_off, vraw0, vraw1);
+                 "[XRT] runtime katmani: flags=0x%X | self=0x%08X (%uB) | text=0x%08X (0x%X, reloc-atla %uB) | file=0x%08X (atla: cksum+%u, .vmp0 %u..%u) | pack=0x%X",
+                 fl, xr_sc, xr_self_len, xr_tc, text ? text->vsz : 0, xr_reloc_sz, fc,
+                 cksum_off, vraw0, vraw1, pack_rva);
         L(b);
         L(std::string("[XRT] xrt_entry=0x") + hex32(xrt_entry_rva) + " cfg=0x" + hex32(cfg_rva) +
           " | her korumali giris BIR KEZ kontrol eder (state kilidi); hata: " +
@@ -1089,7 +1113,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     /* 0.5.1 SAHTE-BASARI KORUMASI: secili fonksiyonlarin HICBIRI
     uygulanamadiysa cikti dosyasi HIC YAZILMAZ (0.5.0 sessiz "korunmus"
     kopya yaziyordu). rc=3 -> GUI uyari kutusu + CLI net hata. */
-    if (comps.empty()) {
+    if (comps.empty() && !opt.pack && !opt.strip_fixups && !opt.strip_debug) {
         L("[HATA] HICBIR FONKSIYON UYGULANAMADI - cikti dosyasi YAZILMADI.");
         L("[HATA] Nedenler yukarida [RED] satirlarinda.");
         return 3;
@@ -1108,6 +1132,9 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
       + " | runtime=" + (rt_any ? std::string("ACIK(self=") + (opt.rt_selfcrc ? "1" : "0")
           + ",text=" + (opt.rt_textcrc ? "1" : "0") + ",file=" + (opt.rt_filecrc ? "1" : "0") + ")" : "kapali")
       + " | iat=" + (opt.iat_prot ? "ACIK(" + std::to_string(thunk_slots.size()) + " thunk)" : "kapali")
-      + " | sdk=" + (opt.sdk_scan ? "ACIK" : "kapali"));
+      + " | sdk=" + (opt.sdk_scan ? "ACIK" : "kapali")
+      + " | pack=" + (opt.pack ? (std::string("ACIK(LZMA, XPK1=0x") + hex32(pack_rva) + ")") : std::string("kapali"))
+      + " | stripfix=" + (opt.strip_fixups ? "ACIK" : "kapali")
+      + " | stripdbg=" + (opt.strip_debug ? "ACIK" : "kapali"));
     return 0;
 }

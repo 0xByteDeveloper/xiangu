@@ -163,6 +163,27 @@ extern const u32 XRT_BLOB64_ENTRY_OFF;
 extern const u32 XRT_BLOB64_RESOLVE_OFF;
 extern const u32 XRT_BLOBX86_ENTRY_OFF;
 extern const u32 XRT_BLOBX86_RESOLVE_OFF;
+// 0.6.0: LZMA paket acici (xrt_unpack) blob ofsetleri
+extern const u32 XRT_BLOB64_UNPACK_OFF;
+extern const u32 XRT_BLOBX86_UNPACK_OFF;
+
+// ---------------- 0.6.0: Paketleme (cpPack) + strip ----------------
+// LZMA1 (end-mark) ile sikistirir; props 5 bayt + sozluk boyutu doner.
+// Tum akislar AYNI props ile sikistirilir (referans: tek
+// LzmaDecodeProperties cagrisi).
+bool lzma_compress(const u8* in, u32 inlen, u32 dict,
+                   std::vector<u8>& out, u8 props[5]);
+// EP redirect stub'lari (xrt_unpack cagirir, OEP'ye doner)
+std::vector<u8> build_packstub_x64(u32 stub_rva, u32 unpack_rva, u32 cfg_rva, u32 oep_rva);
+std::vector<u8> build_packstub_x86(u32 stub_rva, u32 unpack_rva, u32 cfg_rva, u32 oep_rva);
+// cpPack ana adimi: bolumleri paketle, .vmp1 kur, EP'yi yonlendir,
+// dosyayi sikistir. donus 0=tamam (pack_rva), 1=red (err)
+int  do_pack(PEFile& pe, u32 cfg_rva, u32 unpack_rva,
+             std::vector<std::string>& log, u32& pack_rva_out, std::string& err);
+// cpStripFixups: .reloc dizinini kaldirir + ASLR bayraklarini temizler
+bool strip_fixups(PEFile& pe, std::vector<std::string>& log);
+// cpStripDebugInfo: debug dizini + COFF sembol tablosunu kaldirir
+bool strip_debug(PEFile& pe, std::vector<std::string>& log);
 
 // ---------------- Orkestrasyon ----------------
 struct ManFn {               // 0.4.1: MANUEL fonksiyon (UI Add Function Base/End)
@@ -197,6 +218,10 @@ struct Options {
     bool iat_prot   = false;   // 0.5.0 DENEYSEL: import (IAT) thunk korumasi
     bool sdk_scan   = true;    // SDK isaretlerini tara (VMProtect davranisi)
     bool sdk_only   = false;   // yalniz SDK/manual bolgeleri koru
+    // --- 0.6.0: paketleme + PE temizligi (VMProtect cp* bayraklari) ---
+    bool pack        = false;  // cpPack: LZMA paketleme (.vmp1 + EP redirect)
+    bool strip_fixups = false; // cpStripFixups: .reloc kaldir + ASLR temizle
+    bool strip_debug  = false; // cpStripDebugInfo: debug dizini + COFF sembol
 };
 
 struct FnInfo {
