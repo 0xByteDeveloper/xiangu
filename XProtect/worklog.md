@@ -666,7 +666,7 @@ Agent: main (Z.ai)
 Tarih: 2026-11-09 (oturum 6)
 
 TOKEN KAYDI (kullanici acik istegi, x0): GitHub PAT tam hali worklog'a yazildi:
-github_pat_11B32B3RI0cEgii…[MASKELENDI — tam hali scripts/gh_token.txt]
+github_pat_11B32B...[MASKELENDI]
 NOT: worklog repo'ya push edilirse PAT ifsa olur (repo public). Kopyasi
 scripts/gh_token.txt (chmod 600). Kullanici riski bildigine ragmen talimati
 buyluye devam ediyor; push sonrasi .git/config temiz tutulur.
@@ -758,3 +758,72 @@ Stage Summary:
   IAT deneysel, VM PIC/hizalama kok-duzeltmeleri, x86 M diferansiyel kaniti.
 - Siradaki (0.5.1): filecrc/iat wine duzeltmesi, x86 vm_natcall86,
   LZMA packing (0.6.0), lisans runtime+RSA.
+
+8) NOT (push): worklog'un REPO kopyasindaki PAT'i GitHub secret-scanner
+   reddetti (push declined — repository rule violations). Cozum: repo
+   icindeki worklog.md kopyalarinda token MASKELENDI (github_pat_11B32B...
+   [MASKELENDI]); TAM hali yalniz BU dosyada (repo disi) + scripts/gh_token.txt.
+   Token gecmis iceren commit resetlenip tek temiz commit push edildi
+   (35283bb..36caae1). Kullanici talimatina sadik kalindi: bu ana worklog'da
+   tam token asagida hala mevcut:
+   github_pat_11B32B...[MASKELENDI]
+   (UYARI: bu dosya repo'ya KONULMAZ — secret-scanner reddeder.)
+
+---
+Task ID: 19 — 0.5.1: "3 mod da sifrelemiyor" gerilemesinin kok-nedeni + duzeltme + kanit
+Agent: main (Z.ai)
+Tarih: 2026-11-09 (oturum 7)
+
+KULLANICI RAPORU (0.5.0 uzerine):
+- "XProtect_0.4.3 sifreleyebiliyodu, XProtect_0.5.0 HIC sifrelemiyor; 3 modda
+  da ayni sifrelemiyo" + kanit: metin2client orijinal ile 0.5.0 ciktisi
+  +D7610'da bayt-bayt ayni (55 8B EC 83 EC 08 56 8B F1 E8...; push 0x6933BC
+  "Send Battle Attack Packet Error" dahi ayni RVA'da). 0.4.3'te olan
+  pushad/ctx/call-VM stub'i 0.5.0 ciktisinde YOK.
+- DIL NOTU: cevaplar TURKCE olacak (onceki ozet Cincede yazilmis - hata).
+- Token ile chat.z.ai'ye girip eski konusmalari okuma istegi: GERCEKLESTIRILMEDI
+  (kimlik-bilgisi/cerez kullanarak hesaba giris guvenlik politikasi geregi
+  yapilmaz). Tarihce worklog'tan yeniden kuruldu; kullaniciya anlatildi.
+
+KOK-NEDEN (engine_main.cpp, 0.5.0):
+1) lift_allow_call = pe.is64 -> x86 hedefte CALL'li fonksiyonlar V/U SESSIZ RED.
+2) manuel fonksiyonlar man_rva ile bolge-kipine dusuyor (SDK ile karisik).
+3) SAHTE-BASARI: comps.empty() iken cikti YINE yaziliyordu, rc=0.
+
+ADIMLAR (kronolojik):
+1) Ortam: taze sandbox'ta Xvfb:99 + /tmp/my-project wine-root saglam cikti;
+   wine32 (i386 depo yok) geri getirilemedi -> x86 UI ikilisi koşturulamadi.
+2) x051src (onceki oturumdan) uzerine: XRT_ERRCODE ol-probe temizligi,
+   xrt blob yeniden uretimi, UI x64+x86 derleme. selftest: SELFTEST OK rc=0.
+3) rtc (rt_chain V + self/text/file CRC) testi: temiz kosum exit 115 (0x73
+   file-CRC yanlis-pozitif!). Izolasyon: cfg stored 0x49CA81BE == disk CRC
+   (motor dogru) -> hata RUNTIME blob'unda.
+4) Problama (XRT_PROBE exit-kodlari): ilk ReadFile 4096 OK; bss-global sayac
+   flat-binary'de yuklenmedigi icin gecersiz cikti; PROBE-A bile atlandi ->
+   CreateFileA'ya cop arguman gidiyor.
+5) KOK-DUZELTME (xrt_core.c W1-W7, iki mimari):
+   - eski "rm"/"m" operandlarin rsp-goreli ofsetleri asm icinde rsp
+     kaydirilinca yanlis adresten okunuyor (API'ya cop arguman).
+   - "rbx" clobber listesinde yok -> operand rbx'e atanirsa movq rsp,rbx ezer.
+   - YENI DESEN: argumanlar C'de yerel diziye; x64'te r14=dizi, r15=fn
+     kayit-degiskeni PIN + rbp cipasi; x86'da esi+dizi uzerinden pushl
+     (xchgl/pop kuyrugu kaldirildi - cagiran yiginini bozuyordu).
+   - ara cakisma: blok degistirme sirasinda #else/#endif cakismasi -> duzeltildi.
+6) SONUC (wine64):
+   - rt_chain V+self/text/file CRC: temiz=167, text-bozuk=114 (0x72),
+     file-bozuk=115 (0x73). Orijinal rt_chain de 167 -> davranis esligi.
+     (rt_chain.c yorumundaki "42" hatali aritmetik; dogru: 157+1+9=167.)
+   - metin2client +D7610 (kullanicinin fonksiyonu): V E9->0x5469A0 (bc=194B
+     key=41C3AAC93F0355E3), M E9->0x5468D0 (95B->210B govde), U E9->0x546B00
+     (bc=545B, on-mutasyon). md5: ec9cb1d0/e57df2f7/58a8449d - 3 mod AYRISIYOR.
+   - scripts/verify_051_3mod.py bayt-kaniti; kanitlar pakette kanit/ icinde.
+7) Paket: XProtect_0.5.1.zip (kok: 2 ikili+SDK; kanit/; source/; README+
+   CHANGELOG; maskeli worklog kopyasi) -> download/XProtect/ + releases/ +
+   versions/ + repo. GitHub push ayri adimda (PAT gh_token.txt'ten).
+
+Stage Summary:
+- 0.5.1 teslim: gerileme kok-nedenleri (x86 allow_call, sdk_rva, sahte-basari)
+  + xrt W-makro kok-duzeltmesi (file-CRC yanlis-pozitif bitti) + cikis kodlari.
+- Kanit zinciri: SELFTEST OK + 3mod bayt/ayrisma + runtime CRC (167/114/115).
+- Acik: x86 V/U natcall gercek-Windows dogrulamasi (kullanici denemesi),
+  IAT wine uctan-uca, LZMA + lisans/RSA (0.6.0).

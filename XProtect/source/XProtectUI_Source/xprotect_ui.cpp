@@ -33,7 +33,7 @@
 
 // ---------------- surum ----------------
 #define XPROTECT_EDITION  L"XProtect Ultimate"
-#define XPROTECT_VERSION  L"0.5.0"
+#define XPROTECT_VERSION  L"0.5.1"
 #define XPROTECT_BUILD    L"2026-11-09"
 
 // ---------------- dil tablosu (en.lng birebir + TR) ----------------
@@ -64,7 +64,7 @@ enum LS {
     // 0.4.0 ekleri (LS_BLOCKED zaten yukarida — yeni eklenmez)
     LS_MANUAL, LS_BASE, LS_END, LS_SCAN, LS_SEARCHRES,
     LS_EXAMPLES, LS_QUICKSTART, LS_RECENTFILES, LS_COMPILE_DONE_Q, LS_SCANNING,
-    LS_COUNT
+    LS_WARNING, LS_COUNT
 };
 
 static const wchar_t* g_lang_en[LS_COUNT] = {
@@ -97,6 +97,7 @@ static const wchar_t* g_lang_en[LS_COUNT] = {
     L"Manual Address", L"Base", L"End", L"Scan", L"Search Result",
     L"Examples...", L"Quick Start", L"Recent Files",
     L"Compilation completed. Execute the protected file?", L"Scanning (pdbscope)..."
+    L"Warning",           /* LS_WARNING */
 };
 static const wchar_t* g_lang_tr[LS_COUNT] = {
     L"Dosya", L"Düzen", L"Proje", L"Araçlar", L"Yardım",
@@ -128,6 +129,7 @@ static const wchar_t* g_lang_tr[LS_COUNT] = {
     L"Manuel Adres", L"Başlangıç (Base)", L"Bitiş (End)", L"Tara", L"Arama Sonucu",
     L"Örnekler...", L"Hızlı Başlangıç", L"Son Açılanlar",
     L"Derleme tamamlandı. Korumalı dosya çalıştırılsın mı?", L"Taranıyor (pdbscope)..."
+    L"Uyarı",             /* LS_WARNING */
 };
 static bool g_tr = false;
 static const wchar_t* L(int id) { return (g_tr ? g_lang_tr : g_lang_en)[id]; }
@@ -584,6 +586,7 @@ static int g_split_x = 400;        // sol panel genisligi
 static int g_log_h = 150;
 static bool g_selftest = false;
 static bool g_compiling = false;
+static int  g_last_reds = 0;    // 0.5.1: son derlemede RED sayisi (uyari kutusu)
 static HANDLE g_cancel_event = NULL;
 static std::vector<std::wstring> g_recent;
 static bool g_autosave = false;
@@ -2506,7 +2509,11 @@ static DWORD WINAPI compile_thread(LPVOID p) {
     CompileJob* j = (CompileJob*)p;
     std::vector<std::string> log;
     int rc = protect(j->in, j->out, j->opt, log);
-    for (size_t i = 0; i < log.size(); i++) post_log_line(log[i]);
+    g_last_reds = 0;                      // 0.5.1: RED sayaci
+    for (size_t i = 0; i < log.size(); i++) {
+        post_log_line(log[i]);
+        if (log[i].rfind("[RED] ", 0) == 0) g_last_reds++;
+    }
     PostMessageW(g_main, WM_APP_DONE, (WPARAM)rc, 0);
     delete j;
     return 0;
@@ -3856,6 +3863,21 @@ static LRESULT CALLBACK main_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         g_compiling = false;
         wchar_t b[32]; _snwprintf(b, 32, L"rc=%d", (int)wp);
         add_log(std::wstring(L(LS_DONE)) + L"  " + b);
+        /* 0.5.1: sessiz basarisizlik YOK - motor hicbir fonksiyon
+        uygulayamadiysa rc=3 doner ve CIKTI YAZILMAZ; kismi redde
+        uyari kutusu. */
+        if ((int)wp == 3) {
+            MessageBoxW(h, L"Hicbir fonksiyon uygulanamadi!\nCikti dosyasi yazilmadi.\n\n"
+                           L"Nedenler icin log penceresindeki [RED] satirlarina bakin.\n"
+                           L"(Orn. x86 hedefte cagri iceren fonksiyonlar V/U red edilmis olabilir.)",
+                         L(LS_ERROR), MB_OK | MB_ICONERROR);
+        } else if ((int)wp == 0 && g_last_reds > 0) {
+            wchar_t wb[160]; _snwprintf(wb, 160,
+                L"%d fonksiyon uygulanamadi (log: [RED] satirlari).\n"
+                L"Cikti dosyasi yazildi ama eksik koruma icerir.", g_last_reds);
+            MessageBoxW(h, wb, L(LS_WARNING), MB_OK | MB_ICONWARNING);
+        }
+        g_last_reds = 0;
         if (g_autosave && !g_proj.path.empty()) save_project(false);
         build_menu();
         return 0;

@@ -220,25 +220,41 @@ static u64 do_shift(int shi, u64 a, int n, int sz, u64* fl) {
 }
 
 #if defined(VM_IS_X86)
-// 0.5.0: x86 dogal cagri — cdecl VE stdcall evrensel:
-// VM'nin izledigi rsp'de (gercek bellekte) duran arglarla cagri yapilir;
-// SONRACIKI esp geri okunur -> stdcall callee arglari temizlediyse VM rsp
-// senkronize edilir (cdecl'de degismez, derleyicinin add esp'i kaldirir).
-static void vm_natcall86(u32 t, u64 vm_rsp, u64* out_ret, u64* out_rsp) {
-    u32 ret = 0, esp_after = 0;
-    register u32 vt   __asm__("esi") = t;        /* callee-saved: cagri bozmaz */
-    register u32 vrsp __asm__("edi") = (u32)vm_rsp;
+// 0.5.1 — x86 dogal cagri, iki kok-duzeltme ile:
+// (1) 0.5.0 "yigin bozumu": esp_after "=m" BELLEK operandiydi. -O2'de GCC/zig
+//     esp-tabanli cerceve kullanir -> "movl %%esp, -N(%%esp)" yazimi o anda
+//     esp = VM yigini OLDUGU ICIN VM yiginina yazar, gercek degisken 0 kalir
+//     -> regs[RSP] = 0 + VM_DELTA = 0x420 -> ilk push 0xFFFFFFFC'ye yazar.
+//     artik esp_after kayit cikisi (esi uzerinden).
+// (2) ARGUMAN-KAYITCI AKTARIMI (0.5.0'da hic yoktu): uyumlu callee gelen
+//     ecx/edx'i OKUR (thiscall ecx=this, fastcall ecx,edx). VM kayitcilari
+//     bellekte oldugu icin gercek CPU ecx/edx coputti -> callee cop okuyor
+//     -> wild ret. Cagridan ONCE VM eax/ecx/edx gercek CPU'ya yuklenir;
+//     cagridan SONRA callee'nin eax/ecx/edx'i VM'e geri yazilir (gercek CPU
+//     aynasi). ebx/esi/edi/ebp bilincli YUKLENMEZ: callee-saved'dir, uyumlu
+//     callee gelen degerini OKUYAMAZ (Win32 ABI); natcall onlari korur.
+static void vm_natcall86(u64* regs, u32 t, u32 vm_rsp, u64* out_ret, u64* out_rsp) {
+    u32 ret = 0, c_ecx = 0, c_edx = 0, s_out = t;   /* s_out girisi = hedef */
+    register u32 vrsp __asm__("edi") = (u32)vm_rsp; /* VM yigini (in-out)   */
     __asm__ volatile(
-        "movl %%esp, %%ebx     \n\t"   /* gercek esp'i ebx'te sakla */
-        "movl %[vr], %%esp     \n\t"   /* esp = VM yigini (arglar burada) */
-        "call  *%[vt]          \n\t"
-        "movl %%esp, %[ea]     \n\t"   /* callee sonrasi esp (stdcall farki) */
-        "movl %%ebx, %%esp     \n\t"
-        : "=a"(ret), [ea] "=m"(esp_after)
-        : [vt] "r"(vt), [vr] "r"(vrsp)
-        : "memory", "cc", "ebx", "ecx", "edx");
+        "movl 0x00(%[rg]), %%eax  \n\t"   /* eax = VM eax (regs[0].lo) */
+        "movl 0x08(%[rg]), %%ecx  \n\t"   /* ecx = VM ecx (regs[1].lo) */
+        "movl 0x10(%[rg]), %%edx  \n\t"   /* edx = VM edx (regs[2].lo) */
+        "pushl %%ebx              \n\t"   /* ebx kaydet (C-caller callee-saved) */
+        "movl %%esp, %%ebx        \n\t"   /* ebx = gercek esp */
+        "movl %[vr], %%esp        \n\t"   /* esp = VM yigini (arglar burada) */
+        "call  *%[sp]             \n\t"   /* esi = hedef (s_out girdisi) */
+        "movl %%esp, %[sp]        \n\t"   /* callee sonrasi esp (stdcall) */
+        "movl %%ebx, %%esp        \n\t"   /* gercek esp geri */
+        "popl %%ebx               \n\t"   /* ebx geri (callee zaten korudu) */
+        : "=&a"(ret), "=&c"(c_ecx), "=&d"(c_edx), [sp] "+S"(s_out), [vr] "+D"(vrsp)
+        : [rg] "r"(regs)
+        : "memory", "cc");
+    regs[0] = (u64)ret;                /* callee eax = donus degeri        */
+    regs[1] = (u64)c_ecx;              /* callee ecx (gercek CPU aynasi)   */
+    regs[2] = (u64)c_edx;              /* callee edx                       */
     *out_ret = (u64)ret;
-    *out_rsp = (u64)esp_after;
+    *out_rsp = (u64)s_out;             /* callee sonrasi esp               */
 }
 #endif
 
@@ -540,13 +556,13 @@ static void vm_run(VMContext* c) {
             c->regs[0] = vm_natcall(c->base + (u64)v32, c->regs);
 #else
             {
-                /* 0.5.0: x86 dogal cagri (0.4.x'te done=1 ile erken cikis
-                YANLIS sonuc veriyordu). VM yiginindaki arglarla cagri;
-                stdcall temizlemesi esp senkronu ile yansitilir. */
+                /* 0.5.1: x86 dogal cagri — arg kayitcilari (eax/ecx/edx)
+                gercek CPU'ya tasınır, callee sonrasi esp + eax/ecx/edx VM'e
+                yansitilir (0.5.0'da ikisi de yoktu -> yigin bozumu + cop
+                thiscall). stdcall temizlemesi esp senkronu ile yansitilir. */
                 u64 nret = 0, nesp = 0;
-                vm_natcall86((u32)(c->base + (u64)v32),
-                             c->regs[REG_RSP] - (u64)VM_DELTA, &nret, &nesp);
-                c->regs[0] = nret;
+                vm_natcall86(c->regs, (u32)(c->base + (u64)v32),
+                             (u32)(c->regs[REG_RSP] - (u64)VM_DELTA), &nret, &nesp);
                 c->regs[REG_RSP] = nesp + (u64)VM_DELTA;
             }
 #endif

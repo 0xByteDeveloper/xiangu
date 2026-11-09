@@ -129,58 +129,98 @@ static u32 peb_addr(void) { u32 v; __asm__ volatile ("movl %%fs:0x30, %0" : "=r"
 #endif
 
 // ---- Win32 API cagri sarmalayicilari (tam arite) ----
+// 0.5.1 KOK-DUZELTME: eski "rm"/"m" operand desenleri IKI GERCEK HATA
+// tasidi: (1) GCC bellek operandi secince ofsetler asm-GIRISI rsp'ine
+// gore derlenir; sablon rsp'yi kaydirinca (push/and/sub) operand YANLIS
+// adresten okunur -> API'ya cop arguman gider (file-CRC'nin CreateFileA
+// patlamasi tam buydu). (2) "rbx" clobber-liste disi oldugundan GCC
+// operandi rbx'e atayabilirdi; "movq %%rsp,%%rbx" onu yok eder.
+// YENI DESEN: argumanlar Once C tarafinda yerel diziye kopyalanir; asm
+// icinde TEK kayit isaretcisi (r14/esi) uzerinden SABIT ofsetlerle
+// okunur. GCC'nin rsp-goreli operandi asla asm icinde kullanilmaz.
 #if defined(XRT_IS_X86)
-// x86 stdcall: arglar yigina saga-sola push edilir, CALLEE temizler.
-// fn "r" input; arglar "m" operand (yerel degiskenler yiginda) —
-// pushl mem gecerli; ecx/edx clobber listesinde (API caller-saved).
-#define W1(NM) static u32 NM(u32 fn, u32 a0) { u32 ret; \
-    __asm__ volatile ("pushl %[a0]\n\tcall *%[fn]\n\t" \
-        : "=a"(ret) : [fn] "r"(fn), [a0] "m"(a0) : "ecx", "edx", "memory", "cc"); return ret; }
-#define W3(NM) static u32 NM(u32 fn, u32 a0, u32 a1, u32 a2) { u32 ret; \
-    __asm__ volatile ("pushl %[a2]\n\tpushl %[a1]\n\tpushl %[a0]\n\tcall *%[fn]\n\t" \
-        : "=a"(ret) : [fn] "r"(fn), [a0] "m"(a0), [a1] "m"(a1), [a2] "m"(a2) \
-        : "ecx", "edx", "memory", "cc"); return ret; }
-#define W4(NM) static u32 NM(u32 fn, u32 a0, u32 a1, u32 a2, u32 a3) { u32 ret; \
-    __asm__ volatile ("pushl %[a3]\n\tpushl %[a2]\n\tpushl %[a1]\n\tpushl %[a0]\n\tcall *%[fn]\n\t" \
-        : "=a"(ret) : [fn] "r"(fn), [a0] "m"(a0), [a1] "m"(a1), [a2] "m"(a2), [a3] "m"(a3) \
-        : "ecx", "edx", "memory", "cc"); return ret; }
-#define W5(NM) static u32 NM(u32 fn, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4) { u32 ret; \
-    __asm__ volatile ("pushl %[a4]\n\tpushl %[a3]\n\tpushl %[a2]\n\tpushl %[a1]\n\tpushl %[a0]\n\tcall *%[fn]\n\t" \
-        : "=a"(ret) : [fn] "r"(fn), [a0] "m"(a0), [a1] "m"(a1), [a2] "m"(a2), [a3] "m"(a3), [a4] "m"(a4) \
-        : "ecx", "edx", "memory", "cc"); return ret; }
-#define W7(NM) static u32 NM(u32 fn, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6) { u32 ret; \
-    __asm__ volatile ("pushl %[a6]\n\tpushl %[a5]\n\tpushl %[a4]\n\tpushl %[a3]\n\tpushl %[a2]\n\tpushl %[a1]\n\tpushl %[a0]\n\tcall *%[fn]\n\t" \
-        : "=a"(ret) : [fn] "r"(fn), [a0] "m"(a0), [a1] "m"(a1), [a2] "m"(a2), [a3] "m"(a3), [a4] "m"(a4), [a5] "m"(a5), [a6] "m"(a6) \
-        : "ecx", "edx", "memory", "cc"); return ret; }
+// x86 stdcall: arglar yigina saga-sola push; CALLEE temizler (esp fix yok).
+#define W1(NM) static u32 NM(u32 fn, u32 a0) { u32 ret; u32 ar_[1]; \
+    ar_[0] = a0; \
+    __asm__ volatile ("movl %[ar], %%esi\n\tpushl 0(%%esi)\n\tcall *%[fn]" \
+        : "=a"(ret) : [fn] "r"(fn), [ar] "r"(ar_) \
+        : "ecx", "edx", "esi", "memory", "cc"); return ret; }
+#define W3(NM) static u32 NM(u32 fn, u32 a0, u32 a1, u32 a2) { u32 ret; u32 ar_[3]; \
+    ar_[0] = a0; ar_[1] = a1; ar_[2] = a2; \
+    __asm__ volatile ("movl %[ar], %%esi\n\tpushl 8(%%esi)\n\tpushl 4(%%esi)\n\tpushl 0(%%esi)\n\tcall *%[fn]" \
+        : "=a"(ret) : [fn] "r"(fn), [ar] "r"(ar_) \
+        : "ecx", "edx", "esi", "memory", "cc"); return ret; }
+#define W4(NM) static u32 NM(u32 fn, u32 a0, u32 a1, u32 a2, u32 a3) { u32 ret; u32 ar_[4]; \
+    ar_[0] = a0; ar_[1] = a1; ar_[2] = a2; ar_[3] = a3; \
+    __asm__ volatile ("movl %[ar], %%esi\n\tpushl 12(%%esi)\n\tpushl 8(%%esi)\n\tpushl 4(%%esi)\n\tpushl 0(%%esi)\n\tcall *%[fn]" \
+        : "=a"(ret) : [fn] "r"(fn), [ar] "r"(ar_) \
+        : "ecx", "edx", "esi", "memory", "cc"); return ret; }
+#define W5(NM) static u32 NM(u32 fn, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4) { u32 ret; u32 ar_[5]; \
+    ar_[0] = a0; ar_[1] = a1; ar_[2] = a2; ar_[3] = a3; ar_[4] = a4; \
+    __asm__ volatile ("movl %[ar], %%esi\n\tpushl 16(%%esi)\n\tpushl 12(%%esi)\n\tpushl 8(%%esi)\n\tpushl 4(%%esi)\n\tpushl 0(%%esi)\n\tcall *%[fn]" \
+        : "=a"(ret) : [fn] "r"(fn), [ar] "r"(ar_) \
+        : "ecx", "edx", "esi", "memory", "cc"); return ret; }
+#define W7(NM) static u32 NM(u32 fn, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6) { u32 ret; u32 ar_[7]; \
+    ar_[0] = a0; ar_[1] = a1; ar_[2] = a2; ar_[3] = a3; ar_[4] = a4; ar_[5] = a5; ar_[6] = a6; \
+    __asm__ volatile ("movl %[ar], %%esi\n\tpushl 24(%%esi)\n\tpushl 20(%%esi)\n\tpushl 16(%%esi)\n\tpushl 12(%%esi)\n\tpushl 8(%%esi)\n\tpushl 4(%%esi)\n\tpushl 0(%%esi)\n\tcall *%[fn]" \
+        : "=a"(ret) : [fn] "r"(fn), [ar] "r"(ar_) \
+        : "ecx", "edx", "esi", "memory", "cc"); return ret; }
 W1(api1)
 W3(api3)
 W4(api4)
 W5(api5)
 W7(api7)
 #else
-// x64 Win64 ABI: rcx,rdx,r8,r9 + 32 bayt golge alani (+5.+ arg yigin).
-// asm girisinde rsp 16-hizali varsayilir (gcc SysV cagri oncesi saglar);
-// sub 0x20/0x30/0x40 hizalamayi korur. Yigin-arg operandlari "r"
-// (mem->mem mov x64'te gecersiz).
-#define W1(NM) static u64 NM(u64 fn, u64 a0) { u64 ret; \
-    __asm__ volatile ("subq $0x28, %%rsp\n\tmovq %[a0], %%rcx\n\tcall *%[fn]\n\taddq $0x28, %%rsp\n\t" \
-        : "=a"(ret) : [fn] "r"(fn), [a0] "rm"(a0) \
+// x64 Win64: rcx,rdx,r8,r9 + yigin (5.+ arg: 0x20'den itibaren) + golge alani.
+// rbp cerceve cipasi; r14=argiman-dizi, r15=hedef fn (kayit-degiskeni PIN:
+// GCC baska bir kayda atayamaz; Win64 callee r12-r15/rbx/rbp korur).
+#define W1(NM) static u64 NM(u64 fn, u64 a0) { u64 ret; u64 ar_[1]; \
+    register u64 rfn __asm__("r15") = fn; \
+    register u64 rar __asm__("r14") = (u64)(unsigned long)(void*)ar_; \
+    ar_[0] = a0; \
+    __asm__ volatile ("pushq %%rbp\n\tmovq %%rsp, %%rbp\n\tandq $-16, %%rsp\n\tsubq $0x20, %%rsp\n\t" \
+        "movq 0(%%r14), %%rcx\n\tcall *%%r15\n\t" \
+        "movq %%rbp, %%rsp\n\tpopq %%rbp" \
+        : "=a"(ret) : "r"(rfn), "r"(rar) \
         : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc"); return ret; }
-#define W3(NM) static u64 NM(u64 fn, u64 a0, u64 a1, u64 a2) { u64 ret; \
-    __asm__ volatile ("subq $0x28, %%rsp\n\tmovq %[a0], %%rcx\n\tmovq %[a1], %%rdx\n\tmovq %[a2], %%r8\n\tcall *%[fn]\n\taddq $0x28, %%rsp\n\t" \
-        : "=a"(ret) : [fn] "r"(fn), [a0] "rm"(a0), [a1] "rm"(a1), [a2] "rm"(a2) \
+#define W3(NM) static u64 NM(u64 fn, u64 a0, u64 a1, u64 a2) { u64 ret; u64 ar_[3]; \
+    register u64 rfn __asm__("r15") = fn; \
+    register u64 rar __asm__("r14") = (u64)(unsigned long)(void*)ar_; \
+    ar_[0] = a0; ar_[1] = a1; ar_[2] = a2; \
+    __asm__ volatile ("pushq %%rbp\n\tmovq %%rsp, %%rbp\n\tandq $-16, %%rsp\n\tsubq $0x20, %%rsp\n\t" \
+        "movq 0(%%r14), %%rcx\n\tmovq 8(%%r14), %%rdx\n\tmovq 16(%%r14), %%r8\n\tcall *%%r15\n\t" \
+        "movq %%rbp, %%rsp\n\tpopq %%rbp" \
+        : "=a"(ret) : "r"(rfn), "r"(rar) \
         : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc"); return ret; }
-#define W4(NM) static u64 NM(u64 fn, u64 a0, u64 a1, u64 a2, u64 a3) { u64 ret; \
-    __asm__ volatile ("subq $0x28, %%rsp\n\tmovq %[a0], %%rcx\n\tmovq %[a1], %%rdx\n\tmovq %[a2], %%r8\n\tmovq %[a3], %%r9\n\tcall *%[fn]\n\taddq $0x28, %%rsp\n\t" \
-        : "=a"(ret) : [fn] "r"(fn), [a0] "rm"(a0), [a1] "rm"(a1), [a2] "rm"(a2), [a3] "rm"(a3) \
+#define W4(NM) static u64 NM(u64 fn, u64 a0, u64 a1, u64 a2, u64 a3) { u64 ret; u64 ar_[4]; \
+    register u64 rfn __asm__("r15") = fn; \
+    register u64 rar __asm__("r14") = (u64)(unsigned long)(void*)ar_; \
+    ar_[0] = a0; ar_[1] = a1; ar_[2] = a2; ar_[3] = a3; \
+    __asm__ volatile ("pushq %%rbp\n\tmovq %%rsp, %%rbp\n\tandq $-16, %%rsp\n\tsubq $0x20, %%rsp\n\t" \
+        "movq 0(%%r14), %%rcx\n\tmovq 8(%%r14), %%rdx\n\tmovq 16(%%r14), %%r8\n\tmovq 24(%%r14), %%r9\n\tcall *%%r15\n\t" \
+        "movq %%rbp, %%rsp\n\tpopq %%rbp" \
+        : "=a"(ret) : "r"(rfn), "r"(rar) \
         : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc"); return ret; }
-#define W5(NM) static u64 NM(u64 fn, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4) { u64 ret; \
-    __asm__ volatile ("subq $0x28, %%rsp\n\tmovq %[a0], %%rcx\n\tmovq %[a1], %%rdx\n\tmovq %[a2], %%r8\n\tmovq %[a3], %%r9\n\tmovq %[a4], 32(%%rsp)\n\tcall *%[fn]\n\taddq $0x28, %%rsp\n\t" \
-        : "=a"(ret) : [fn] "r"(fn), [a0] "rm"(a0), [a1] "rm"(a1), [a2] "rm"(a2), [a3] "rm"(a3), [a4] "r"(a4) \
+#define W5(NM) static u64 NM(u64 fn, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4) { u64 ret; u64 ar_[5]; \
+    register u64 rfn __asm__("r15") = fn; \
+    register u64 rar __asm__("r14") = (u64)(unsigned long)(void*)ar_; \
+    ar_[0] = a0; ar_[1] = a1; ar_[2] = a2; ar_[3] = a3; ar_[4] = a4; \
+    __asm__ volatile ("pushq %%rbp\n\tmovq %%rsp, %%rbp\n\tandq $-16, %%rsp\n\tsubq $0x30, %%rsp\n\t" \
+        "movq 0(%%r14), %%rcx\n\tmovq 8(%%r14), %%rdx\n\tmovq 16(%%r14), %%r8\n\tmovq 24(%%r14), %%r9\n\t" \
+        "movq 32(%%r14), %%rax\n\tmovq %%rax, 32(%%rsp)\n\tcall *%%r15\n\t" \
+        "movq %%rbp, %%rsp\n\tpopq %%rbp" \
+        : "=a"(ret) : "r"(rfn), "r"(rar) \
         : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc"); return ret; }
-#define W7(NM) static u64 NM(u64 fn, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) { u64 ret; \
-    __asm__ volatile ("subq $0x38, %%rsp\n\tmovq %[a0], %%rcx\n\tmovq %[a1], %%rdx\n\tmovq %[a2], %%r8\n\tmovq %[a3], %%r9\n\tmovq %[a4], 32(%%rsp)\n\tmovq %[a5], 40(%%rsp)\n\tmovq %[a6], 48(%%rsp)\n\tcall *%[fn]\n\taddq $0x38, %%rsp\n\t" \
-        : "=a"(ret) : [fn] "r"(fn), [a0] "rm"(a0), [a1] "rm"(a1), [a2] "rm"(a2), [a3] "rm"(a3), [a4] "r"(a4), [a5] "r"(a5), [a6] "r"(a6) \
+#define W7(NM) static u64 NM(u64 fn, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) { u64 ret; u64 ar_[7]; \
+    register u64 rfn __asm__("r15") = fn; \
+    register u64 rar __asm__("r14") = (u64)(unsigned long)(void*)ar_; \
+    ar_[0] = a0; ar_[1] = a1; ar_[2] = a2; ar_[3] = a3; ar_[4] = a4; ar_[5] = a5; ar_[6] = a6; \
+    __asm__ volatile ("pushq %%rbp\n\tmovq %%rsp, %%rbp\n\tandq $-16, %%rsp\n\tsubq $0x40, %%rsp\n\t" \
+        "movq 0(%%r14), %%rcx\n\tmovq 8(%%r14), %%rdx\n\tmovq 16(%%r14), %%r8\n\tmovq 24(%%r14), %%r9\n\t" \
+        "movq 32(%%r14), %%rax\n\tmovq %%rax, 32(%%rsp)\n\tmovq 40(%%r14), %%rax\n\tmovq %%rax, 40(%%rsp)\n\t" \
+        "movq 48(%%r14), %%rax\n\tmovq %%rax, 48(%%rsp)\n\tcall *%%r15\n\t" \
+        "movq %%rbp, %%rsp\n\tpopq %%rbp" \
+        : "=a"(ret) : "r"(rfn), "r"(rar) \
         : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc"); return ret; }
 W1(api1)
 W3(api3)
@@ -341,7 +381,9 @@ static void rt_fatal(u64 k32, u32 code, u32 flags) {
     }
     if (flags & XFLAG_EXIT) {
         u64 ep = find_export(k32, XH_EXITPROCESS);
-        if (ep) { api1(ep, 1); }
+        /* 0.5.1: cikis kodu 0x70+hatakodu (1=self, 2=text, 3=file, 4=k32)
+        - teshiste hangi kontrolun patladigi net ayirt edilir */
+        if (ep) { api1(ep, (u64)(0x70u + code)); }
         for (;;) {}
     }
 }
@@ -449,6 +491,14 @@ u32 xrt_entry(void* cfgp) {
                             if (got < 4096) break;
                         }
                         api1(ch, h);
+#ifdef XRT_PROBE
+                        /* PROBE-A: cfg alanlari dogru mu? (ckoff=0xD0, vr0=0x35C00, vr1=0x39600) */
+                        { u64 ep2 = find_export(k32, XH_EXITPROCESS);
+                          if (ep2) { api1(ep2, (u64)((ckoff == 0xD0 && vr0 == 0x35C00 && vr1 == 0x39600) ? 0x55 : 0x66)); } for(;;){} }
+                        /* PROBE-B: toplam okunan bayt (foff>>8)&0xFF — beklenen 0x96 (918) */
+                        { u64 ep2 = find_export(k32, XH_EXITPROCESS);
+                          if (ep2) { api1(ep2, (u64)((foff >> 8) & 0xFF)); } for(;;){} }
+#endif
                         if (~c != ld32(cfg + XCFG_OFF_FILECRC)) err = 3;
                     } else err = 3;
                 } else err = 3;
@@ -456,22 +506,12 @@ u32 xrt_entry(void* cfgp) {
         }
     }
 
-#ifdef XRT_ERRCODE
     if (err) {
-        u64 ep = find_export(k32, XH_EXITPROCESS);
-        if (ep) api1(ep, err);   /* GECICI hata ayiklama: hata kodunu cikista ver */
-        for (;;) {}
-    }
-    return 0;
-}
-#else
-    if (err) {
-        rt_fatal(k32, err, flags);
+        rt_fatal(k32, err, flags);   /* 0.5.1: cikis 0x70+hatakodu */
         return err;
     }
     return 0;
 }
-#endif
 
 // ============================================================
 // xrt_resolve(dllhash, namehash, fallback_abs) — gecikmeli import

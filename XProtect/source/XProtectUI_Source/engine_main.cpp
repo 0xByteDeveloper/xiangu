@@ -147,6 +147,7 @@ static void scan_sdk(const PEFile& pe, std::vector<ManFn>& out, std::vector<std:
                         if (endr > beg + 7 && endr - beg <= 0x40000) {
                             ManFn m;
                             m.rva = beg; m.size = endr - beg; m.ty = (int)ty - 1;
+                            m.is_region = true;   /* 0.5.1: SDK isareti = bolge */
                             m.name = (ty == 1 ? "SDK_V" : (ty == 2 ? "SDK_M" : "SDK_U"));
                             m.name += "_0x" + hex32(beg);
                             out.push_back(m);
@@ -440,6 +441,8 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     // --- secim ---
     std::set<u32> man_rva; std::map<u32,int> man_ty;   // 0.4.1: manuel fonksiyonlar
     for (auto& m : manual_all) { man_rva.insert(m.rva); man_ty[m.rva] = m.ty; }
+    std::set<u32> sdk_rva;
+    for (auto& m : manual_all) if (m.is_region) sdk_rva.insert(m.rva);
     for (auto& f : fns) {
         if (man_rva.count(f.rva)) continue;   // manuel: kesin secili (asla ezilmez)
         if (opt.sdk_only) continue;           // 0.5.0: yalniz SDK/manual bolgeleri koru
@@ -592,7 +595,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         bool okraw; u32 raw = pe.rva2raw(f.rva, &okraw);
         if (!okraw || raw + f.size > pe.buf.size()) { f.note = "ham veri yok"; continue; }
         int ty = ftype_of(f);
-        bool is_region = man_rva.count(f.rva) != 0;   // 0.5.0: SDK/manual bolge
+        bool is_region = sdk_rva.count(f.rva) != 0;   // 0.5.1: yalniz SDK bolgesi
         if (ty == 1) {
             // --- MUTASYON (native): makine kodu kalir, yeniden uretilir ---
             MutFn m = mutate_function(&pe.buf[raw], f.rva, f.size, pe.is64,
@@ -640,7 +643,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         // V/U reddedilir (duru RED, sessiz yanlis SONUC yerine). M modu
         // native calistigi icin cagrilar sorunsuz. x64'te natcall CALISIYOR
         // (wine test_rt64 kaniti). 0.5.1'de x86 natcall duzeltmesi planli.
-        bool lift_allow_call = pe.is64;
+        bool lift_allow_call = true; /* EXPERIMENT */
         VFn v = lift_function(lcode, f.rva, lsize, pe.is64,
                               pe.imagebase, pe.sizeofimage,
                               lift_allow_call,
@@ -653,8 +656,15 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         if (ty == 2) c.mut = mkeep;
         comps.push_back(c);
     }
-    snprintf(b, sizeof b, "[LIFT] %zu/%zu fonksiyon | V=%d M=%d U=%d (U-mutdus=%d)",
-             comps.size(), fns.size(), nV, nM, nU, nUf);
+    {
+        u32 n_sel = 0;
+        for (auto& f2 : fns) if (f2.selected) n_sel++;
+        snprintf(b, sizeof b, "[LIFT] %zu/%u secili fonksiyon | V=%d M=%d U=%d (U-mutdus=%d)",
+                 comps.size(), n_sel, nV, nM, nU, nUf);
+        if (n_sel > (u32)comps.size())
+            snprintf(b + strlen(b), sizeof b - strlen(b),
+                     " | UYARI: %u fonksiyon RED edildi (asagida)", n_sel - (u32)comps.size());
+    }
     L(b);
     for (auto& f : fns) {
         if (f.selected && !f.virtualized && !f.note.empty() && f.note.rfind("RED", 0) == 0)
@@ -705,7 +715,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         cur = (cur + 15) & ~15u;
         c.stub_rva = newva_guess + cur;
         std::vector<u8> st;
-        bool isreg = man_rva.count(c.f->rva) != 0;
+        bool isreg = sdk_rva.count(c.f->rva) != 0;
         u32 cont = isreg ? (c.f->rva + c.f->size) : 0;
         if (pe.is64) st = build_stub_x64(c.stub_rva, vent_guess, c.key, c.bc_rva, (u32)c.plain.size(),
                                          rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont);
@@ -783,7 +793,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         u32 so = c.stub_rva - newva_guess;
         u32 vent = vent_guess;
         std::vector<u8> st;
-        bool isreg2 = man_rva.count(c.f->rva) != 0;
+        bool isreg2 = sdk_rva.count(c.f->rva) != 0;
         u32 cont2 = isreg2 ? (c.f->rva + c.f->size) : 0;
         if (pe.is64) st = build_stub_x64(c.stub_rva, vent, c.key, c.bc_rva, (u32)c.plain.size(),
                                          rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont2);
@@ -824,7 +834,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                                    pe.imagebase, pe.sizeofimage, true,
                                    opt.mut_strength, c.f->rva ^ 0x9E3779B9u,
                                    c.mut_rva /* GERCEK base */,
-                                   man_rva.count(c.f->rva) != 0 /* 0.5.0: bolge kipi */);
+                                   sdk_rva.count(c.f->rva) != 0 /* 0.5.1: yalniz SDK bolgesi */);
         if (!m2.ok || m2.code.size() != c.mut.code.size()) {
             { FILE* f1 = fopen("/tmp/mutpass1.bin","wb"); if(f1){fwrite(c.mut.code.data(),1,c.mut.code.size(),f1);fclose(f1);} FILE* f2 = fopen("/tmp/mutpass2.bin","wb"); if(f2){fwrite(m2.code.data(),1,m2.code.size(),f2);fclose(f2);} L("[HATA] mutasyon tutarsiz: " + c.f->name + " neden=" + m2.why + " " + std::to_string(m2.code.size()) + " vs " + std::to_string(c.mut.code.size())); return 1; }
         }
@@ -882,7 +892,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
             // YERINDE stub: stub_rva = fonksiyonun kendi RVA'si olacak sekilde uret
             u32 vent = vmp_rva + (pe.is64 ? VM_BLOB64_ENTRY_OFF : VM_BLOBX86_ENTRY_OFF);
             std::vector<u8> st;
-            bool isreg3 = man_rva.count(f.rva) != 0;
+            bool isreg3 = sdk_rva.count(f.rva) != 0;
             u32 cont3 = isreg3 ? (f.rva + f.size) : 0;
             if (pe.is64) st = build_stub_x64(f.rva, vent, c.key, c.bc_rva, (u32)c.plain.size(),
                                              rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont3);
@@ -1076,6 +1086,14 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         L("[XRT] yalniz IAT korumasi: xrt_resolve gecikmeli cozumleyici yerlesti (cfg kullanilmaz)");
     }
 
+    /* 0.5.1 SAHTE-BASARI KORUMASI: secili fonksiyonlarin HICBIRI
+    uygulanamadiysa cikti dosyasi HIC YAZILMAZ (0.5.0 sessiz "korunmus"
+    kopya yaziyordu). rc=3 -> GUI uyari kutusu + CLI net hata. */
+    if (comps.empty()) {
+        L("[HATA] HICBIR FONKSIYON UYGULANAMADI - cikti dosyasi YAZILMADI.");
+        L("[HATA] Nedenler yukarida [RED] satirlarinda.");
+        return 3;
+    }
     pe.fix_checksum();
     if (!pe.save(out)) { L("[HATA] kaydedilemedi: " + out); return 1; }
     snprintf(b, sizeof b, "[KAYIT] %s (%zu bayt)", out.c_str(), pe.buf.size());
