@@ -210,7 +210,7 @@ static void vm_perm_tab(unsigned int seed, unsigned char* t, int dec) {
 // DELTA ile tasinir -> kesisme imkansiz.
 #define VM_STUB_SUB64 0x330
 #define VM_STUB_SUB86 0x268
-#define VM_DELTA64  0xC00   /* 0.8.2: C-cagri derinligi buyudu (ANTIDBG API cagrilari) — emu-yigin C-copunun ALTINA tasinir */
-#define VM_DELTA86  0xC00   /* 0.8.2: x86 da ayni derinlik sorunu — emu-yigin C-copunun altinda */
+#define VM_DELTA64  0x1400  /* 0.8.3: batarya CONTEXT tamponu 0x4D0 — emu-yigin penceresi C-derinliginin ustune cikarildi */
+#define VM_DELTA86  0x1400  /* 0.8.3: x86 CONTEXT 0x2CC + guvenlik payi */
 
 #endif

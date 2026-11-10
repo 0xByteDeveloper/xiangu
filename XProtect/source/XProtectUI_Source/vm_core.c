@@ -395,6 +395,8 @@ static u64 vm_natcall(u64 t, const u64* regs) {
   #define XA_CTX_DR3     0x60
   #define XA_CTX_EFLAGS  0x44
   #define XA_CTX_RAX     0x78
+  #define XA_CTX_RCX     0x80
+  #define XA_CTX_SIZE    0x4D0
   #define XA_CTX_DBGFL   0x00100010u   /* CONTEXT_DEBUG_REGISTERS|AMD64 */
   #define XA_TFMAGIC     0x5A17C0DE5A17C0DEull
 #else
@@ -405,6 +407,8 @@ static u64 vm_natcall(u64 t, const u64* regs) {
   #define XA_CTX_DR3     0x10
   #define XA_CTX_EFLAGS  0xB8
   #define XA_CTX_RAX     0xA8
+  #define XA_CTX_RCX     0xA0
+  #define XA_CTX_SIZE    0x2CC
   #define XA_CTX_DBGFL   0x00010010u   /* CONTEXT_DEBUG_REGISTERS|i386 */
   #define XA_TFMAGIC     0x5A17C0DEu
 #endif
@@ -424,7 +428,9 @@ static u32 xa_fnv_w(u64 s, u32 n) {
     return h;
 }
 
-/* PEB -> InLoadOrderModuleList -> modul tabani (isim hash ile) */
+/* PEB -> InLoadOrderModuleList -> modul tabani (isim hash ile)
+   0.8.3: DllBase==0 / absürt girdiler atlanir (manuel-maplenen koruma
+   DLL'leri bozuk LDR girisi birakabilir — oyun cokmesi dersi). */
 static u64 xa_module(u32 want) {
 #if defined(VM_IS_X64)
     u64 peb; __asm__ volatile("movq %%gs:0x60, %0" : "=r"(peb));
@@ -436,8 +442,9 @@ static u64 xa_module(u32 want) {
         u64 ent  = cur - 0x10;                    /* InMemoryOrderLinks -> entry */
         u32 nlen = (u32)mrd(ent + 0x58, 2);       /* BaseDllName.Length */
         u64 nbuf = mrd(ent + 0x60, 8);            /* BaseDllName.Buffer */
-        if (nbuf && nlen && nlen < 128) {
-            if (xa_fnv_w(nbuf, nlen >> 1) == want) return mrd(ent + 0x30, 8); /* DllBase */
+        u64 db   = mrd(ent + 0x30, 8);            /* DllBase */
+        if (db && nbuf && nlen && nlen < 128) {
+            if (xa_fnv_w(nbuf, nlen >> 1) == want) return db;
         }
         cur = mrd(cur, 8);
     }
@@ -451,8 +458,9 @@ static u64 xa_module(u32 want) {
         u64 ent  = cur - 0x08;
         u32 nlen = (u32)mrd(ent + 0x2C, 2);
         u64 nbuf = mrd(ent + 0x30, 4);
-        if (nbuf && nlen && nlen < 128) {
-            if (xa_fnv_w(nbuf, nlen >> 1) == want) return mrd(ent + 0x18, 4);
+        u64 db   = mrd(ent + 0x18, 4);
+        if (db && nbuf && nlen && nlen < 128) {
+            if (xa_fnv_w(nbuf, nlen >> 1) == want) return db;
         }
         cur = mrd(cur, 4);
     }
@@ -493,19 +501,26 @@ static u64 xa_export(u64 kbase, u32 want) {
     return 0;
 }
 
-/* ---- TF probu icin VEH isleyici (0.8.2) ----
+/* ---- TF probu icin VEH isleyici (0.8.2, 0.8.3 gelistirildi) ----
    Kuyruga eklenir (First=0): once diger (CE gibi) isleyiciler calisir.
    CE VEH tek-adim istisnalarini YUTUYORSA bizim isleyiciye ulasmaz ->
-   rax MAGIC kalir -> tespit. Kimse yutmiyorsa biz aliriz: TF temizle +
-   rax=MAGIC + devam (surec guvende). */
+   rax MAGIC KALMAZ -> GOLGE sinyali (0.8.3: tek basina tespit DEGIL —
+   bos-enjekte CE VEH / oyun koruma VEH ayni iz birakir; 0.8.2'nin
+   temiz oyunda yanlis-pozitif cokmesi bu yuzdendi).
+   Istisna BIZE ulasirsa (temiz surec): TF temizle + rax=MAGIC +
+   ECX = istisna baglamindan DR0|DR1|DR2|DR3 (core.cc:771 1:1 —
+   GetThreadContext'siz DRx okuma; KESIN sinyal). */
 #if defined(VM_IS_X64)
 static long __attribute__((ms_abi, noinline, used)) xa_veh_x64(void* expp) {
     u64 rec  = mrd((u64)(unsigned long)expp, 8);
     u64 ctxp = mrd((u64)(unsigned long)expp + 8, 8);
-    if ((u32)mrd(rec, 4) == 0x80000004u) {        /* STATUS_SINGLE_STEP */
+    if (rec && ctxp && (u32)mrd(rec, 4) == 0x80000004u) {   /* STATUS_SINGLE_STEP */
         u32 fl = (u32)mrd(ctxp + XA_CTX_EFLAGS, 4) & ~0x100u;
         mwr(ctxp + XA_CTX_EFLAGS, 4, fl);
         mwr(ctxp + XA_CTX_RAX, 8, XA_TFMAGIC);
+        mwr(ctxp + XA_CTX_RCX, 8,
+            mrd(ctxp + XA_CTX_DR0, 8) | mrd(ctxp + XA_CTX_DR1, 8)
+            | mrd(ctxp + XA_CTX_DR2, 8) | mrd(ctxp + XA_CTX_DR3, 8));
         return -1;                                 /* EXCEPTION_CONTINUE_EXECUTION */
     }
     return 0;                                      /* CONTINUE_SEARCH */
@@ -518,10 +533,13 @@ static u64 xa_veh_addr(void) {
 static long __attribute__((stdcall, noinline, used)) xa_veh_x86(void* expp) {
     u32 rec  = (u32)mrd((u64)(u32)(unsigned long)expp, 4);
     u32 ctxp = (u32)mrd((u64)(u32)(unsigned long)expp + 4, 4);
-    if ((u32)mrd((u64)rec, 4) == 0x80000004u) {
+    if (rec && ctxp && (u32)mrd((u64)rec, 4) == 0x80000004u) {
         u32 fl = (u32)mrd((u64)ctxp + XA_CTX_EFLAGS, 4) & ~0x100u;
         mwr((u64)ctxp + XA_CTX_EFLAGS, 4, fl);
         mwr((u64)ctxp + XA_CTX_RAX, 4, XA_TFMAGIC);
+        mwr((u64)ctxp + XA_CTX_RCX, 4,
+            (u32)mrd((u64)ctxp + XA_CTX_DR0, 4) | (u32)mrd((u64)ctxp + XA_CTX_DR1, 4)
+            | (u32)mrd((u64)ctxp + XA_CTX_DR2, 4) | (u32)mrd((u64)ctxp + XA_CTX_DR3, 4));
         return -1;
     }
     return 0;
@@ -617,9 +635,9 @@ static int vm_antidbg(VMContext* c) {
     u64 pvm = xa_export(ntd, XA_PVM);
     u64 gtc = xa_export(k32, XA_GTC);
     /* (C) ProcessDebugPort + ProcessDebugObjectHandle — core.cc:785
-       (0.8.2 duzeltme: orijinaldeki "|| debug_object==0" ifadesi temiz
-        surecte de yan-pozitif verir — XProtect'te yalniz NT_SUCCESS &&
-        hedef!=0 gercek cagrilar gecerli; yanlis-pozitif oyunu bozamaz) */
+       0.8.3 x86 fix: NtCurrentProcess = 0xFFFFFFFF (0.8.2'de 0xFFFFFFFE =
+       thread pseudo-handle yanlis — QIP x86'da HIC calismiyordu).
+       (orijinaldeki "|| debug_object==0" ifadesi alinmadi — yan-pozitif) */
     if (qip) {
         u64 port = 0, dob = 0;
         u64 st1, st2;
@@ -629,16 +647,18 @@ static int vm_antidbg(VMContext* c) {
         if ((st1 & 0xFFFFFFFF00000000ull) == 0 && port != 0) return 1;
         if ((st2 & 0xFFFFFFFF00000000ull) == 0 && dob != 0) return 1;
 #else
-        st1 = (u64)xa_call5_86((u32)qip, 0xFFFFFFFEu, 7, (u32)(unsigned long)&port, 4, 0);
-        st2 = (u64)xa_call5_86((u32)qip, 0xFFFFFFFEu, 0x1E, (u32)(unsigned long)&dob, 4, 0);
+        st1 = (u64)xa_call5_86((u32)qip, 0xFFFFFFFFu, 7, (u32)(unsigned long)&port, 4, 0);
+        st2 = (u64)xa_call5_86((u32)qip, 0xFFFFFFFFu, 0x1E, (u32)(unsigned long)&dob, 4, 0);
         if ((st1 & 0x80000000ull) == 0 && port != 0) return 1;
         if ((st2 & 0x80000000ull) == 0 && dob != 0) return 1;
 #endif
     }
-    /* (D) DRx: GetThreadContext(GetCurrentThread) — CE VEH donanim-bp */
+    /* (D) DRx: GetThreadContext(GetCurrentThread) — CE VEH donanim-bp.
+       0.8.3: tampon tam CONTEXT boyutu (bazi Windows derinlikleri
+       bayraklara gore daha genis alan yazar — karsi bogaz). */
     if (gtc) {
 #if defined(VM_IS_X64)
-        u8 cbuf[0x100];
+        u8 cbuf[XA_CTX_SIZE];
         u64 cal = ((u64)(unsigned long)cbuf + 15ull) & ~15ull;
         mwr(cal + XA_CTX_FLAGS, 4, XA_CTX_DBGFL);
         if (xa_call4(gtc, 0xFFFFFFFFFFFFFFFEull, cal, 0, 0)) {
@@ -647,7 +667,7 @@ static int vm_antidbg(VMContext* c) {
             if (dr) return 1;
         }
 #else
-        u8 cbuf[0x20];
+        u8 cbuf[XA_CTX_SIZE];
         u32 cal = ((u32)(unsigned long)cbuf + 3u) & ~3u;
         mwr((u64)cal + XA_CTX_FLAGS, 4, XA_CTX_DBGFL);
         if (xa_call2_86((u32)gtc, 0xFFFFFFFEu, cal)) {
@@ -657,19 +677,27 @@ static int vm_antidbg(VMContext* c) {
         }
 #endif
     }
-    /* (E) kritik ntdll API girişlerinde 0xCC — loader.cc:2116 1:1 */
+    /* (E) kritik ntdll API girişlerinde 0xCC — loader.cc:2116 1:1.
+       0.8.3 GOLGE: tek başına karar değil (AV/inline-hook 0xCC'ı taklit
+       edebilir) — zaten kesin sinyal varsa erken donulur, buraya tek
+       basına gelindiyse temiz sayılır. */
     {
         u32 wants[7]; int i;
         wants[0] = XA_OFI; wants[1] = XA_CSE; wants[2] = XA_MVS;
         wants[3] = XA_UVS; wants[4] = XA_NCL; wants[5] = XA_PVM; wants[6] = XA_QIP;
         for (i = 0; i < 7; i++) {
             u64 f = xa_export(ntd, wants[i]);
-            if (f && mrd(f, 1) == 0xCC) return 1;
+            /* GOLGE: bulgu tek basina karar vermez (AV int3-hook ayni izi
+               birakir; gercek OS debugger zaten (C) DebugPort ile yakalanir).
+               Orijinal yontem birebir calistirilir, karara etki etmez. */
         }
-        if (gtc && mrd(gtc, 1) == 0xCC) return 1;
+        if (gtc) { (void)mrd(gtc, 1); }
     }
     /* (F) PAGE_GUARD / PAGE_NOACCESS — loader.cc:2246+2875 1:1:
-       bytecode sayfasini RWX yap, eski korumayi oku, geri yamala. */
+       bytecode sayfasini RWX yap, eski korumayi oku, geri yamala.
+       0.8.3 x86 fix: NtCurrentProcess = 0xFFFFFFFF (0.8.2'de thread
+       handle — kontrol hic calismiyordu). Basarili NtPVM sonrasi GUARD
+       bayragi temiz oyunda normalde olmaz — kesin sayilir. */
     if (pvm) {
         u64 addr = c->bc; u64 size = 0x1000; u32 old = 0; u64 st;
 #if defined(VM_IS_X64)
@@ -680,17 +708,21 @@ static int vm_antidbg(VMContext* c) {
         }
 #else
         u32 addr32 = (u32)c->bc; u32 size32 = 0x1000;
-        st = xa_call5_86((u32)pvm, 0xFFFFFFFEu, (u32)(unsigned long)&addr32, (u32)(unsigned long)&size32, 0x40, (u32)(unsigned long)&old);
-        if ((st & 0xFFFFFFFF00000000ull) == 0) {
+        st = xa_call5_86((u32)pvm, 0xFFFFFFFFu, (u32)(unsigned long)&addr32, (u32)(unsigned long)&size32, 0x40, (u32)(unsigned long)&old);
+        if ((st & 0x80000000ull) == 0) {
             if (old & (0x100u | 0x01u)) return 1;
-            if (old != 0x40) xa_call5_86((u32)pvm, 0xFFFFFFFEu, (u32)(unsigned long)&addr32, (u32)(unsigned long)&size32, old, (u32)(unsigned long)&old);
+            if (old != 0x40) xa_call5_86((u32)pvm, 0xFFFFFFFFu, (u32)(unsigned long)&addr32, (u32)(unsigned long)&size32, old, (u32)(unsigned long)&old);
         }
 #endif
     }
-    /* (G) TF + RDTSC probu — loader.cc:2510 1:1 (kuyruk-VEH ile):
-       TF kurulur; istisna KUYRUKTAKI isleyicimize ulasirsa rax=MAGIC
-       olur (temiz). Istisna bir VEH/debugger tarafindan yutulduysa
-       rax = RDTSC sayaci -> tespit. */
+    /* (G) TF + RDTSC probu — loader.cc:2510 + core.cc:771 1:1 (kuyruk-VEH):
+       TF kurulur; istisna KUYRUKTAKI isleyicimize ulasirsa rax=MAGIC ve
+       ecx=baglam-DRx olur (temiz; DRx!=0 -> KESIN tespit — donanim-bp
+       istisna baglamindan okunur, GetThreadContext'siz).
+       Istisna bir VEH/debugger tarafindan YUTULDUYSA rax = RDTSC sayaci
+       -> GOLGE (0.8.3: tek basina tespit DEGIL — bos-enjekte CE VEH /
+       oyun koruma VEH ayni izi birakir; 0.8.2'nin temiz oyunda
+       yanlis-pozitif cokmesi buydu). */
     {
         u64 aveh = xa_export(ntd, XA_AVEH);
         u64 rveh = xa_export(ntd, XA_RVEH);
@@ -699,30 +731,38 @@ static int vm_antidbg(VMContext* c) {
 #if defined(VM_IS_X64)
             h = xa_call4(aveh, 0, xa_veh_addr(), 0, 0);
             if (h) {
-                u64 mark = 0;
+                u64 mark = 0, drx = 0;
                 __asm__ volatile(
                     "pushfq\n\t"
                     "orq $0x100, (%%rsp)\n\t"
                     "popfq\n\t"
                     "rdtsc\n\t"
                     "nop\n\t"
-                    : "=a"(mark) :: "rdx", "cc", "memory");
+                    "movq %%rcx, %1\n\t"
+                    : "=a"(mark), "=m"(drx)
+                    :: "rdx", "rcx", "cc", "memory");
+                /* drx BELLEGE yazildi: RVEH (eax/ecx/edx volatile) cagrisindan
+                   sonra okunabilir — registerde tutmak yanlis deger okur */
                 xa_call4(rveh, h, 0, 0, 0);
-                if (mark != XA_TFMAGIC) return 1;
+                if (mark == XA_TFMAGIC && drx) return 1;  /* baglam-DRx: KESIN */
+                /* mark != MAGIC (yutuldu) -> GOLGE; tek basina karar degil */
             }
 #else
             h = xa_call2_86((u32)aveh, 0, xa_veh_addr());
             if (h) {
-                u32 mark = 0;
+                u32 mark = 0, drx = 0;
                 __asm__ volatile(
                     "pushfl\n\t"
                     "orl $0x100, (%%esp)\n\t"
                     "popfl\n\t"
                     "rdtsc\n\t"
                     "nop\n\t"
-                    : "=a"(mark) :: "edx", "cc", "memory");
+                    "movl %%ecx, %1\n\t"
+                    : "=a"(mark), "=m"(drx)
+                    :: "edx", "ecx", "cc", "memory");
+                /* drx BELLEGE yazildi: RVEH cagrisi ecx'i bozar (volatile) */
                 xa_call1_86((u32)rveh, (u32)h);
-                if (mark != (u32)XA_TFMAGIC) return 1;
+                if (mark == (u32)XA_TFMAGIC && drx) return 1;
             }
 #endif
         }
@@ -1155,7 +1195,10 @@ void vm_entry(VMContext* c) {
     vm_run(c);
 
     if (c->done == 2) {
-        c->regs[0] = 0xDEADBEEFDEADBEEFULL;   // debugger -> zehirli donus
+        /* 0.8.3: zehirli donus 0 (0.8.2'de 0xDEADBEEF — oyun cagiricisi
+           geri donus degerini pointer/sayac olarak kullaninca temiz
+           oyunda dahi cokme; 0 = "fonksiyon calismadi", oyun-guvenli). */
+        c->regs[0] = 0;
         c->done = 1;
     }
     for (k = 0; k < NMAP; k++) {
