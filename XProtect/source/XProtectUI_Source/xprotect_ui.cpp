@@ -33,8 +33,8 @@
 
 // ---------------- surum ----------------
 #define XPROTECT_EDITION  L"XProtect Ultimate"
-#define XPROTECT_VERSION  L"0.7.0"
-#define XPROTECT_BUILD    L"2026-11-09"
+#define XPROTECT_VERSION  L"0.8.2"
+#define XPROTECT_BUILD    L"2026-11-10"
 
 // ---------------- dil tablosu (en.lng birebir + TR) ----------------
 enum LS {

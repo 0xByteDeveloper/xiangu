@@ -762,53 +762,102 @@ Stage Summary:
    tam token asagida hala mevcut:
    (UYARI: bu dosya repo'ya KONULMAZ — secret-scanner reddeder.)
 
-## 0.8.0 oturumu (2026-11-10) — VM derinlestirme TAM
-Z-Bridge v3.7.2 kuruldu (scripts/bridge_test — daemon canli, MQTT wss bagli;
-webden_kuyruk protokolu aktif; gorev_durumu.json + durum.txt guncel tutuluyor).
+## 0.8.1 oturumu (2026-11-10) — anti-debug regresyon fix + STRDEC tamiri TAM
+KULLANICI BILDIRIMI: 0.8.0 ciktisinda (metin2client d7610 U + antidebug + memprot)
+CE F5 ile debug edilince fonksiyon calismaya devam ediyordu (0.6.2/0.7.0'da
+duruyordu). Ayrica "belki baska ozellikler de bozuk" suphesi.
 
-1) YENI-OP KANITI (kaldigimiz yer): sdk_min_test (rol/ror/bswap/xchg, marker'li)
-   --add 7C41:7C62:V → bc=42B, korumali kosu r=30100402 ESLESTI RCODE=42.
-   Model formulu app'te yanlisti; dogrusu rol12(bswap(ror4(rol8(x)))).
-2) SECTIONCRYPTOR (pack-EPdecrypt): xr_cipher.h ortak sozlesme (splitmix64 +
-   4-tur Feistel64 + CFB-64; nonce=f(k0,dst_rva) kayit-bagi). XPK1 kayit
-   12B->16B (srcsz), header+12=flag, cfg 0x60 (flag 0x4C + maskeli anahtar
-   0x50/0x58, XRC_KEYMASK(cfg_rva)). Runtime xrt_unpack: RWX .vmp1 uzerinde
-   yerinde cozum. BUG FIXLER: (a) compaction r.stream.data() yaziyor —
-   sifreleme akis uzerinde yapilmali (data'da yerali sifre eziyordu);
-   (b) in-place CFB yonu: geribesleme cozme tarafinda XOR-ONCESI (sifreli)
-   bayttan — dec parametresi eklendi (ilk 8 bayt ozdes sonrasi sapma bulgusu).
-   Kanit: pack+sectcrypt=42, tek-bayt tamper=117 (rt-nomsg ile hizli duru ret;
-   rt_msg'liyken MessageBox Xvfb'de bekliyor — hang gozlemi o yuzden), x86
-   fake32 statik (flag=1 + akislar python-CFB ile cozuluyor), metin2 3 akis OK.
-3) sdk_ext CRASH TESHISI (dunku duraklama): korumali exe wild write
-   (0x141695B60 @ vm_entry+0x9BD). Regression DEGIL (dunku exe ayni crash).
-   Host harness (vmharness.c: bolum-eşlemeli image + push_area simülasyonu +
-   VM_TRACE ncall-stub) + bcwalk.py ile op-op iz: ilk movslq'te (ic=0x5A)
-   akis IDIV_R'e dusuyor. KOK NEDEN: encoder XP_MOVZX/XP_MOVSX emission
-   ham e() kullaniyor → perm atlanıyor → desync → itab[0xC0] OOB → wild
-   write. FIX: eop() (engine_lift.cpp 0.8.0 KRITIK FIX). Ikinci fix:
-   vm_core movsx ssz==4 32-bit isaret genisletme (eski 16-bit).
-   Sonuc: sdk_ext_p=42 (movslq/SIB/NCALL/rol/ror/bswap/xchg hepsi VM'de).
-   NOT: --novmenc CFB ile uyumsuz (encoder key=0, vm_entry kosulsuz K2
-   XOR'luyor) — vmenc hep acik (bilinen sinirlama).
-4) SEH: dinamik kayit (dd3 repoint wine'da bozuk — uclu olcum kaniti);
-   .vmp0'da unwind tablosu + RtlAddFunctionTable; mut govdelere sadik
-   UNWIND_INFO (uw haritasi). C++ throw kaniti: YAKALANDI e=7, 42.
-5) Sertlestirme: adim butcesi (1<<24) + STRDEC ust siniri; tamper
-   derailment artik sinirli surede.
-6) REGRESYON (final motor+blob): R1 sdk_min V=42, R2 pack+sectcrypt=42,
-   R3 pack=42, R4 sectcrypt-tamper=117, R5 w1 ultimate
-   (V+M+pack+sectcrypt+loadercrc+filecrc+stripfix)=42 (a=78 b=0x16f9
-   c=0x1221 d=81), R6 sdk_ext=42, R7 lisans paketi (ok=0/badsum=2/
-   badhwid=32/expire=8/recovery=0 + GetData name/email)=42, R8 SELFTEST OK
-   funcs=34, R9 metin2 d7610 U+pack+sectcrypt+loadercrc+stripfix statik:
-   e9 kapi ✓ + TEXTCRC ESLESIYOR ✓ (vsz kelepce; zlib.crc32=xrc algoritma
-   dogrulandi) + 3 akis CFB->LZMA OK + RELOC 0/0 ✓, R10 x86 fake32 statik OK.
-7) Paket: XProtect_0.8.0.zip 82 dosya 14.5MB (md5 eabc26d1...) →
-   download/XProtect/ + repo releases. CHANGELOG_0.8.0.md + README_0.8.0.txt.
-   Araclar: ztls0.py (TLS-callback test kopyasi), sc_dbg.py (CFB+LZMA offline
-   dogrulama), bc_extract.py + bcwalk.py + vmharness.c (VM teshis kitlesi).
-   mingw: apt deb'lerden /tmp/mgw + /home/z/my-project/tools-root sysroot
-   symlink'leri (test_lic_full.sh toolchain onarildi).
-0.9.0 hedefi: anti-debug paketi, bellek korumasi, sanal dosyalar, RunnerCRC,
-   gercek-yigin VM kipi (bolge kipi rsp RED'nin kapanmasi).
+1) ORTAM YENIDEN KURULUMU (sandbox recycle sonrasi): wine-root KARISIK agacti
+   (repack-6 loader + repack-12 DLL'ler). Kok neden: tutarli repack-6 agaci
+   kuruldu (apt download wine wine64 libwine -> /tmp/winepkgs2 -> wine-root/usr
+   tazeleme) + wineserver wrapper'i binary-copy ile degistirme (chroot'ta /bin/sh
+   YOK — "could not exec wineserver") + libz-mingw-w64 zlib1.dll'i prefix
+   system32'ye kopyalama (wine builtin degil, normal DLL olarak yuklenir) +
+   WINE BAG-SIRASI BUG'U: rbind /tmp KLON agactan SONRA yapilan c:/z: bind'leri
+   chroot icinden GORUNMUYOR (kayip oturumun "taze prefix" basarisi zaten
+   bozuktu; fix: drive bind'lerini $WROOT/tmp/... altina bagla — wine64x.sh).
+2) TESHIS (kanit: kullanici ciktisi + statik cozum araci test/static_ad_check.py):
+   - stub parse: seed=0xD7610, bc_rva=0x549490, bc_len=546 (kayip oturum
+     degerleriyle AYNI) -> bc[0]=0x1E ham ANTIDBG -> itab[0x1E]=0x1C=CQO
+     -> kontrol hic calismiyor (zararsiz op). 0.7.0'da perm YOKTU -> ham
+     0x1E == ANTIDBG idi. 0.8.0 perm ekleyince lifter eop() ile cozerken
+     Options motoru STRDEC/ANTIDBG'yi HAM basiyordu (2. ham-push noktasi).
+   - IKINCI BUG (0.3.0'dan beri latent): VM OP_STRDEC 4xu32 okuyor
+     (strRva,stateRva,key,len); encoder 2xu32 yaziyordu -> akis 8B kayiyor,
+     govde op'lari yanlis, ANTIDBG de yutuluyor (strenc acikken).
+3) FIX (xp081 = xp070 kopyasi, kalici /home/z alani — kayip oturum dersi):
+   a) engine_main.cpp: plain-builder perm tablosu (vm_perm_tab(f.rva,ptab,0),
+      ptab[OP_ANTIDBG]/ptab[OP_STRDEC]) + 4xu32 emisyonu + kopya yerlesimi.
+   b) engine.hpp/engine_lift.cpp: VFn.str_sites — lifter .rdata ref alan
+      konumlari (riprel + absimage iki dal).
+   c) OZEL KOPYA TASARIMI: sifreli string kopyalari .vmp0'da (M-blok/bc/stub
+      sonrasi ayri hizali bolge = M-bolge cakisma korumasi); orijinal string
+      diske DOKUNULMAZ (M/native referanslari her zaman dogru); bytecode
+      ref siteleri kopyaya yonlendirilir (string-ici delta korunur); state
+      KOPYA basina PAYLASILIR (eski: site basina — ayni stringi kullanan 2.
+      fonksiyon tekrar cozup bozuyordu); .rdata artik writable YAPILMIYOR
+      (runtime yazma .vmp0'da — read-only koruma guclendirildi).
+4) KANITLAR (wine64x + winedbg; hepsi son derleme):
+   - 3-yonlu diferansiyel (test_ad.c damage, T2 zehir r=0xDEADBEEF bd=1):
+     T1 antidebug+normal r=3812 bd=0 / T2 antidebug+winedbg DURDU /
+     T3 antidebug'suz+winedbg r=3812 (VM normal calisir).
+   - metin2 d7610 U + antidebug + memprot: bc[0]=0x0A -> itab -> 0x1E ANTIDBG ✓
+     (kullanicinin 0.8.0 ciktisinda ayni analiz: 0x1E -> 0x1C CQO — bug teyit).
+   - STRDEC: strenc'li kosum str=XP-gizli-mesaj-0.8.1 ok=1 (runtime cozum);
+     diskte .vmp0 icinde PLAIN string YOK, SIFRELI kopya VAR.
+   - R4 tamper (paketli+seectcrypt tek-bayt) -> RCODE=113 duru-ret.
+   - R5 ULTIMATE (V+M+pack+sectcrypt+loadercrc+filecrc+stripfixups)
+     a=78 b=0x16f9 c=0x1221 d=81 RCODE=42.
+   - R6 x86 (PE32) statik: bc[0]=0x00 -> itab -> 0x1E ✓.
+   - R7 SELFTEST OK (x64 wine + Xvfb; Xvfb ayni-komut-icinde baslat —
+     arka plan sureci komut sonuyla oliyor).
+5) PAKET: XProtect_0.8.1.zip 63 dosya 4.3MB (md5 4e8e476d...) ->
+   download/XProtect/ + repo releases. CHANGELOG_0.8.1.md + README_0.8.1.txt.
+   Yeni arac: test/static_ad_check.py (stub-parse + CFB + itab statik kanit).
+6) WINE NOTLARI (gelecek oturumlar icin): scripts/xp081/wine64x.sh kullan;
+   wine-root/usr artik tutarli repack-6; wineserver=binary; prefix wp64x;
+   mingw araci /tmp/mgw/usr/bin/x86_64-w64-mingw32-gcc-posix (pkgs deb'lerinden
+   yeniden cikarilabilir); symlinks TAM YASAKLI (bind kullan).
+
+## 0.8.2 oturumu (2026-11-10) — CE VEH debugger yakalama TAM
+KULLANICI BILDIRIMI: 0.8.1'de CE "Windows debugger" F5 fonksiyonu durduruyordu
+ama "VEH debugger" durdurmuyordu. Istek: orijinal UniversalObfuscator
+kaynagindaki yontemi birebir gecir.
+
+1) KOK NEDEN: 0.8.1 OP_ANTIDBG yalniz PEB.BeingDebugged+NtGlobalFlag. CE VEH:
+   OS debug API'si YOK (DebugPort=0, PEB=0), yazilim-bp bayti tek-adimda GERI
+   yazilir (görünmez), donanim-bp DRx'te kalir.
+2) ORIJINAL ANALIZ (upload/universalObfusPublicSrc.zip runtime/):
+   loader.cc:2116 ntdll API girisi 0xCC taramasi (NtOpenFile/NtCreateSection/
+   NtMapViewOfSection/NtUnmapViewOfSection/NtClose/NtProtectVirtualMemory),
+   loader.cc:2246+2875 NtPVM eski-koruma PAGE_GUARD|NOACCESS,
+   loader.cc:2510 TF+RDTSC problamasi, core.cc:764 PEB, core.cc:785
+   ProcessDebugPort+DebugObjectHandle, core.cc:771 TF-istisna baglamindan DRx.
+3) PORT (vm_core.c, tam batarya — x64 ms_abi + x86 stdcall VEH isleyicisi,
+   PC-goreli isleyici adresi: x64 lea sym(%rip), x86 call/pop+(sembol-1b)):
+   PEB → DebugPort/ObjectHandle → GetThreadContext(DR0-3) → KAPI (fonksiyon
+   giris bayt-0 0xCC olamaz — XProtect'e ozgu, CE yazilim-bp'yi yakalayan
+   asil kontrol) → ntdll API CC taramasi → PAGE_GUARD → TF+RDTSC (kuyruk-VEH:
+   istisna bize ulasirsa rax=MAGIC temiz; yutulursa tespit). Isim cozumleri
+   PEB-gezgini + FNV-1a (hash'ler wine ntdll export tablosunda dogrulandi —
+   carpisma yok). VM_DELTA64/86 0x600→0xC00 (derin wine-server RPC cagrilari
+   emule-yigini eziyordu — bisekt kaniti: belirleyici bozuk hesap). scratch[3]
+   (u32) cast (stub 4 bayt yazar, ust 32 bit yigin copu — strenc'te faul).
+   DebugObjectHandle `|| ==0` tuhafligi alinmadi (yanlis-pozitif).
+4) KANIT (wine64+Xvfb, son binary; test/test_veh.c CE-VEH simulatörü:
+   bp yazar/tek-adimda geri yazar/tek-adim yutar — CE davranisi birebir):
+   - clean r=3812 rc=42 CALISIR ✓ | sw (0xCC@giris) DURDU ✓ | hw (DR0) DURDU ✓
+     | vehonly (tek-adim yutan VEH, bp yok) DURDU ✓ | peb (BeingDebugged=1)
+     DURDU ✓ — 5/5 (kanit: test/veh_matrix_x64.txt)
+   - R5 ULTIMATE a=78 b=0x16f9 c=0x1221 d=81 rc=42 ✓ | tamper rc=115 dur-ret ✓
+   - strenc+antidebug birlikte: str=XP-gizli-mesaj-0.8.1 ok=1 ✓
+   - metin2 d7610 U+antidebg: bc[0]=0x0A->itab->0x1E ANTIDBG ✓ + E9 kapi ✓
+   - x86 blob sabitleri + metin2(PE32) statik ✓ (x86 runtime: wine syswow64
+     yok — 0.8.1 ile ayni sinir)
+   - SELFTEST OK (funcs=0 baseline = 0.8.1 ayni) ✓
+   - wine DR round-trip yok → (D) DRx kontrolu kod-duzeyinde dogrulanmis
+5) SURUM 0.7.0'da kalmisti → 0.8.2 (About/baslik).
+6) PAKET: XProtect_0.8.2.zip 69 dosya 11.1MB (md5 564e85d0...) ->
+   download/XProtect/ + repo releases. CHANGELOG_0.8.2.md + README_0.8.2.txt.
+   Yeni arac: test/test_veh.c + test_veh_matrix.sh + find_damage_rva.py
+   (.pdata/prolog-taramasiyla gercek fonksiyon siniri).
