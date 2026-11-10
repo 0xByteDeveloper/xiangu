@@ -707,6 +707,8 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         u32  mut_gate_rva = 0;               // 0.5.0: M onundeki runtime kapisI
         std::vector<u32> state_sites;         // plain icinde state rva u32 pozisyonlari
         std::vector<u32> state_strva;         // sirasiyla string rva'lari
+        std::vector<std::pair<u32,u32>> dec_sites; // 0.8.1: (plain-ofset, orig str rva) — strRva=kopya yamasi
+        u32 prefix_len = 0;                   // 0.8.1: govde oncesi STRDEC/ANTIDBG oneki (ref-site kaydirmasi)
     };
     std::vector<Compiled> comps;
     int nV = 0, nM = 0, nU = 0, nUf = 0;
@@ -817,10 +819,25 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
 
     // --- plain olustur: STRDEC + ANTIDBG + govde ---
     // (blob/newva_guess 0.5.0'da derleme ONCESINE tasindi — IAT thunk plani)
+    // 0.8.1: strenc ozel kopyalari — lifter'in referans verdigi TUM stringler
+    // (tekil; kopya basina PAYLASILAN state). Orijinal string diske
+    // DOKUNULMAZ -> M/native kodun kendi referanslari her zaman dogru kalir.
+    std::vector<RStr> encstr;
+    std::map<u32, u32> str_state_idx;     // orig rva -> state index (kopya basina)
+    std::map<u32, u32> str_copy;          // orig rva -> kopya RVA (yerlesim sonrasi dolar)
 
     for (auto& c : comps) {
         if (c.ty == 1) continue;              // M: bayt-kod yok
         std::vector<u8> plain;
+        /* 0.8.1 KRITIK FIX (anti-debug olumu): STRDEC/ANTIDBG opcode'lari
+           lifter ile AYNI perm tablosundan gecmeli (tohum = f.rva).
+           0.8.0'da ham push ediliyordu; interpreter itab[sf8] ile cozdugu
+           icin ham bayt BASKA op'a dusuyordu:
+             ham 0x1E (ANTIDBG) -> itab[0x1E]=OP_CQO -> kontrol HIC calismiyor
+             (CE/winedbg altinda fonksiyon calismaya devam ediyordu)
+             ham 0x1F (STRDEC)  -> rastgele op (strenc bozuk). */
+        u8 ptab[VM_OPN];
+        vm_perm_tab(c.f->rva, ptab, 0);       // gercek->raw (lift_function ile ayni tohum)
         if (opt.strenc) {
             std::vector<RStr> used;
             for (u32 ref : c.v.str_refs)
@@ -829,16 +846,29 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                         if (std::find_if(used.begin(), used.end(), [&](RStr& r) { return r.rva == s.rva; }) == used.end())
                             used.push_back(s);
             for (auto& s : used) {
-                plain.push_back(OP_STRDEC);
-                for (int k = 0; k < 4; k++) plain.push_back((u8)(s.rva >> (8 * k)));
+                if (str_state_idx.find(s.rva) == str_state_idx.end()) {
+                    str_state_idx[s.rva] = (u32)encstr.size();
+                    encstr.push_back(s);
+                }
+                plain.push_back(ptab[OP_STRDEC]);
+                /* 0.8.1 FIX (0.3.0'dan beri latent): VM handler 4xu32 okur
+                   (strRva, stateRva, key, len) — encoder yalniz 2xu32
+                   yaziyordu -> akis 8 bayt kayiyor, govde op'lari yanlis
+                   cozuluyor, ANTIDBG de yutuluyordu.
+                   strRva = SIFRELI OZEL KOPYA (yerlesim sonrasi yamalanir). */
+                c.dec_sites.push_back({(u32)plain.size(), s.rva});
+                for (int k = 0; k < 4; k++) plain.push_back(0);   // strRva (kopya) placeholder
                 c.state_sites.push_back((u32)plain.size());
                 for (int k = 0; k < 4; k++) plain.push_back(0);   // state rva placeholder
-                c.state_strva.push_back(s.rva);
                 u32 k2 = (s.rva * 2654435761u) | 1u;
+                for (int k = 0; k < 4; k++) plain.push_back((u8)(k2 >> (8 * k)));    // key
+                for (int k = 0; k < 4; k++) plain.push_back((u8)(s.len >> (8 * k))); // len
+                c.state_strva.push_back(s.rva);
                 c.v.notes.push_back("  [STRDEC] str=0x" + hex32(s.rva) + " len=" + std::to_string(s.len) + " key=0x" + hex32(k2));
             }
         }
-        if (opt.antidebug) plain.push_back(OP_ANTIDBG);
+        if (opt.antidebug) plain.push_back(ptab[OP_ANTIDBG]);
+        c.prefix_len = (u32)plain.size();     // 0.8.1: govde ref-site kaydirmasi
         plain.insert(plain.end(), c.v.plain.begin(), c.v.plain.end());
         c.plain = plain;
     }
@@ -886,9 +916,21 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         c.mut_rva = gate_rva + glen;          // govde kapiya bitisik
         cur += glen + (u32)c.mut.code.size();
     }
+    // --- 0.8.1: sifreli string kopyalari (M-blok/bc/stub SONRASI, state ONCESI;
+    //     M-bolge cakisma korumasi: kopya alani hicbir kod bloguyla paylasmaz) ---
+    {
+        u32 sc = (cur + 7) & ~7u;
+        for (auto& s : encstr) {
+            str_copy[s.rva] = newva_guess + sc;
+            sc += (s.len + 7) & ~7u;          // kopya basina 8 bayt hizali
+        }
+        cur = sc;
+    }
     u32 state_off = cur;
-    u32 nstate = 0;
-    for (auto& c : comps) nstate += (u32)c.state_sites.size();
+    u32 nstate = (u32)encstr.size();          // 0.8.1: state KOPYA basina PAYLASILIR
+                                              // (eski: site basina — ayni stringi
+                                              // kullanan 2. fonksiyon TEKRAR
+                                              // cozecek ve stringi bozacakti)
     // 0.5.0: IAT cache hucreleri (thunk basina isaretci genisligi)
     u32 psz = pe.is64 ? 8 : 4;
     u32 cache_off = state_off + nstate;
@@ -896,14 +938,34 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     for (size_t q = 0; q < thunk_slots.size(); q++)
         cache_rvas.push_back(newva_guess + cache_off + (u32)q * psz);
 
-    // --- state RVA'larini plain'e yaz ---
-    u32 state_idx = 0;
+    // --- 0.8.1 yamalari: strRva(kopya) + state RVA + bytecode .rdata ref siteleri ---
     for (auto& c : comps) {
+        if (c.ty == 1) continue;              // M: plain yok
+        // (a) STRDEC strRva -> sifreli kopya RVA
+        for (auto& ds : c.dec_sites) {
+            auto it2 = str_copy.find(ds.second);
+            if (it2 == str_copy.end()) continue;   // kopya yoksa yerinde kalsin (plain)
+            u32 cs = it2->second;
+            u32 at = ds.first;
+            for (int k = 0; k < 4; k++) c.plain[at + k] = (u8)(cs >> (8 * k));
+        }
+        // (b) state RVA -> kopyanin PAYLASILAN state byte'i
         for (size_t i = 0; i < c.state_sites.size(); i++) {
-            u32 stva = newva_guess + state_off + state_idx;
+            u32 stva = newva_guess + state_off + str_state_idx[c.state_strva[i]];
             u32 at = c.state_sites[i];
             for (int k = 0; k < 4; k++) c.plain[at + k] = (u8)(stva >> (8 * k));
-            state_idx++;
+        }
+        // (c) lifter .rdata ref siteleri -> kopyaya yonlendir (string-ici delta korunur;
+        //     string disi .rdata verisi — tablo vb — DOKUNULMAZ)
+        for (auto& st2 : c.v.str_sites) {
+            const RStr* sp = 0;
+            for (auto& s2 : encstr)
+                if (st2.second >= s2.rva && st2.second < s2.rva + s2.len) { sp = &s2; break; }
+            if (!sp) continue;
+            u32 cs = str_copy[sp->rva] + (st2.second - sp->rva);
+            u32 at = st2.first + c.prefix_len;
+            if ((u64)at + 4 > c.plain.size()) continue;
+            for (int k = 0; k < 4; k++) c.plain[at + k] = (u8)(cs >> (8 * k));
         }
     }
 
@@ -940,6 +1002,18 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     }
     while (secimg.size() < (size_t)state_off - (nstate ? 0 : 0)) secimg.push_back(0);
     secimg.resize(cache_off + (u32)thunk_slots.size() * psz, 0);
+    // --- 0.8.1: sifreli string kopyalari DISKTE (STRDEC ilk erisimde yerinde
+    //     cozer; keystream = (u8)(k2 + i*31) — vm_core OP_STRDEC ile birebir) ---
+    for (auto& s : encstr) {
+        u32 cs = str_copy[s.rva];
+        u32 k2 = (s.rva * 2654435761u) | 1u;
+        u32 so = cs - newva_guess;
+        bool oko = false;
+        u32 praw = pe.rva2raw(s.rva, &oko);
+        if (!oko || (u64)praw + s.len > pe.buf.size()) continue;
+        for (u32 i = 0; i < s.len; i++)
+            secimg[so + i] = (u8)(pe.buf[praw + i] ^ (u8)(k2 + i * 31));
+    }
     // 0.7.0: LSD (lisans sedeti) — cfg'nin hemen sonrasi
     if (lsd_area) {
         size_t lsd_off = (size_t)(lsd_rva - newva_guess);
@@ -1230,7 +1304,10 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     }
 
     // --- secenek bayraklari ---
-    if ((opt.memprot && text) || (opt.strenc && rdata)) {
+    // 0.8.1 NOT: .rdata artik YAZILABILIR yapilmaz — strenc kopyalari .vmp0
+    // icinde cozulur, orijinal .rdata'ya runtime yazma YOKTU. Read-only
+    // kalmasi korumayi guclendirir (eski in-place cozum flag'i kaldirildi).
+    if (opt.memprot && text) {
         u32 fh = pe.e_lfanew + 4;
         u16 optsize = 0; memcpy(&optsize, &pe.buf[fh + 16], 2);
         u32 sh = fh + 20 + optsize;
@@ -1241,12 +1318,6 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                 u32 ch = text->chars & ~0x80000000u;   // WRITE kaldir -> EXECUTE_READ
                 memcpy(&pe.buf[o + 36], &ch, 4);
                 snprintf(b, sizeof b, "[MEMPROT] .text Chars=0x%08X (yazilamaz)", ch);
-                L(b);
-            }
-            if (opt.strenc && strcmp(nm, ".rdata") == 0) {
-                u32 ch = rdata->chars | 0x80000000u;   // cozum icin yazma
-                memcpy(&pe.buf[o + 36], &ch, 4);
-                snprintf(b, sizeof b, "[STRENC] .rdata Chars=0x%08X (yazilabilir)", ch);
                 L(b);
             }
         }

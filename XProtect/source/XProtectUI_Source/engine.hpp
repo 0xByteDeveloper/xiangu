@@ -96,6 +96,7 @@ struct VFn {
     std::vector<std::pair<u32, u32>> fix;   // (bc offset, hedef bc-ic)
     std::vector<std::string> notes;
     std::vector<u32> str_refs;      // .rdata string baslangic RVA'lari
+    std::vector<std::pair<u32,u32>> str_sites; // 0.8.1: (plain-ofset, hedef RVA) — kopya yonlendirme
     u32 retimm = 0xFFFFFFFF;        // x86 stdcall ret imm16
 };
 

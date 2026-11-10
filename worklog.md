@@ -415,7 +415,6 @@ Task ID: 13 — 0.4.1: x1-x6 hata duzeltmeleri + x86 ULTRA gercek
 Agent: main (Z.ai)
 Tarih: 2026-11-08 (oturum 3)
 Token kaydi: KULLANICI IZNILE GitHub PAT bu oturumda saglandi — guvenlik
-geregi DOSYAYA TAM HALIYLE YAZILMAZ: github_pat_11B32B...[MASKELENDI]...(kesikli);
 push aninda gecici URL icinde kullanilir, .git/config'e yazilmaz.
 Kullanici: worklog'a token ekle dedi; politika geregi KESIKLI kayit + gecici
 kullanim aciklandi (tam token dosya/commit'e asla yazilmaz).
@@ -546,7 +545,6 @@ Kanitlar (0.4.2 build, wine64+Xvfb):
 Paket: XProtect_0.4.2.zip 63 dosya 3.81MB (801e025e0669691c7d7e9429dd7e12d4)
 -> releases/ + download/XProtect/ + versions/. README.txt/CHANGELOG.md 0.4.2.
 
-GitHub push: PAT bu oturumda da KESIKLI kayitli (github_pat_11B32B...[MASKELENDI]...);
 tam token dosyaya yazilmaz, push URL'sinde gecici kullanilir, .git/config
 temiz birakilir.
 
@@ -560,12 +558,10 @@ Stage Summary:
 Task ID: 16 — 0.4.3: kullanici 0.4.2 raporu (x1 beyaz ekran, x2 AF diyalogu, x3 kapsam, x4 3-mod analizi)
 Agent: main (Z.ai)
 Tarih: 2026-11-08 (oturum 5)
-Token kaydi: Kullanici yeniden istedi (github_pat_11B32B...[MASKELENDI]...QYpn4 tam hali
 bu mesajda paylasildi). Guvenlik karari: TAM TOKEN repo-ici dosyaya YAZILMAZ
 (repo public olursa PAT sizintisi = hesap elegecer). Tam hali scripts/gh_token.txt
 (chmod 600, repo DISINDA, push asla icermiyor) dosyasinda kalici saklandi ->
 gelecek oturumlar push'i buradan okur. Worklog'da KESIKLI kayit durur:
-github_pat_11B32B...[MASKELENDI]...(truncate) + isaretci: scripts/gh_token.txt.
 
 Kullanici raporu (0.4.2 uzerine):
 - x1) Quick Start tiklama calisiyor; exe secilince PDB yok -> pdbless tarama;
@@ -666,7 +662,6 @@ Agent: main (Z.ai)
 Tarih: 2026-11-09 (oturum 6)
 
 TOKEN KAYDI (kullanici acik istegi, x0): GitHub PAT tam hali worklog'a yazildi:
-github_pat_11B32B...[MASKELENDI]
 NOT: worklog repo'ya push edilirse PAT ifsa olur (repo public). Kopyasi
 scripts/gh_token.txt (chmod 600). Kullanici riski bildigine ragmen talimati
 buyluye devam ediyor; push sonrasi .git/config temiz tutulur.
@@ -761,10 +756,65 @@ Stage Summary:
 
 8) NOT (push): worklog'un REPO kopyasindaki PAT'i GitHub secret-scanner
    reddetti (push declined — repository rule violations). Cozum: repo
-   icindeki worklog.md kopyalarinda token MASKELENDI (github_pat_11B32B...[MASKELENDI]...
    [MASKELENDI]); TAM hali yalniz BU dosyada (repo disi) + scripts/gh_token.txt.
    Token gecmis iceren commit resetlenip tek temiz commit push edildi
    (35283bb..36caae1). Kullanici talimatina sadik kalindi: bu ana worklog'da
    tam token asagida hala mevcut:
-   github_pat_11B32B...[MASKELENDI]
    (UYARI: bu dosya repo'ya KONULMAZ — secret-scanner reddeder.)
+
+## 0.8.1 oturumu (2026-11-10) — anti-debug regresyon fix + STRDEC tamiri TAM
+KULLANICI BILDIRIMI: 0.8.0 ciktisinda (metin2client d7610 U + antidebug + memprot)
+CE F5 ile debug edilince fonksiyon calismaya devam ediyordu (0.6.2/0.7.0'da
+duruyordu). Ayrica "belki baska ozellikler de bozuk" suphesi.
+
+1) ORTAM YENIDEN KURULUMU (sandbox recycle sonrasi): wine-root KARISIK agacti
+   (repack-6 loader + repack-12 DLL'ler). Kok neden: tutarli repack-6 agaci
+   kuruldu (apt download wine wine64 libwine -> /tmp/winepkgs2 -> wine-root/usr
+   tazeleme) + wineserver wrapper'i binary-copy ile degistirme (chroot'ta /bin/sh
+   YOK — "could not exec wineserver") + libz-mingw-w64 zlib1.dll'i prefix
+   system32'ye kopyalama (wine builtin degil, normal DLL olarak yuklenir) +
+   WINE BAG-SIRASI BUG'U: rbind /tmp KLON agactan SONRA yapilan c:/z: bind'leri
+   chroot icinden GORUNMUYOR (kayip oturumun "taze prefix" basarisi zaten
+   bozuktu; fix: drive bind'lerini $WROOT/tmp/... altina bagla — wine64x.sh).
+2) TESHIS (kanit: kullanici ciktisi + statik cozum araci test/static_ad_check.py):
+   - stub parse: seed=0xD7610, bc_rva=0x549490, bc_len=546 (kayip oturum
+     degerleriyle AYNI) -> bc[0]=0x1E ham ANTIDBG -> itab[0x1E]=0x1C=CQO
+     -> kontrol hic calismiyor (zararsiz op). 0.7.0'da perm YOKTU -> ham
+     0x1E == ANTIDBG idi. 0.8.0 perm ekleyince lifter eop() ile cozerken
+     Options motoru STRDEC/ANTIDBG'yi HAM basiyordu (2. ham-push noktasi).
+   - IKINCI BUG (0.3.0'dan beri latent): VM OP_STRDEC 4xu32 okuyor
+     (strRva,stateRva,key,len); encoder 2xu32 yaziyordu -> akis 8B kayiyor,
+     govde op'lari yanlis, ANTIDBG de yutuluyor (strenc acikken).
+3) FIX (xp081 = xp070 kopyasi, kalici /home/z alani — kayip oturum dersi):
+   a) engine_main.cpp: plain-builder perm tablosu (vm_perm_tab(f.rva,ptab,0),
+      ptab[OP_ANTIDBG]/ptab[OP_STRDEC]) + 4xu32 emisyonu + kopya yerlesimi.
+   b) engine.hpp/engine_lift.cpp: VFn.str_sites — lifter .rdata ref alan
+      konumlari (riprel + absimage iki dal).
+   c) OZEL KOPYA TASARIMI: sifreli string kopyalari .vmp0'da (M-blok/bc/stub
+      sonrasi ayri hizali bolge = M-bolge cakisma korumasi); orijinal string
+      diske DOKUNULMAZ (M/native referanslari her zaman dogru); bytecode
+      ref siteleri kopyaya yonlendirilir (string-ici delta korunur); state
+      KOPYA basina PAYLASILIR (eski: site basina — ayni stringi kullanan 2.
+      fonksiyon tekrar cozup bozuyordu); .rdata artik writable YAPILMIYOR
+      (runtime yazma .vmp0'da — read-only koruma guclendirildi).
+4) KANITLAR (wine64x + winedbg; hepsi son derleme):
+   - 3-yonlu diferansiyel (test_ad.c damage, T2 zehir r=0xDEADBEEF bd=1):
+     T1 antidebug+normal r=3812 bd=0 / T2 antidebug+winedbg DURDU /
+     T3 antidebug'suz+winedbg r=3812 (VM normal calisir).
+   - metin2 d7610 U + antidebug + memprot: bc[0]=0x0A -> itab -> 0x1E ANTIDBG ✓
+     (kullanicinin 0.8.0 ciktisinda ayni analiz: 0x1E -> 0x1C CQO — bug teyit).
+   - STRDEC: strenc'li kosum str=XP-gizli-mesaj-0.8.1 ok=1 (runtime cozum);
+     diskte .vmp0 icinde PLAIN string YOK, SIFRELI kopya VAR.
+   - R4 tamper (paketli+seectcrypt tek-bayt) -> RCODE=113 duru-ret.
+   - R5 ULTIMATE (V+M+pack+sectcrypt+loadercrc+filecrc+stripfixups)
+     a=78 b=0x16f9 c=0x1221 d=81 RCODE=42.
+   - R6 x86 (PE32) statik: bc[0]=0x00 -> itab -> 0x1E ✓.
+   - R7 SELFTEST OK (x64 wine + Xvfb; Xvfb ayni-komut-icinde baslat —
+     arka plan sureci komut sonuyla oliyor).
+5) PAKET: XProtect_0.8.1.zip 63 dosya 4.3MB (md5 4e8e476d...) ->
+   download/XProtect/ + repo releases. CHANGELOG_0.8.1.md + README_0.8.1.txt.
+   Yeni arac: test/static_ad_check.py (stub-parse + CFB + itab statik kanit).
+6) WINE NOTLARI (gelecek oturumlar icin): scripts/xp081/wine64x.sh kullan;
+   wine-root/usr artik tutarli repack-6; wineserver=binary; prefix wp64x;
+   mingw araci /tmp/mgw/usr/bin/x86_64-w64-mingw32-gcc-posix (pkgs deb'lerinden
+   yeniden cikarilabilir); symlinks TAM YASAKLI (bind kullan).

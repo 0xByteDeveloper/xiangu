@@ -10,6 +10,7 @@ struct Lift {
     std::vector<u8>& bc;
     std::vector<std::pair<u32, u32>>& fix;
     std::vector<u32>& str_refs;
+    std::vector<std::pair<u32, u32>>& str_sites;   // 0.8.1: .rdata ref alan konumlari
     bool is64;
     u64 imagebase;
     u32 rdata_rva, rdata_size;
@@ -26,7 +27,10 @@ struct Lift {
     void emem(const MemOp& m, const Insn& I) {
         if (m.riprel) {
             u32 tgt = I.pc + I.len + (u32)(long long)m.disp;
-            e(MEMF_DISP); e32(tgt);
+            e(MEMF_DISP);
+            if (tgt >= rdata_rva && tgt < rdata_rva + rdata_size)
+                str_sites.push_back({(u32)bc.size(), tgt});  // 0.8.1: alan konumu kaydet
+            e32(tgt);
             if (tgt >= rdata_rva && tgt < rdata_rva + rdata_size) str_refs.push_back(tgt);
             return;
         }
@@ -40,9 +44,14 @@ struct Lift {
                 e((u8)SIB_NOBASE);
                 e((u8)m.idx);
                 e((u8)m.scale);
+                if (rva >= rdata_rva && rva < rdata_rva + rdata_size)
+                    str_sites.push_back({(u32)bc.size(), (u32)rva});  // 0.8.1
                 e32((u32)rva);
             } else {
-                e(MEMF_DISP); e32((u32)rva);
+                e(MEMF_DISP);
+                if (rva >= rdata_rva && rva < rdata_rva + rdata_size)
+                    str_sites.push_back({(u32)bc.size(), (u32)rva});  // 0.8.1
+                e32((u32)rva);
             }
             if (rva >= rdata_rva && rva < rdata_rva + rdata_size) str_refs.push_back((u32)rva);
             return;
@@ -103,7 +112,7 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                   bool pad_terminates, bool region_mode, u32 perm_seed) {
     VFn F; F.rva = rva; F.size = size;
 
-    Lift L{ F.plain, F.fix, F.str_refs, is64, imagebase, rdata_rva, rdata_size };
+    Lift L{ F.plain, F.fix, F.str_refs, F.str_sites, is64, imagebase, rdata_rva, rdata_size };
     // 0.8.0 polimorfik isleyiciler: fonksiyon-bazina opcode permütasyonu
     unsigned char ptab[VM_OPN];
     if (perm_seed) { vm_perm_tab(perm_seed, ptab, 0); L.perm = ptab; }
