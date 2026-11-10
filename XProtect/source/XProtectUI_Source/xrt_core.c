@@ -44,7 +44,11 @@ typedef unsigned long long u64;
 #define XCFG_OFF_CKSUM   0x38
 #define XCFG_OFF_CFGRVA  0x3C
 #define XCFG_OFF_PACKRVA 0x40   // 0.6.0: XPK1 paket bilgi blok RVA (.vmp1)
-#define XCFG_SIZE        0x48
+#define XCFG_OFF_UNWRVA  0x44   // 0.8.0: dinamik unwind tablo RVA (.vmp0 icinde)
+#define XCFG_OFF_UNWCNT  0x48   // 0.8.0: dinamik unwind kayit sayisi
+// 0.8.0 SectionCryptor alanlari (xr_cipher.h ile ayni): flag 0x4C, anahtar 0x50/0x58
+#define XCFG_SIZE        0x60
+#include "xr_cipher.h"
 
 #define XFLAG_SELFCRC 0x01
 #define XFLAG_TEXTCRC 0x02
@@ -96,6 +100,8 @@ static u32 fnv_w(const u16* s, u32 n) {
 #define XH_VIRTUALALLOC  0x03285501u   // "VirtualAlloc"
 #define XH_VIRTUALFREE   0x3A9ACC72u   // "VirtualFree"
 #define XH_VIRTUALPROTECT 0x820621F3u  // "VirtualProtect"
+#define XH_NTDLL          0xA62A3B3Bu  // "ntdll.dll" (wide, kucuk-harf)
+#define XH_RTLADDFT       0x38791528u  // "RtlAddFunctionTable"
 
 // volatile 4-karakter yazisi — GCC bunlari memcpy'ye cevireMEZ (PIC guvenli)
 #define VP4(d, off, w) do { \
@@ -454,6 +460,23 @@ u32 xrt_entry(void* cfgp) {
         return 0;
     }
 
+    /* 0.8.0 SEH: dinamik unwind kaydi — dd[3]'e dokunmuyoruz (wine'da
+       repoint istisna dagitimini bozuyor; olculu). .vmp0'daki tabloyu
+       ntdll!RtlAddFunctionTable ile BIR KEZ kaydet (JIT modeli).
+       CRC kontrolerinden ONCE: CRC patlasa bile kayitli kalsin. */
+    {
+        u32 urva = ld32(cfg + XCFG_OFF_UNWRVA);
+        u32 ucnt = ld32(cfg + XCFG_OFF_UNWCNT);
+        if (urva && ucnt) {
+            u64 nt = peb_module(XH_NTDLL);
+            if (nt) {
+                u64 raft = find_export(nt, XH_RTLADDFT);
+                if (raft) api3(raft, (u64)(unsigned long)(base + urva),
+                               (u64)ucnt, (u64)(unsigned long)base);
+            }
+        }
+    }
+
     // --- SELF CRC ---
     if ((flags & XFLAG_SELFCRC) && !err) {
         u32 sr = ld32(cfg + XCFG_OFF_SELFRVA);
@@ -561,6 +584,9 @@ u64 xrt_resolve(u32 dllhash, u32 namehash, u64 fallback_abs) {
 // Donus: 0 = tamam; 5 = acma hatasi (rt_fatal cagirildi)
 // ============================================================
 #define XPK_MAGIC 0x31504B58u   // 'XPK1'
+// 0.8.0: kayit 12B -> 16B: {src_rva, dst_rva, dst_size, src_size}
+#define XPK_REC_SZ      16
+#define XPK_MAX_STREAM  0x08000000u   // tek akis icin saglam ust sinir (128MB)
 
 #include "lzma/LzmaDecode.cc"   /* C olarak derlenir — statik veri yok (PIC kapisi) */
 
@@ -587,7 +613,20 @@ u32 xrt_unpack(void* cfgp) {
     if (ld32(pk) != XPK_MAGIC) { rt_fatal(k32, 7, flags); return 7; }
     u32 count = ld32(pk + 4);
     u32 props_rva = ld32(pk + 8);
+    u32 xcflag = ld32(pk + XRC_HDR_FLAG);      // 0.8.0: 1 = akislar sifreli
     if (!count || count > 64 || !props_rva) { rt_fatal(k32, 8, flags); return 8; }
+
+    // --- 0.8.0 SectionCryptor: anahtar cozumu (cfg'den maskeli okuma) ---
+    u64 ck0 = 0, ck1 = 0;
+    if (xcflag == 1 && ld32(cfg + XRC_CFG_FLAG) == 1) {
+        u64 m = XRC_KEYMASK(ld32(cfg + XCFG_OFF_CFGRVA));
+        ck0 = (u64)ld32(cfg + XRC_CFG_KEY0) | ((u64)ld32(cfg + XRC_CFG_KEY0 + 4) << 32);
+        ck1 = (u64)ld32(cfg + XRC_CFG_KEY1) | ((u64)ld32(cfg + XRC_CFG_KEY1 + 4) << 32);
+        ck0 ^= m; ck1 ^= m;
+        if (!ck0 && !ck1) { rt_fatal(k32, 11, flags); return 11; }  // anahtar yok
+    } else if (xcflag) {
+        xcflag = 0;                                // bilinmeyen flag — sifresiz dene
+    }
 
     CLzmaDecoderState st;
     if (LzmaDecodeProperties(&st.Properties, base + props_rva, LZMA_PROPERTIES_SIZE)
@@ -600,11 +639,17 @@ u32 xrt_unpack(void* cfgp) {
 
     u32 bad = 0;
     u32 rec = packrva + 16;
-    for (u32 i = 0; i < count; i++, rec += 12) {
+    for (u32 i = 0; i < count; i++, rec += XPK_REC_SZ) {
         u32 src = ld32(base + rec);
         u32 dst = ld32(base + rec + 4);
         u32 dsz = ld32(base + rec + 8);
+        u32 ssz = ld32(base + rec + 12);        // 0.8.0: sikistirilmis akis uzunlugu
         if (!src || !dst || !dsz || dst > 0xFFFF0000u) { bad = 1; break; }
+        if (!ssz || ssz > XPK_MAX_STREAM) { bad = 5; break; }
+        // 0.8.0 SectionCryptor: .vmp1 RWX mapli — yerinde CFB cozumu
+        if (xcflag == 1)
+            xr_cfb(ck0, ck1, XRC_NONCE(ck0, dst),
+                   (unsigned char*)(unsigned long)(base + src), ssz, 1 /*coz*/);
         u64 tmp = api4(f_alloc, 0, (u64)dsz, 0x3000u, 0x04u /*PAGE_READWRITE*/);
         if (!tmp) { bad = 2; break; }
         SizeT sp = 0, dp = 0;
@@ -629,7 +674,8 @@ u32 xrt_unpack(void* cfgp) {
         if (bad) break;
     }
     api3(f_free, (u64)(unsigned long)st.Probs, 0, 0x8000u);
-    if (bad) { rt_fatal(k32, 5, flags); return bad; }   /* 5+kod: 1=rec 2=alloc 3=decode 4=protect */
+    /* 5+kod: 1=rec 2=alloc 3=decode 4=protect 5=akis-uzunluk 11=anahtar */
+    if (bad) { rt_fatal(k32, 5, flags); return bad; }
     return 0;
 }
 

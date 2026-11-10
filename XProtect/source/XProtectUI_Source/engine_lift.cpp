@@ -15,6 +15,9 @@ struct Lift {
     u32 rdata_rva, rdata_size;
 
     void e(u8 x) { bc.push_back(x); }
+    // 0.8.0 polimorfik: komut opcode'u emit'i (gercel -> permüteli)
+    const unsigned char* perm = 0;   // gercek->raw tablosu (VM_OPN)
+    void eop(int op) { e(perm ? perm[op] : (u8)op); }
     void e32(u32 v) { for (int k = 0; k < 4; k++) bc.push_back((u8)(v >> (8 * k))); }
     void e64(u64 v) { for (int k = 0; k < 8; k++) bc.push_back((u8)(v >> (8 * k))); }
     void ereg(int r) { e((u8)r); }
@@ -97,10 +100,13 @@ struct Lift {
 VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                   u64 imagebase, u32 imagesize, bool allow_call,
                   u32 rdata_rva, u32 rdata_size, int junk_level, u32 junk_seed,
-                  bool pad_terminates, bool region_mode) {
+                  bool pad_terminates, bool region_mode, u32 perm_seed) {
     VFn F; F.rva = rva; F.size = size;
 
     Lift L{ F.plain, F.fix, F.str_refs, is64, imagebase, rdata_rva, rdata_size };
+    // 0.8.0 polimorfik isleyiciler: fonksiyon-bazina opcode permütasyonu
+    unsigned char ptab[VM_OPN];
+    if (perm_seed) { vm_perm_tab(perm_seed, ptab, 0); L.perm = ptab; }
 
     // mutation junk ureteci (deterministik LCG)
     u32 rng = junk_seed ? junk_seed : 0x12345678u;
@@ -110,15 +116,15 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
         u32 roll = rnd() & 7;
         if (roll < 3) {
             int n = 1 + (int)(rnd() & 3);
-            for (int k = 0; k < n; k++) L.e(OP_NOP);
+            for (int k = 0; k < n; k++) L.eop(OP_NOP);
         } else if (roll == 4) {
             // reg kaydet, junk it, ez, geri yukle (net sifir etki)
             // x64: R11(11) volatile; x86: ECX(1) volatile
             int r = is64 ? 11 : 1;
-            L.e(OP_PUSH_R); L.e((u8)r);
-            L.e(OP_PUSH_I); L.e32(rnd() | 1u);
-            L.e(OP_POP_R);  L.e((u8)r);
-            L.e(OP_POP_R);  L.e((u8)r);
+            L.eop(OP_PUSH_R); L.e((u8)r);
+            L.eop(OP_PUSH_I); L.e32(rnd() | 1u);
+            L.eop(OP_POP_R);  L.e((u8)r);
+            L.eop(OP_POP_R);  L.e((u8)r);
         }
     };
 
@@ -190,78 +196,91 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
 
         switch (I.op) {
         case XP_NOP: break;
-        case XP_PUSH_R: L.e(OP_PUSH_R); L.ereg(I.r1);
+        case XP_PUSH_R: L.eop(OP_PUSH_R); L.ereg(I.r1);
             snprintf(buf, sizeof buf, "push %s", regname(is64, I.r1)); break;
-        case XP_POP_R: L.e(OP_POP_R); L.ereg(I.r1);
+        case XP_POP_R: L.eop(OP_POP_R); L.ereg(I.r1);
             snprintf(buf, sizeof buf, "pop %s", regname(is64, I.r1)); break;
-        case XP_PUSH_I: L.e(OP_PUSH_I); L.e32((u32)(long long)I.imm);
+        case XP_PUSH_I: L.eop(OP_PUSH_I); L.e32((u32)(long long)I.imm);
             snprintf(buf, sizeof buf, "push 0x%llx", (unsigned long long)I.imm); break;
         case XP_MOV_MR:
             if (!I.mem.present) {   // reg <- reg  (mov r/m,r mod3)
-                L.e(OP_MOV_RR); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
+                L.eop(OP_MOV_RR); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
                 snprintf(buf, sizeof buf, "mov %s, %s (sz%d)", regname(is64, I.r1), regname(is64, I.r2), I.sz);
             } else {
-                L.e(OP_MOV_MR); L.e((u8)I.sz); L.emem(I.mem, I); L.ereg(I.r1);
+                L.eop(OP_MOV_MR); L.e((u8)I.sz); L.emem(I.mem, I); L.ereg(I.r1);
                 snprintf(buf, sizeof buf, "mov [mem], %s (sz%d)", regname(is64, I.r1), I.sz);
             }
             break;
         case XP_MOV_RM:
             if (!I.mem.present) {   // reg <- reg  (mov r,r/m mod3)
-                L.e(OP_MOV_RR); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
+                L.eop(OP_MOV_RR); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
                 snprintf(buf, sizeof buf, "mov %s, %s (sz%d)", regname(is64, I.r1), regname(is64, I.r2), I.sz);
             } else {
-                L.e(OP_MOV_RM); L.e((u8)I.sz); L.ereg(I.r1); L.emem(I.mem, I);
+                L.eop(OP_MOV_RM); L.e((u8)I.sz); L.ereg(I.r1); L.emem(I.mem, I);
                 snprintf(buf, sizeof buf, "mov %s, [mem] (sz%d)", regname(is64, I.r1), I.sz);
             }
             break;
-        case XP_MOV_MI: L.e(OP_MOV_MI); L.e((u8)I.sz); L.emem(I.mem, I); L.e32((u32)(long long)I.imm);
+        case XP_MOV_MI: L.eop(OP_MOV_MI); L.e((u8)I.sz); L.emem(I.mem, I); L.e32((u32)(long long)I.imm);
             snprintf(buf, sizeof buf, "mov [mem], imm%d=0x%llx", I.sz * 8, (unsigned long long)I.imm); break;
-        case XP_MOV_RI: L.e(OP_MOV_RI); L.e((u8)I.sz); L.ereg(I.r1); L.e32((u32)(long long)I.imm);
+        case XP_MOV_RI: L.eop(OP_MOV_RI); L.e((u8)I.sz); L.ereg(I.r1); L.e32((u32)(long long)I.imm);
             snprintf(buf, sizeof buf, "mov %s, imm=0x%llx", regname(is64, I.r1), (unsigned long long)I.imm); break;
-        case XP_MOV_RI64: L.e(OP_MOV_RI64); L.ereg(I.r1); L.e64(I.imm);
+        case XP_MOV_RI64: L.eop(OP_MOV_RI64); L.ereg(I.r1); L.e64(I.imm);
             snprintf(buf, sizeof buf, "movabs %s, 0x%llx", regname(is64, I.r1), (unsigned long long)I.imm); break;
-        case XP_LEA: L.e(OP_LEA_RM); L.ereg(I.r1); L.emem(I.mem, I);
+        case XP_LEA: L.eop(OP_LEA_RM); L.ereg(I.r1); L.emem(I.mem, I);
             snprintf(buf, sizeof buf, "lea %s, [mem]", regname(is64, I.r1)); break;
         case XP_ALU: {
             // yon: engine_disasm XP_ALU üretiminde mem.present ise r2 == -2/-3 isareti
             if (I.immsz > 0) {
-                if (I.mem.present) { L.e(OP_ALU_MI); L.e((u8)I.alu); L.e((u8)I.sz); L.emem(I.mem, I); L.e32((u32)(long long)I.imm); }
-                else { L.e(OP_ALU_RI); L.e((u8)I.alu); L.e((u8)I.sz); L.ereg(I.r1); L.e32((u32)(long long)I.imm); }
+                if (I.mem.present) { L.eop(OP_ALU_MI); L.e((u8)I.alu); L.e((u8)I.sz); L.emem(I.mem, I); L.e32((u32)(long long)I.imm); }
+                else { L.eop(OP_ALU_RI); L.e((u8)I.alu); L.e((u8)I.sz); L.ereg(I.r1); L.e32((u32)(long long)I.imm); }
             } else if (I.mem.present) {
-                if (I.r2 == -2) { L.e(OP_ALU_MR); L.e((u8)I.alu); L.e((u8)I.sz); L.emem(I.mem, I); L.ereg(I.r1); }
-                else { L.e(OP_ALU_RM); L.e((u8)I.alu); L.e((u8)I.sz); L.ereg(I.r1); L.emem(I.mem, I); }
+                if (I.r2 == -2) { L.eop(OP_ALU_MR); L.e((u8)I.alu); L.e((u8)I.sz); L.emem(I.mem, I); L.ereg(I.r1); }
+                else { L.eop(OP_ALU_RM); L.e((u8)I.alu); L.e((u8)I.sz); L.ereg(I.r1); L.emem(I.mem, I); }
             } else {
-                L.e(OP_ALU_RR); L.e((u8)I.alu); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
+                L.eop(OP_ALU_RR); L.e((u8)I.alu); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
             }
             snprintf(buf, sizeof buf, "alu%d (sz%d)", I.alu, I.sz); break;
         }
+        case XP_XCHG:
+            if (I.r1 < 0 || I.r2 < 0) { F.why = "xchg form"; return F; }
+            L.eop(OP_XCHG_RR); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
+            snprintf(buf, sizeof buf, "xchg %s, %s", regname(is64, I.r1), regname(is64, I.r2));
+            break;
+        case XP_BSWAP:
+            L.eop(OP_BSWAP_R); L.e((u8)I.sz); L.ereg(I.r1);
+            snprintf(buf, sizeof buf, "bswap %s", regname(is64, I.r1));
+            break;
         case XP_SHIFT: {
             if (I.mem.present) {
-                if (I.immsz == -1) { L.e(OP_SHI_RM_CL); L.e((u8)I.shi); L.e((u8)I.sz); L.emem(I.mem, I); snprintf(buf, sizeof buf, "shift[mem]%%cl"); }
-                else { L.e(OP_SHI_RM_RI); L.e((u8)I.shi); L.e((u8)I.sz); L.emem(I.mem, I); L.e((u8)I.imm); snprintf(buf, sizeof buf, "shift[mem] %d", (int)I.imm); }
+                if (I.immsz == -1) { L.eop(OP_SHI_RM_CL); L.e((u8)I.shi); L.e((u8)I.sz); L.emem(I.mem, I); snprintf(buf, sizeof buf, "shift[mem]%%cl"); }
+                else { L.eop(OP_SHI_RM_RI); L.e((u8)I.shi); L.e((u8)I.sz); L.emem(I.mem, I); L.e((u8)I.imm); snprintf(buf, sizeof buf, "shift[mem] %d", (int)I.imm); }
                 break;
             }
-            if (I.immsz == -1) { L.e(OP_SHI_CL); L.e((u8)I.shi); L.e((u8)I.sz); L.ereg(I.r1); snprintf(buf, sizeof buf, "shift%%cl"); }
-            else { L.e(OP_SHI_RI); L.e((u8)I.shi); L.e((u8)I.sz); L.ereg(I.r1); L.e((u8)I.imm); snprintf(buf, sizeof buf, "shift %d", (int)I.imm); }
+            if (I.immsz == -1) { L.eop(OP_SHI_CL); L.e((u8)I.shi); L.e((u8)I.sz); L.ereg(I.r1); snprintf(buf, sizeof buf, "shift%%cl"); }
+            else { L.eop(OP_SHI_RI); L.e((u8)I.shi); L.e((u8)I.sz); L.ereg(I.r1); L.e((u8)I.imm); snprintf(buf, sizeof buf, "shift %d", (int)I.imm); }
             break;
         }
         case XP_IMUL_RRI:
             if (I.mem.present) {
-                L.e(OP_IMUL_RMRI); L.e((u8)I.sz); L.ereg(I.r1); L.emem(I.mem, I); L.e32((u32)(long long)I.imm);
+                L.eop(OP_IMUL_RMRI); L.e((u8)I.sz); L.ereg(I.r1); L.emem(I.mem, I); L.e32((u32)(long long)I.imm);
                 snprintf(buf, sizeof buf, "imul %s, [mem], 0x%llx", regname(is64, I.r1), (unsigned long long)I.imm);
             } else {
-                L.e(OP_IMUL_RRI); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2); L.e32((u32)(long long)I.imm);
+                L.eop(OP_IMUL_RRI); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2); L.e32((u32)(long long)I.imm);
                 snprintf(buf, sizeof buf, "imul %s, %s, 0x%llx", regname(is64, I.r1), regname(is64, I.r2), (unsigned long long)I.imm);
             }
             break;
-        case XP_IMUL_RR: L.e(OP_IMUL_RR); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
+        case XP_IMUL_RR: L.eop(OP_IMUL_RR); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
             snprintf(buf, sizeof buf, "imul %s, %s", regname(is64, I.r1), regname(is64, I.r2)); break;
-        case XP_INCDEC_R: L.e(OP_INCDEC_R); L.e((u8)I.ud); L.e((u8)I.sz); L.ereg(I.r1);
+        case XP_INCDEC_R: L.eop(OP_INCDEC_R); L.e((u8)I.ud); L.e((u8)I.sz); L.ereg(I.r1);
             snprintf(buf, sizeof buf, "%s %s", I.ud ? "dec" : "inc", regname(is64, I.r1)); break;
-        case XP_INCDEC_M: L.e(OP_INCDEC_M); L.e((u8)I.ud); L.e((u8)I.sz); L.emem(I.mem, I);
+        case XP_INCDEC_M: L.eop(OP_INCDEC_M); L.e((u8)I.ud); L.e((u8)I.sz); L.emem(I.mem, I);
             snprintf(buf, sizeof buf, "%s [mem]", I.ud ? "dec" : "inc"); break;
         case XP_MOVZX: case XP_MOVSX: {
-            L.e(I.op == XP_MOVZX ? OP_MOVZX : OP_MOVSX);
+            /* 0.8.0 KRITIK FIX: e() DEGIL eop() — ham op bayti perm
+               tablosunu atlardı; interpreter itab[0x13]=IDIV_R cozer,
+               akis desync olur, itab OOB okuma -> wild write (sdk_ext
+               kanit bug'i: movzx/movsx iceren her V bolgesi). */
+            L.eop(I.op == XP_MOVZX ? OP_MOVZX : OP_MOVSX);
             L.e((u8)I.sz); L.e((u8)I.immsz); L.ereg(I.r1);
             if (I.mem.present) { L.e((u8)1); L.emem(I.mem, I); }
             else { L.e((u8)0); L.ereg(I.r2); }
@@ -273,64 +292,64 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                 // disari dal -> KUYRUK CAGRI (fonksiyon sonu): ncall + ret.
                 // (Bu nokta lifte gore fonksiyonun bitisidir; saw_ret isaretle.)
                 if (!allow_call) { F.why = "disari jmp (call yok)"; return F; }
-                L.e(OP_NCALL); L.e32(I.target);
-                L.e(OP_RET);
+                L.eop(OP_NCALL); L.e32(I.target);
+                L.eop(OP_RET);
                 saw_ret = true;
                 snprintf(buf, sizeof buf, "jmp disari -> ncall 0x%x (kuyruk)", I.target); break;
             }
-            L.e(OP_JMP); u32 site = (u32)L.bc.size(); L.e32(0);
+            L.eop(OP_JMP); u32 site = (u32)L.bc.size(); L.e32(0);
             F.fix.push_back({ site, I.target });
             snprintf(buf, sizeof buf, "jmp 0x%x", I.target); break;
         }
         case XP_JCC: {
             if (I.target < rva || I.target >= end) { F.why = "disari jcc"; return F; }
-            L.e(OP_JCC); L.e((u8)I.cc); u32 site = (u32)L.bc.size(); L.e32(0);
+            L.eop(OP_JCC); L.e((u8)I.cc); u32 site = (u32)L.bc.size(); L.e32(0);
             F.fix.push_back({ site, I.target });
             snprintf(buf, sizeof buf, "jcc%d 0x%x", I.cc, I.target); break;
         }
         case XP_CALL: {
             if (!allow_call) { F.why = "call desteklenmiyor (x86 yaprak modu)"; return F; }
-            L.e(OP_NCALL); L.e32(I.target);
+            L.eop(OP_NCALL); L.e32(I.target);
             snprintf(buf, sizeof buf, "call 0x%x (ncall)", I.target); break;
         }
         case XP_LEAVE: // mov rsp,rbp ; pop rbp
-            L.e(OP_MOV_RR); L.e((u8)8); L.ereg(REG_RSP); L.ereg(REG_RBP);
-            L.e(OP_POP_R);  L.ereg(REG_RBP);
+            L.eop(OP_MOV_RR); L.e((u8)8); L.ereg(REG_RSP); L.ereg(REG_RBP);
+            L.eop(OP_POP_R);  L.ereg(REG_RBP);
             snprintf(buf, sizeof buf, "leave"); break;
-        case XP_RET: L.e(OP_RET); saw_ret = true;
+        case XP_RET: L.eop(OP_RET); saw_ret = true;
             snprintf(buf, sizeof buf, "ret"); break;
         case XP_RETI16: {
             u32 im = (u32)I.imm;
             if (retimm != 0xFFFFFFFF && retimm != im) { F.why = "farkli ret imm"; return F; }
-            retimm = im; L.e(OP_RET); saw_ret = true;
+            retimm = im; L.eop(OP_RET); saw_ret = true;
             snprintf(buf, sizeof buf, "ret 0x%x", im); break;
         }
-        case XP_SETCC: L.e(OP_SETCC); L.e((u8)I.cc); L.ereg(I.r1);
+        case XP_SETCC: L.eop(OP_SETCC); L.e((u8)I.cc); L.ereg(I.r1);
             snprintf(buf, sizeof buf, "setcc%d %s", I.cc, regname(is64, I.r1)); break;
         case XP_CMOV:
-            L.e(OP_CMOV); L.e((u8)I.cc); L.e((u8)I.sz); L.ereg(I.r1);
+            L.eop(OP_CMOV); L.e((u8)I.cc); L.e((u8)I.sz); L.ereg(I.r1);
             if (I.mem.present) { L.e((u8)1); L.emem(I.mem, I); }
             else { L.e((u8)0); L.ereg(I.r2); }
             snprintf(buf, sizeof buf, "cmov%d %s", I.cc, I.mem.present ? "[mem]" : regname(is64, I.r2));
             break;
         case XP_CWDE: { // x64: CDQE rax<-eax ; x86: CWDE eax<-ax
-            L.e(OP_MOVSX); L.e((u8)(is64 ? 8 : 4)); L.e((u8)(is64 ? 4 : 2));
+            L.eop(OP_MOVSX); L.e((u8)(is64 ? 8 : 4)); L.e((u8)(is64 ? 4 : 2));
             L.ereg(REG_RAX); L.e((u8)0); L.ereg(REG_RAX);
             snprintf(buf, sizeof buf, "cwde/cdqe"); break; }
-        case XP_CDQ: L.e(OP_CQO);
+        case XP_CDQ: L.eop(OP_CQO);
             snprintf(buf, sizeof buf, "cdq/cqo"); break;
-        case XP_IDIV: L.e(OP_IDIV_R); L.e((u8)I.sz); L.ereg(I.r1);
+        case XP_IDIV: L.eop(OP_IDIV_R); L.e((u8)I.sz); L.ereg(I.r1);
             snprintf(buf, sizeof buf, "idiv %s", regname(is64, I.r1)); break;
         case XP_NEG:
-            if (I.mem.present) { L.e(OP_NEG_M); L.e((u8)I.sz); L.emem(I.mem, I);
+            if (I.mem.present) { L.eop(OP_NEG_M); L.e((u8)I.sz); L.emem(I.mem, I);
                 snprintf(buf, sizeof buf, "neg [mem]"); }
-            else { L.e(OP_NEG_R); L.e((u8)I.sz); L.ereg(I.r1);
+            else { L.eop(OP_NEG_R); L.e((u8)I.sz); L.ereg(I.r1);
                 snprintf(buf, sizeof buf, "neg %s", regname(is64, I.r1)); }
             break;
         case XP_NOT:
-            if (I.mem.present) { L.e(OP_NOT_M); L.e((u8)I.sz); L.emem(I.mem, I);
+            if (I.mem.present) { L.eop(OP_NOT_M); L.e((u8)I.sz); L.emem(I.mem, I);
                 snprintf(buf, sizeof buf, "not [mem]"); }
-            else { L.e(OP_NOT_R); L.e((u8)I.sz); L.ereg(I.r1);
+            else { L.eop(OP_NOT_R); L.e((u8)I.sz); L.ereg(I.r1);
                 snprintf(buf, sizeof buf, "not %s", regname(is64, I.r1)); }
             break;
         default:
@@ -346,7 +365,7 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
         // VM dongusu done bayragina ihtiyac duyar -> yapay OP_RET; stub ret
         // YERINE region_end'e atlar (cont_rva) -> yigin/donus adresi korunur.
         if (!region_mode) { F.why = "ret bulunamadi"; return F; }
-        L.e(OP_RET);
+        L.eop(OP_RET);
         F.notes.push_back("  [BOLGE] govde ret yok — yapay OP_RET + stub region sonuna atlar");
     }
 

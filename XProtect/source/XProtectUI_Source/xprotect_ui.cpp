@@ -4045,6 +4045,7 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
                     else if (!wcscmp(argv[j], L"--sdkonly")) opt.sdk_only = true;
                     // 0.6.0: LZMA paketleme + PE temizligi
                     else if (!wcscmp(argv[j], L"--pack")) opt.pack = true;
+                    else if (!wcscmp(argv[j], L"--sectcrypt")) opt.sectcrypt = true;   // 0.8.0: pakli akislari CFB-64 sifrele
                     /* 0.7.0: lisans (RSA serial + HWID + watermark) */
                     else if (!wcscmp(argv[j], L"--pubkey") && j + 1 < argc) {
                         std::string v = w2s(argv[++j]);

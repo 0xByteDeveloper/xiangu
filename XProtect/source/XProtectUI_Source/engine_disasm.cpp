@@ -19,12 +19,21 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
     bool op66 = false;
 
     // --- on ekler ---
+    /* 0.8.0: coklu legacy onek guvenle yutulur (gcc hizalama dolgusu
+       "66 66 2e 0f 1f ..." cok-onekli NOP uretir). Segment/addrsize/
+       rep onekleri anlamsizlastirici degilse AKISI DEGISTIRMEZ:
+       - 0x2E/0x36/0x3E/0x26/0x64/0x65: segment ust-on-ek (nop dolgusunda
+         anlamsiz; gercek bellek isleminde default segment'ten sapma
+         VM'de zaten modellenmez) -> yut.
+       - 0x67 addrsize: 64-bit kodda 32-bit adresleme dolgusu -> yut.
+       - 0xF2/0xF3 rep: yalniz string islemlerinde anlamli (desteklenmez
+         zaten) -> yut. 0x66: operand boyutu (mevcut davranis). */
     while (i < maxlen) {
         u8 b = p[i];
         if (b == 0x66) { op66 = true; i++; continue; }
         if (b == 0x67 || b == 0xF2 || b == 0xF3 ||
             b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 ||
-            b == 0x64 || b == 0x65 || b == 0x67) { I.text = "desteklenmeyen onek"; return I; }
+            b == 0x64 || b == 0x65) { i++; continue; }
         if (is64 && b >= 0x40 && b <= 0x4F) {
             rex = true; rexw = (b >> 3) & 1; rexr = (b >> 2) & 1;
             rexx = (b >> 1) & 1; rexb = b & 1; i++; continue;
@@ -109,7 +118,25 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
     int regf = -1;
 
     switch (op) {
-    case 0x90: I.op = XP_NOP; break;
+    case 0x90: case 0x91: case 0x92: case 0x93:
+    case 0x94: case 0x95: case 0x96: case 0x97: {
+        /* xchg rax, r (90+r); 90 = xchg rax,rax = NOP */
+        if (op == 0x90) { I.op = XP_NOP; break; }
+        I.op = XP_XCHG;
+        I.sz = (is64 && rexw) ? 8 : 4;
+        I.r1 = reg8enc(is64, 0, 0);                       /* rax */
+        I.r2 = reg8enc(is64, rexb, (op & 7) + (rexb ? 8 : 0));
+        break;
+    }
+    case 0x86: case 0x87: {   /* xchg r/m8,r8 / xchg r/m,r */
+        I.op = XP_XCHG;
+        I.sz = (op == 0x86) ? 1 : ((is64 && rexw) ? 8 : 4);
+        int rg; MemOp m;
+        if (!read_modrm(I.sz, rg, m, true, op == 0x86)) return I;
+        if (m.present) { I.text = "xchg mem destegi yok"; I.op = XP_UNKNOWN; return I; }
+        I.r1 = m.base; I.r2 = rg;
+        break;
+    }
     case 0x9B: I.op = XP_NOP; break;
     case 0xCC: I.op = XP_INT3; break;
     case 0x0F: {
@@ -134,6 +161,11 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
             if (!read_modrm(sz, rg, m, true, sz == 1)) return I;
             I.r1 = rg; I.mem = m;
             if (!m.present) I.r2 = m.base;
+        }
+        else if (op2 >= 0xC8 && op2 <= 0xCF) {  /* 0.8.0: bswap r32/r64 */
+            I.op = XP_BSWAP;
+            I.sz = (is64 && rexw) ? 8 : 4;
+            I.r1 = reg8enc(is64, rexb, (op2 & 7) + (rexb ? 8 : 0));
         }
         else if (op2 == 0xAF) { // IMUL r, r/m
             I.op = XP_IMUL_RR;
@@ -321,9 +353,11 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
         int rg; MemOp m;
         if (!read_modrm(I.sz, rg, m, true, op == 0xC0)) return I;
         int sh = rg & 7;
-        if (sh < 4)  { I.text = "rol/ror/rcl/rcr"; return I; }
-        // 4=SHL 5=SHR 6=SAL(=SHL) 7=SAR
-        I.shi = (sh == 5) ? SHI_SHR : (sh == 7 ? SHI_SAR : SHI_SHL);
+        /* 0.8.0: ROL(0)/ROR(1) artik kaldirilir; RCL(2)/RCR(3) el-arkasi
+           SHL'ye dusme TEHLIKESI kapatildi -> duru RED */
+        if (sh == 2 || sh == 3) { I.text = "rcl/rcr desteklenmiyor"; I.op = XP_UNKNOWN; return I; }
+        if (sh < 4)  { I.shi = (sh == 0) ? SHI_ROL : SHI_ROR; }
+        else I.shi = (sh == 5) ? SHI_SHR : (sh == 7 ? SHI_SAR : SHI_SHL);
         if (m.present) { I.mem = m; I.r1 = -1; }
         else I.r1 = m.base;
         if (op == 0xC0 || op == 0xC1) { I.imm = read_imm(1); I.immsz = 1; }

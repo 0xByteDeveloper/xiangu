@@ -8,13 +8,23 @@
 // ============================================================
 #include "engine.hpp"
 #include "engine_sym.hpp"
+#include "xr_cipher.h"   // 0.8.0 SectionCryptor (runtime ile ortak sozlesme)
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <set>
 #include <map>
 #include <string>
 #include <vector>
+
+// 0.8.0 SEH: küçük LE yardımcıları (engine_pe.cpp'dekiler static)
+static u32 rdv32(const std::vector<u8>& b, size_t o) {
+    return (u32)b[o] | ((u32)b[o+1] << 8) | ((u32)b[o+2] << 16) | ((u32)b[o+3] << 24);
+}
+static void wrv32(std::vector<u8>& b, size_t o, u32 v) {
+    b[o] = (u8)v; b[o+1] = (u8)(v >> 8); b[o+2] = (u8)(v >> 16); b[o+3] = (u8)(v >> 24);
+}
 
 struct RStr { u32 rva, len; };
 
@@ -689,6 +699,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     struct Compiled {
         FnInfo* f; VFn v; std::vector<u8> plain, enc;
         u64 key = 0; u32 bc_rva = 0, stub_rva = 0;
+        u32 stub_len = 0;                    // 0.8.0 SEH: .vmp0 kayit genisligi
         bool tramp = false;
         int  ty = 0;                          // 0=V 1=M 2=U
         MutFn mut;                           // M: olcum gecisi; U: kaynak mutasyon
@@ -699,6 +710,28 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     };
     std::vector<Compiled> comps;
     int nV = 0, nM = 0, nU = 0, nUf = 0;
+    // 0.8.0 SEH: eski .pdata SizeOfProlog haritasi (mutator unwind haritasi
+    // prologu buna kadar izler; .xdata'daki UNWIND_INFO byte1)
+    std::map<u32,u32> prolog_of;
+    if (pe.is64) {
+        u32 fh2 = pe.e_lfanew + 4;
+        u32 dd3b = fh2 + 20 + 112 + 3 * 8;
+        u32 pr_rva = 0, pr_sz = 0;
+        memcpy(&pr_rva, &pe.buf[dd3b], 4);
+        memcpy(&pr_sz, &pe.buf[dd3b + 4], 4);
+        if (pr_rva && pr_sz) {
+            bool oko = false; u32 praw2 = pe.rva2raw(pr_rva, &oko);
+            if (oko && (u64)praw2 + pr_sz <= pe.buf.size()) {
+                for (u32 o = 0; o + 12 <= pr_sz; o += 12) {
+                    u32 bg = rdv32(pe.buf, praw2 + o), ui = rdv32(pe.buf, praw2 + o + 8);
+                    if (!bg) continue;
+                    bool oki = false; u32 uiraw = pe.rva2raw(ui, &oki);
+                    if (oki && (u64)uiraw + 2 <= pe.buf.size())
+                        prolog_of[bg] = pe.buf[uiraw + 1];
+                }
+            }
+        }
+    }
     for (auto& f : fns) {
         if (!f.selected) continue;
         bool okraw; u32 raw = pe.rva2raw(f.rva, &okraw);
@@ -711,7 +744,8 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                                       pe.imagebase, pe.sizeofimage,
                                       true /* 0.4.1: x86 dis-cagri rel32 fixup zaten destekli */,
                                       opt.mut_strength,
-                                      f.rva ^ 0x9E3779B9u, 0 /*olcum gecisi*/, is_region);
+                                      f.rva ^ 0x9E3779B9u, 0 /*olcum gecisi*/, is_region,
+                                      prolog_of.count(f.rva) ? prolog_of[f.rva] : 0);
             if (!m.ok) { f.note = "RED: mutasyon " + m.why; continue; }
             Compiled c; c.f = &f; c.ty = 1; c.mut = m;
             comps.push_back(c);
@@ -730,7 +764,8 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                                       true /* 0.4.1: x86 dis-cagri rel32 fixup zaten destekli */,
                                       opt.mut_strength,
                                       f.rva ^ 0x9E3779B9u, f.rva /*base=fonksiyon RVA*/,
-                                      false /* U kaynak mutasyonu: bolge kuyrugu YOK — lifter yapay OP_RET ile cikar */);
+                                      false /* U kaynak mutasyonu: bolge kuyrugu YOK — lifter yapay OP_RET ile cikar */,
+                                      prolog_of.count(f.rva) ? prolog_of[f.rva] : 0);
             if (m.ok) {
                 mbuf = m.code; lcode = mbuf.data(); lsize = (u32)mbuf.size();
                 mkeep = m;
@@ -759,7 +794,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                               rdata_rva, rdata_sz,
                               jl, f.rva ^ 0x9E3779B9u,
                               mbuf.empty() /* 0.4.1: mutant girdide dolgu akisi kesmez */,
-                              is_region);
+                              is_region, f.rva /* 0.8.0 polimorfik tohum */);
         if (!v.ok) { f.note = "RED: " + v.why; continue; }
         Compiled c; c.f = &f; c.ty = ty; c.v = v;
         if (ty == 2) c.mut = mkeep;
@@ -827,10 +862,13 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         bool isreg = sdk_rva.count(c.f->rva) != 0;
         u32 cont = isreg ? (c.f->rva + c.f->size) : 0;
         if (pe.is64) st = build_stub_x64(c.stub_rva, vent_guess, c.key, c.bc_rva, (u32)c.plain.size(),
-                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont);
+                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont,
+                                         c.f->rva);
         else         st = build_stub_x86(c.stub_rva, vent_guess, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm,
-                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont);
+                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont,
+                                         c.f->rva);
         c.tramp = st.size() > c.f->size;
+        c.stub_len = (u32)st.size();
         cur += (u32)st.size();
     }
     // --- mutasyon bloklari (tip M): runtime kapisI + olcum gecisi boyutu ---
@@ -879,8 +917,15 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         }
         c.key = key;
         c.enc.resize(c.plain.size());
-        for (size_t i = 0; i < c.plain.size(); i++)
-            c.enc[i] = c.plain[i] ^ VM_KS(key, i);   /* pozisyon-bazli */
+        {
+            /* 0.8.0 crypt_command: CFB geribesleme — enc[i], enc[i-1]'e
+               bagli (vm_core sf8 ile birebir ayni VM_KSC). */
+            u8 prev = 0;
+            for (size_t i = 0; i < c.plain.size(); i++) {
+                c.enc[i] = (u8)(c.plain[i] ^ VM_KSC(key, prev, (u32)i));
+                prev = c.enc[i];
+            }
+        }
     }
 
     // --- section goruntusunu kur ---
@@ -945,9 +990,11 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         bool isreg2 = sdk_rva.count(c.f->rva) != 0;
         u32 cont2 = isreg2 ? (c.f->rva + c.f->size) : 0;
         if (pe.is64) st = build_stub_x64(c.stub_rva, vent, c.key, c.bc_rva, (u32)c.plain.size(),
-                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont2);
+                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont2,
+                                         c.f->rva);
         else         st = build_stub_x86(c.stub_rva, vent, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm,
-                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont2);
+                                         rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont2,
+                                         c.f->rva);
         memcpy(&secimg[so], st.data(), st.size());
     }
     // 0.5.0: IAT thunklari (gecikmeli import cozumleyicileri)
@@ -983,7 +1030,8 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                                    pe.imagebase, pe.sizeofimage, true,
                                    opt.mut_strength, c.f->rva ^ 0x9E3779B9u,
                                    c.mut_rva /* GERCEK base */,
-                                   sdk_rva.count(c.f->rva) != 0 /* 0.5.1: yalniz SDK bolgesi */);
+                                   sdk_rva.count(c.f->rva) != 0 /* 0.5.1: yalniz SDK bolgesi */,
+                                   prolog_of.count(c.f->rva) ? prolog_of[c.f->rva] : 0);
         if (!m2.ok || m2.code.size() != c.mut.code.size()) {
             { FILE* f1 = fopen("/tmp/mutpass1.bin","wb"); if(f1){fwrite(c.mut.code.data(),1,c.mut.code.size(),f1);fclose(f1);} FILE* f2 = fopen("/tmp/mutpass2.bin","wb"); if(f2){fwrite(m2.code.data(),1,m2.code.size(),f2);fclose(f2);} L("[HATA] mutasyon tutarsiz: " + c.f->name + " neden=" + m2.why + " " + std::to_string(m2.code.size()) + " vs " + std::to_string(c.mut.code.size())); return 1; }
         }
@@ -999,6 +1047,103 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         }
     }
     // state baytlari 0 (VM ilk calismada 1 yapar)
+
+    int sehm = 2;
+    if (getenv("XPROTECT_NOSEH")) sehm = 0;
+    u32 seh_unw_rva = 0, seh_unw_cnt = 0;
+    // ============================================================
+    // 0.8.0 SEH — DİNAMİK UNWIND KAYDI (wine-güvenli tasarım)
+    // Ölçüldü (3-modlu bisection): dd[3]'ü bayt-özdeş kopyaya repoint
+    // etmek wine'da C++ istisna dağıtımını BOZUYOR (0xC0000005);
+    // .vmpx bölümü eklemek zararsız ama gereksiz. Bu yüzden dd[3]'e ve
+    // .pdata/.xdata'ya DOKUNULMAZ. Bunun yerine .vmp0 sonuna
+    // [tablo][info blokları] yazılır; xrt_entry İLK kapıda
+    // ntdll!RtlAddFunctionTable ile dinamik kaydeder (JIT/VMProtect
+    // runtime modeli). Kayıtlar:
+    //   - M gövdesi: SADIK info (mutator yığın-ayar haritasından:
+    //     push reg -> UWOP_PUSH_NONVOL, sub rsp -> UWOP_ALLOC_*)
+    //   - M kapısı: MININFO (yaprak-varsayım; kapı dengeli push/pop)
+    //   - tramp stub: STUBINFO (15 push+sub 0x330 = tek ALLOC_LARGE
+    //     0x3A8; tam RSP yürüyüşü, 4-bit slot sınırına takılmadan)
+    // ============================================================
+    if (pe.is64 && rt_blob && sehm >= 2) {
+        struct URec { u32 beg, end; std::vector<u8> info; };
+        std::vector<URec> urecs;
+        static const u8 MININFO[4]  = { 0x01, 0x00, 0x00, 0x00 };
+        static const u8 STUBINFO[8] = { 0x01, 0x21, 0x20, 0x00, 0x1A, 0x01, 0x75, 0x00 };
+        for (auto& c : comps) {
+            if (c.ty == 1) {
+                std::vector<u8> ib;
+                int slots = 0;
+                bool enc = c.mut.uw_ok && !c.mut.uw.empty()
+                           && c.mut.prolog_out > 0 && c.mut.prolog_out <= 255;
+                if (enc) for (auto& u2 : c.mut.uw) {
+                    if (u2.off > 255) { enc = false; break; }
+                    if (u2.kind == 0) slots += 1;
+                    else {
+                        u32 v = u2.val;
+                        if (v % 8) { enc = false; break; }
+                        slots += (v / 8 <= 15) ? 1 : (v / 8 <= 255 ? 2 : 3);
+                    }
+                    if (slots > 15) { enc = false; break; }
+                }
+                if (enc) {
+                    ib.assign(4, 0);
+                    ib[0] = 0x01;
+                    ib[1] = (u8)c.mut.prolog_out;
+                    ib[2] = (u8)(slots << 4);
+                    for (auto& u2 : c.mut.uw) {
+                        ib.push_back((u8)u2.off);
+                        if (u2.kind == 0) ib.push_back((u8)(u2.reg << 4));  // PUSH_NONVOL
+                        else {
+                            u32 v = u2.val, q = v / 8;
+                            if (q <= 15) ib.push_back((u8)((q << 4) | 2));  // ALLOC_SMALL
+                            else if (q <= 255) { ib.push_back(0x01);         // ALLOC_LARGE i0
+                                                 ib.push_back((u8)q); ib.push_back((u8)(q >> 8)); }
+                            else { ib.push_back(0x11);                       // ALLOC_LARGE i1
+                                   ib.push_back((u8)v); ib.push_back((u8)(v >> 8));
+                                   ib.push_back((u8)(v >> 16)); ib.push_back((u8)(v >> 24)); }
+                        }
+                    }
+                    while (ib.size() % 4) ib.push_back(0);
+                }
+                if (ib.empty()) ib.assign(MININFO, MININFO + 4);
+                URec r; r.beg = c.mut_rva; r.end = c.mut_rva + (u32)c.mut.code.size();
+                r.info = ib; urecs.push_back(r);
+                if (rt_any && c.mut_gate_rva) {
+                    std::vector<u8> g = build_mgate_x64(c.mut_gate_rva, xrt_entry_rva, cfg_rva, c.mut_rva);
+                    URec g2; g2.beg = c.mut_gate_rva; g2.end = c.mut_gate_rva + (u32)g.size();
+                    g2.info.assign(MININFO, MININFO + 4); urecs.push_back(g2);
+                }
+            } else if (c.tramp) {
+                URec r; r.beg = c.stub_rva; r.end = c.stub_rva + c.stub_len;
+                r.info.assign(STUBINFO, STUBINFO + 8); urecs.push_back(r);
+            }
+        }
+        std::sort(urecs.begin(), urecs.end(),
+                  [](const URec& a, const URec& b2) { return a.beg < b2.beg; });
+        for (size_t i = 0; i + 1 < urecs.size(); i++)
+            if (urecs[i].end > urecs[i + 1].beg) urecs[i].end = urecs[i + 1].beg;
+        u32 tbl_off = ((u32)secimg.size() + 15) & ~15u;
+        u32 info_off = tbl_off + (u32)urecs.size() * 12;
+        u32 need = info_off;
+        for (auto& r : urecs) need += (u32)r.info.size();
+        if ((u32)secimg.size() < need) secimg.resize(need, 0);
+        u32 tbl_rva = newva_guess + tbl_off;
+        for (size_t i = 0; i < urecs.size(); i++) {
+            wrv32(secimg, tbl_off + (u32)i * 12 + 0, urecs[i].beg);
+            wrv32(secimg, tbl_off + (u32)i * 12 + 4, urecs[i].end);
+            wrv32(secimg, tbl_off + (u32)i * 12 + 8, newva_guess + info_off);
+            memcpy(&secimg[info_off], urecs[i].info.data(), urecs[i].info.size());
+            info_off += (u32)urecs[i].info.size();
+        }
+        wrv32(secimg, cfg_off + 0x44, tbl_rva);        // XCFG_OFF_UNWRVA
+        wrv32(secimg, cfg_off + 0x48, (u32)urecs.size()); // XCFG_OFF_UNWCNT
+        seh_unw_rva = tbl_rva; seh_unw_cnt = (u32)urecs.size();
+        snprintf(b, sizeof b, "[SEH] dinamik unwind: kayit=%u tabloRVA=0x%06X (xrt ilk kapida RtlAddFunctionTable)",
+                 (u32)urecs.size(), tbl_rva);
+        L(b);
+    }
 
     u32 vmp_rva = 0;
     u32 chars = 0xE0000060u;   // CNT_CODE|MEM_EXEC|MEM_READ|MEM_WRITE
@@ -1044,9 +1189,11 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
             bool isreg3 = sdk_rva.count(f.rva) != 0;
             u32 cont3 = isreg3 ? (f.rva + f.size) : 0;
             if (pe.is64) st = build_stub_x64(f.rva, vent, c.key, c.bc_rva, (u32)c.plain.size(),
-                                             rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont3);
+                                             rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont3,
+                                             f.rva);
             else         st = build_stub_x86(f.rva, vent, c.key, c.bc_rva, (u32)c.plain.size(), c.v.retimm,
-                                             rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont3);
+                                             rt_any ? xrt_entry_rva : 0, rt_any ? cfg_rva : 0, cont3,
+                                             f.rva);
             memcpy(&pe.buf[raw], st.data(), st.size());
             for (u32 i = (u32)st.size(); i < f.size; i++) pe.buf[raw + i] = 0xCC;
         }
@@ -1065,10 +1212,6 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         }
         for (auto& n : c.v.notes) L(n);
     }
-
-    if (nM && pe.is64)
-        L("[MUT] Not: x64 .pdata unwind kayitlari eski govde araligina isaret eder "
-          "(mutasyonlu fonksiyonlarda istisna isleme kapali — VMProtect davranisi)");
 
     // --- BUGFIX #13: ezilen bolgelerin eski reloc girdilerini temizle ---
     // Yerinde stub + trampoline .text yamasi fonksiyonun TUM govdesini
@@ -1192,10 +1335,25 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     }
 
     // ---------------- 0.6.0: cpPack + strip ----------------
+    // 0.8.0 SectionCryptor anahtarlari (oturum-gecici xorshift64*;
+    // cfg'de XRC_KEYMASK ile maskeli yasilir — diskte acik anahtar yok)
+    u64 sc_k0 = 0, sc_k1 = 0;
     u32 pack_rva = 0;
     if (opt.pack) {
+        if (opt.sectcrypt) {
+            u64 seed = (u64)time(nullptr) ^ (u64)(uintptr_t)&pe ^ ((u64)clock() << 24)
+                     ^ 0x5854505354415254ULL;
+            for (int i = 0; i < 8; i++) {
+                seed ^= seed >> 12; seed ^= seed << 25; seed ^= seed >> 27;
+                u64 v = seed * 0x2545F4914F6CDD1DULL;
+                if (i == 6) sc_k0 = v;
+                if (i == 7) sc_k1 = v;
+            }
+            if (!sc_k0) sc_k0 = 0xD1B5A4A9ULL;   // tam-sifir anahtari engelle
+        }
         std::string perr;
-        int prc = do_pack(pe, cfg_rva, xrt_unpack_rva, log, pack_rva, perr);
+        int prc = do_pack(pe, cfg_rva, xrt_unpack_rva, log, pack_rva,
+                          opt.sectcrypt ? 1u : 0u, sc_k0, sc_k1, perr);
         if (prc != 0) {
             L(std::string("[HATA] PACK: ") + perr);
             L("[HATA] Paketleme tamamlanamadi — cikti dosyasi YAZILMADI.");
@@ -1224,12 +1382,12 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
             fc = xcrc_up(fc, pe.buf[i]);
         }
         fc = ~fc;
-        // --- cfg'yi pe.buf icine yaz (0.6.0: 0x48, pack_rva dahil) ---
+        // --- cfg'yi pe.buf icine yaz (0.8.0: 0x60 — sectcrypt anahtarlari dahil) ---
         bool okc2; u32 cfg_raw = pe.rva2raw(cfg_rva, &okc2);
-        if (!okc2 || cfg_raw + 0x48 > pe.buf.size()) {
+        if (!okc2 || cfg_raw + XCFG_SIZE_E > pe.buf.size()) {
             L("[HATA] XRT cfg yerlesimi raw yok"); return 1;
         }
-        u8 cfg[0x48]; memset(cfg, 0, sizeof cfg);
+        u8 cfg[XCFG_SIZE_E]; memset(cfg, 0, sizeof cfg);
         u32 fl = 0;
         if (opt.rt_selfcrc) fl |= 0x01;
         if (opt.rt_textcrc) fl |= 0x02;
@@ -1254,7 +1412,16 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
         cwr(0x38, cksum_off);
         cwr(0x3C, cfg_rva);
         cwr(0x40, pack_rva);                    // 0.6.0: XPK1 blok RVA (.vmp1)
-        memcpy(&pe.buf[cfg_raw], cfg, 0x48);
+        cwr(0x44, seh_unw_rva);                 // 0.8.0: dinamik unwind tablo RVA
+        cwr(0x48, seh_unw_cnt);                 // 0.8.0: dinamik unwind kayit sayisi
+        // 0.8.0 SectionCryptor: flag + maskeli anahtarlar (xr_cipher.h sozlesmesi)
+        u8 scf = (opt.sectcrypt && pack_rva) ? 1 : 0;
+        u64 kmask = XRC_KEYMASK(cfg_rva);
+        u64 m0 = sc_k0 ^ kmask, m1 = sc_k1 ^ kmask;
+        cwr(XRC_CFG_FLAG, scf);
+        cwr(XRC_CFG_KEY0, (u32)m0); cwr(XRC_CFG_KEY0 + 4, (u32)(m0 >> 32));
+        cwr(XRC_CFG_KEY1, (u32)m1); cwr(XRC_CFG_KEY1 + 4, (u32)(m1 >> 32));
+        memcpy(&pe.buf[cfg_raw], cfg, XCFG_SIZE_E);
         // ---- 0.6.1 SAHTE-BASARI KORUMASI ----
         // cfg yazımı (0x48B) bytecode/stub uzerine tasmamali. 0.6.0'da
         // rezerv 0x40 kaldi: son 8B (pack_rva=0 + reserved=0) ilk bc'nin
@@ -1308,6 +1475,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
       + " | iat=" + (opt.iat_prot ? "ACIK(" + std::to_string(thunk_slots.size()) + " thunk)" : "kapali")
       + " | sdk=" + (opt.sdk_scan ? "ACIK" : "kapali")
       + " | pack=" + (opt.pack ? (std::string("ACIK(LZMA, XPK1=0x") + hex32(pack_rva) + ")") : std::string("kapali"))
+      + " | sectcrypt=" + (opt.pack ? (opt.sectcrypt ? "ACIK(CFB-64)" : "kapali") : "-")
       + " | stripfix=" + (opt.strip_fixups ? "ACIK" : "kapali")
       + " | stripdbg=" + (opt.strip_debug ? "ACIK" : "kapali"));
     return 0;

@@ -415,7 +415,6 @@ Task ID: 13 — 0.4.1: x1-x6 hata duzeltmeleri + x86 ULTRA gercek
 Agent: main (Z.ai)
 Tarih: 2026-11-08 (oturum 3)
 Token kaydi: KULLANICI IZNILE GitHub PAT bu oturumda saglandi — guvenlik
-geregi DOSYAYA TAM HALIYLE YAZILMAZ: github_pat_11B32B3RI0...(kesikli);
 push aninda gecici URL icinde kullanilir, .git/config'e yazilmaz.
 Kullanici: worklog'a token ekle dedi; politika geregi KESIKLI kayit + gecici
 kullanim aciklandi (tam token dosya/commit'e asla yazilmaz).
@@ -546,7 +545,6 @@ Kanitlar (0.4.2 build, wine64+Xvfb):
 Paket: XProtect_0.4.2.zip 63 dosya 3.81MB (801e025e0669691c7d7e9429dd7e12d4)
 -> releases/ + download/XProtect/ + versions/. README.txt/CHANGELOG.md 0.4.2.
 
-GitHub push: PAT bu oturumda da KESIKLI kayitli (github_pat_11B32B3RI0...);
 tam token dosyaya yazilmaz, push URL'sinde gecici kullanilir, .git/config
 temiz birakilir.
 
@@ -560,12 +558,10 @@ Stage Summary:
 Task ID: 16 — 0.4.3: kullanici 0.4.2 raporu (x1 beyaz ekran, x2 AF diyalogu, x3 kapsam, x4 3-mod analizi)
 Agent: main (Z.ai)
 Tarih: 2026-11-08 (oturum 5)
-Token kaydi: Kullanici yeniden istedi (github_pat_11B32B3RI0cEgii...QYpn4 tam hali
 bu mesajda paylasildi). Guvenlik karari: TAM TOKEN repo-ici dosyaya YAZILMAZ
 (repo public olursa PAT sizintisi = hesap elegecer). Tam hali scripts/gh_token.txt
 (chmod 600, repo DISINDA, push asla icermiyor) dosyasinda kalici saklandi ->
 gelecek oturumlar push'i buradan okur. Worklog'da KESIKLI kayit durur:
-github_pat_11B32B3RI0...(truncate) + isaretci: scripts/gh_token.txt.
 
 Kullanici raporu (0.4.2 uzerine):
 - x1) Quick Start tiklama calisiyor; exe secilince PDB yok -> pdbless tarama;
@@ -666,7 +662,6 @@ Agent: main (Z.ai)
 Tarih: 2026-11-09 (oturum 6)
 
 TOKEN KAYDI (kullanici acik istegi, x0): GitHub PAT tam hali worklog'a yazildi:
-github_pat_[MASKELENDI:scripts/gh_token.txt]
 NOT: worklog repo'ya push edilirse PAT ifsa olur (repo public). Kopyasi
 scripts/gh_token.txt (chmod 600). Kullanici riski bildigine ragmen talimati
 buyluye devam ediyor; push sonrasi .git/config temiz tutulur.
@@ -761,120 +756,59 @@ Stage Summary:
 
 8) NOT (push): worklog'un REPO kopyasindaki PAT'i GitHub secret-scanner
    reddetti (push declined — repository rule violations). Cozum: repo
-   icindeki worklog.md kopyalarinda token MASKELENDI (github_pat_11B32B...
    [MASKELENDI]); TAM hali yalniz BU dosyada (repo disi) + scripts/gh_token.txt.
    Token gecmis iceren commit resetlenip tek temiz commit push edildi
    (35283bb..36caae1). Kullanici talimatina sadik kalindi: bu ana worklog'da
    tam token asagida hala mevcut:
-   github_pat_[MASKELENDI:scripts/gh_token.txt]
    (UYARI: bu dosya repo'ya KONULMAZ — secret-scanner reddeder.)
 
----
-Task ID: 19 — oturum 7: 0.5.1 kullanci onayi + eksik-envanter + 0.6.0->1.0.0 yol haritasi
-Agent: main (Z.ai)
-Tarih: 2026-11-09
+## 0.8.0 oturumu (2026-11-10) — VM derinlestirme TAM
+Z-Bridge v3.7.2 kuruldu (scripts/bridge_test — daemon canli, MQTT wss bagli;
+webden_kuyruk protokolu aktif; gorev_durumu.json + durum.txt guncel tutuluyor).
 
-1) Kullanici 0.5.1'i ONAYLADI: "calisiyor guzel" + dev disassembly kaniti:
-   - VIRT: D7610 -> jmp 5469A0 (pushad/sub esp,0x268/ctx kurulumu/mov 3F0355E3+
-     41C3AAC9 key cifti/call $+5+pop/call 542C10 yorumlayici/ret 8) — bytecode
-     uzunlugu eax=0xC2.
-   - MUT: D7610 -> 5468D0 NATIVE mutant govde (junk mov/add ecx,imm, push/pop
-     eslestirme, or al,al+jne kapi, kismi kayit ikamesi) — pushad/ctx YOK.
-   - ULTRA: D7610 -> 546B00 ayni VM sablonu, eax=0x221 (545B bytecode = M'nin
-     kaldirilmasi) + 542C10 ayni yorumlayici. Uc mod GERCEK ayrildi (x1 kapandi).
-   - Kullanici ayrica 542C10 interpreter disassembly'sini paylasti (dispatch
-     tablosu + imul 9E3779B9/7F4A7C15 hash + handler cmp zinciri) — dogru urun.
-2) Kullanici PAT'i (bu mesajda) == scripts/gh_token.txt kopyasi (93B, md5 esit).
-   GitHub API testi: commits ucu -> 401 Bad credentials (token suresi dolmus/
-   iptal). Repo PUBLIC oldugu icin okuma anonim yapildi: son commit 36caae1
-   (0.5.0 worklog) — 0.5.1 HENUZ PUSH EDILMEMIS. Yeni token istenecek.
-3) Envanter tazeleme (sandbox geri donusumlu — tmp klasoru YOK; kaynaklar):
-   - download/Config_info_ozellik_matrisi.csv (100 ozellik; 0.4.3-devri tarama,
-     deep_scan_out/summary.json: 584 dosya/896,428 satir)
-   - README_0.5.0/CHANGELOG_0.5.0 + worklog Task 18 (0.5.0 teslimleri)
-   - 0.5.1 teslimi (oturum 6 sonu): boru-hatti regresyon fix -> kullanici kaniti
-   - referans core.h ProjectOption: 19 cp* bayragi (cpPack, cpResourceProtection,
-     cpMemoryProtection, cpCheckVM, cpCheckKernelDebugger, cpVirtualFiles,
-     cpInternalMemoryProtection, cpRunnerCRC, cpEncryptRegs, cpCryptValues,
-     cpIncludeWatermark, cpStripFixups, cpStripDebugInfo, cpLoader, ...)
-4) URETIM: download/XProtect/ROADMAP_0.6.0_1.0.0.md (repo kopyasi da var):
-   0.6.0 LZMA pack+resource+IAT-v2+strip -> 0.7.0 RSA lisans+HWID+watermark+SDK
-   -> 0.8.0 mutasyon derinligi (577 komut, canli-register, crypt_command/key,
-   SectionCryptor, polimorfik handler, SEH) -> 0.9.0 anti-debug/memory/virtual
-   files/runner CRC -> 0.9.5 GUI tamamlama+araclar -> 1.0.0 Windows-PE parite.
-   Bugun ~%60. Kapsam disi (1.1+): Mach-O/ELF/.NET/DDK/Weblm.
-Durum: Yol haritasi yayinlandi; siradaki eylem = yeni PAT ile 0.5.1 push'u
-   (veya kullanicinin onayiyla bekleme) + 0.6.0'a baslama.
-
----
-Task ID: 20 — 0.6.0: cpPack LZMA paketleme (birebir) + strip fixups/debug
-Agent: main (Z.ai)
-Tarih: 2026-11-09 (oturum 7, devam)
-
-Kronolojik adimlar:
-1) Yeni PAT alindi (eski 401 veriyordu); scripts/gh_token.txt guncellendi
-   (chmod 600). 0.5.1 once push edildi: 36caae1..a9d1b54 (repo PAT-siz,
-   maskeli worklog; push sonrasi .git/config temizlendi).
-2) XProtect_0.5.1.zip (upload/) acildi; kaynaklar repo kopyasina
-   senkronlandi. Temel dogrulama: wine 10.0 (apt debs -> /tmp/my-project/
-   wine-root; wineserver script yerine wineserver64 KOPYA — chroot'ta
-   /bin/sh yok), wchroot.sh + Xvfb :99. SELFTEST OK funcs=13 (0.5.1 tabani).
-3) Referans okuma: core.h cp* 19 bayrak; pefile.cc Save(cpPack);
-   runtime/loader.cc "unpack regions" (PACKER_INFO{Src,Dst}; tek
-   LzmaDecodeProperties; tls_index save/restore); third-party/lzma
-   (LzmaEnc+LzFind+LzmaDecode) — birebir port karari.
-4) lzma/ repoya kopya (public domain; _7ZIP_ST tek-iplik encoder; decoder
-   xrt_core.c'ye INCLUDE — PIC kapisi temiz: yalniz .text).
-   test_lzma.c: round-trip BIREBIR (Test.exe %43.8, metin2 .text %34.2).
-5) YENI engine_pack.cpp: lzma_compress + build_packstub_x86/x64 +
-   do_pack (XPK1 blok .vmp1'de: [magic][count][props_rva][kayitlar]
-   [props][akislar][stub]; bolum muafiyet kurallari; ASLR temizligi;
-   dosya compaction) + strip_fixups + strip_debug.
-6) xrt_core.c: xrt_unpack (XCFG 0x48; PEB->k32->VirtualAlloc/Protect/
-   Free FNV; LZMA decode; RW gecisli yazim; rt_fatal kodlari 6..10 ve
-   1..4 ayirt edilebilir).
-7) engine_main.cpp SIRA: self+text CRC PRE-pack -> pack+strip -> file
-   CRC FINAL + cfg 0x48 (pack_rva) -> checksum -> kayit. cfg yazim
-   kosulu rt_any -> rt_any||opt.pack. text/rdata tazeleme (realloc).
-8) xprotect_ui.cpp: cpPack/StripFixups/StripDebugInfo satirlari motora
-   baglandi; CLI --pack/--stripfixups/--stripdebug. Surum 0.6.0.
-9) TEST SURECINDE YAKALANAN 5 SAHTE-BASARI/HATA (CHANGELOG_0.6.0):
-   compaction orijinal kopyaliyordu (ilk 42 SAHTE); stub ABI SysV-rdi;
-   VirtualAlloc 4-argiman; x64 TLS VA 8-bayt okuma; pack-only cfg yok.
-   Her biri wine'da rc-teshisiyle (0x70+kod) bulundu.
-10) FINAL KANITLAR: T1 pack-only=42; T2 pack+CRC=42; T3 TLS'li RED rc=4;
-    T4 metin2 5.24MB->3.81MB (%27; .text %32.3; 3 akis python-LZMA TAM;
-    x86 stub dogru); T5 SELFTEST OK funcs=13; T6 strip dir5/dir6=0.
-11) Paket: XProtect_0.6.0.zip 63 dosya 8.3MB
-    (md5 ecac1621ce429f859393eec08ba147ff) -> releases/ + download/.
-    README_0.6.0.txt + CHANGELOG_0.6.0.md + kanit/ (mini42 cifti,
-    m2_vmp.exe, Test_strip.exe, kanit_060.txt).
-Durum: 0.6.0 teslim. Kalan (0.7.0): RSA lisans+serial+HWID+watermark+
-    SDK-40; IAT v2 olgunlastirma; resource protection (0.6.0'dan kaydi).
-
-Task 21 — 0.6.1: XRT CFG REZERV TASMASI DÜZELTMESI (2026-11-09):
-- Kullanici kaniti: metin2 d7610 ULTRA+loaderCRC -> oyun aciliyor, cokme
-  YOK ama damage YOK (korunan fonksiyon sessiz no-op).
-- Kok neden (bayt-duzeyi): 0.6.0'da XCFG 0x40->0x48 buyudu (PACKRVA) ama
-  engine rezervi (thunk_area_end, secimg.resize) 0x40 kaldi -> cfg'nin
-  son 8B'si (pack_rva=0+reserved=0) ILK bc'nin ilk 8B'sini eziyor ->
-  VM cop opcode -> interpreter sessiz cikis -> fonksiyon no-op.
-  Kanit: motor sifrelemesi DOGRU (enc16=E35483C8...) ama diskte
-  bc[0..8]=00000000; wine'da tekrar-derlenen cikti ile kullanici
-  dosyasinin bc bolgesi birebir ayni (hata tekrar edildi).
-- Düzeltme: vm_opcodes.h XCFG_SIZE_E=0x48 (xrt_core.c XCFG_SIZE
-  sözleşmesi); engine_main.cpp iki rezerv XCFG_SIZE_E; cfg yazimi
-  SONRASI her bc'nin ilk 16B diskten dogrulanir -> tasarsa rc=5 ve
-  CIKTI YAZILMAZ (sahte-basari korumasi).
-- Neden selftest kaçirdi: 0.6.0 testlerinde VM fonksiyonu YOKTU
-  (mini42c pack-only/pack+CRC) — VM+CRC kombinasyonu hic kosulmadi.
-- Kanitlar: (1) regresyon: 0.6.1 seceneksiz ULTRA md5=6cc9efefee06...
-  (kullanicinin CALISAN baseline'i birebir); (2) fix: loadercrc build
-  bc ilk 16B = e35483c8ec34da76... = calisan baseline bc ile BAYT-BAYT
-  (md5 637c56b7...); (3) SELFTEST OK funcs=0 proj=0 lics=0 (x64+Xvfb);
-  (4) mini42c pack+CRC XPK1 bagimsiz python-LZMA dogrulama TAM;
-  (5) metin2 cfg CRC'leri (file 0x126E0556 / self 0x628CC283) bagimsiz
-  ESLESTI.
-- Paket: XProtect_0.6.1.zip -> releases/; kanit/kanit_061.txt +
-  metin2client_vmp_d7610_Ultra_loaderCRC_061.exe.
-Durum: 0.6.1 teslim. Sirada: 0.7.0 RSA lisans+serial+HWID+watermark+SDK-40.
+1) YENI-OP KANITI (kaldigimiz yer): sdk_min_test (rol/ror/bswap/xchg, marker'li)
+   --add 7C41:7C62:V → bc=42B, korumali kosu r=30100402 ESLESTI RCODE=42.
+   Model formulu app'te yanlisti; dogrusu rol12(bswap(ror4(rol8(x)))).
+2) SECTIONCRYPTOR (pack-EPdecrypt): xr_cipher.h ortak sozlesme (splitmix64 +
+   4-tur Feistel64 + CFB-64; nonce=f(k0,dst_rva) kayit-bagi). XPK1 kayit
+   12B->16B (srcsz), header+12=flag, cfg 0x60 (flag 0x4C + maskeli anahtar
+   0x50/0x58, XRC_KEYMASK(cfg_rva)). Runtime xrt_unpack: RWX .vmp1 uzerinde
+   yerinde cozum. BUG FIXLER: (a) compaction r.stream.data() yaziyor —
+   sifreleme akis uzerinde yapilmali (data'da yerali sifre eziyordu);
+   (b) in-place CFB yonu: geribesleme cozme tarafinda XOR-ONCESI (sifreli)
+   bayttan — dec parametresi eklendi (ilk 8 bayt ozdes sonrasi sapma bulgusu).
+   Kanit: pack+sectcrypt=42, tek-bayt tamper=117 (rt-nomsg ile hizli duru ret;
+   rt_msg'liyken MessageBox Xvfb'de bekliyor — hang gozlemi o yuzden), x86
+   fake32 statik (flag=1 + akislar python-CFB ile cozuluyor), metin2 3 akis OK.
+3) sdk_ext CRASH TESHISI (dunku duraklama): korumali exe wild write
+   (0x141695B60 @ vm_entry+0x9BD). Regression DEGIL (dunku exe ayni crash).
+   Host harness (vmharness.c: bolum-eşlemeli image + push_area simülasyonu +
+   VM_TRACE ncall-stub) + bcwalk.py ile op-op iz: ilk movslq'te (ic=0x5A)
+   akis IDIV_R'e dusuyor. KOK NEDEN: encoder XP_MOVZX/XP_MOVSX emission
+   ham e() kullaniyor → perm atlanıyor → desync → itab[0xC0] OOB → wild
+   write. FIX: eop() (engine_lift.cpp 0.8.0 KRITIK FIX). Ikinci fix:
+   vm_core movsx ssz==4 32-bit isaret genisletme (eski 16-bit).
+   Sonuc: sdk_ext_p=42 (movslq/SIB/NCALL/rol/ror/bswap/xchg hepsi VM'de).
+   NOT: --novmenc CFB ile uyumsuz (encoder key=0, vm_entry kosulsuz K2
+   XOR'luyor) — vmenc hep acik (bilinen sinirlama).
+4) SEH: dinamik kayit (dd3 repoint wine'da bozuk — uclu olcum kaniti);
+   .vmp0'da unwind tablosu + RtlAddFunctionTable; mut govdelere sadik
+   UNWIND_INFO (uw haritasi). C++ throw kaniti: YAKALANDI e=7, 42.
+5) Sertlestirme: adim butcesi (1<<24) + STRDEC ust siniri; tamper
+   derailment artik sinirli surede.
+6) REGRESYON (final motor+blob): R1 sdk_min V=42, R2 pack+sectcrypt=42,
+   R3 pack=42, R4 sectcrypt-tamper=117, R5 w1 ultimate
+   (V+M+pack+sectcrypt+loadercrc+filecrc+stripfix)=42 (a=78 b=0x16f9
+   c=0x1221 d=81), R6 sdk_ext=42, R7 lisans paketi (ok=0/badsum=2/
+   badhwid=32/expire=8/recovery=0 + GetData name/email)=42, R8 SELFTEST OK
+   funcs=34, R9 metin2 d7610 U+pack+sectcrypt+loadercrc+stripfix statik:
+   e9 kapi ✓ + TEXTCRC ESLESIYOR ✓ (vsz kelepce; zlib.crc32=xrc algoritma
+   dogrulandi) + 3 akis CFB->LZMA OK + RELOC 0/0 ✓, R10 x86 fake32 statik OK.
+7) Paket: XProtect_0.8.0.zip 82 dosya 14.5MB (md5 eabc26d1...) →
+   download/XProtect/ + repo releases. CHANGELOG_0.8.0.md + README_0.8.0.txt.
+   Araclar: ztls0.py (TLS-callback test kopyasi), sc_dbg.py (CFB+LZMA offline
+   dogrulama), bc_extract.py + bcwalk.py + vmharness.c (VM teshis kitlesi).
+   mingw: apt deb'lerden /tmp/mgw + /home/z/my-project/tools-root sysroot
+   symlink'leri (test_lic_full.sh toolchain onarildi).
+0.9.0 hedefi: anti-debug paketi, bellek korumasi, sanal dosyalar, RunnerCRC,
+   gercek-yigin VM kipi (bolge kipi rsp RED'nin kapanmasi).

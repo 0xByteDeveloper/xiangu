@@ -41,6 +41,24 @@ static void tputn(const char* pre, u64 v, u64 v2) {
 }
 #endif
 
+#ifdef VM_TRACE
+static int open2(const char* path) {
+    long r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"((u64)2), "D"(path),
+                     "S"((u64)(0x41 /*O_WRONLY|O_CREAT*/)), "d"((u64)0644) : "rcx", "r11", "memory");
+    return (int)r;
+}
+static void wr2(int fd, const void* b, unsigned n) {
+    long r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"((u64)1), "D"((u64)fd),
+                     "S"(b), "d"((u64)n) : "rcx", "r11", "memory");
+}
+static void close2(int fd) {
+    long r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"((u64)3), "D"((u64)fd) : "rcx", "r11", "memory");
+}
+#endif
+
 typedef struct {
     u64 bc;         // +0x00 bayt-kod gostergesi
     u64 bc_len;     // +0x08
@@ -72,7 +90,9 @@ static void* u2p(u64 v) { return (void*)(unsigned long)v; }
 typedef struct { u8* bc; u64 key; u64 ic; } STRM;
 
 static u8 sf8(STRM* s) {
-    u8 v = s->bc[s->ic] ^ VM_KS(s->key, s->ic);   /* pozisyon-bazli */
+    /* 0.8.0 crypt_command: CFB geribesleme — akis bir onceki SIFRELI
+       bayta bagli (saf (key, prev, pos) fonksiyonu; JMP guvenli). */
+    u8 v = s->bc[s->ic] ^ VM_KSC(s->key, s->ic ? s->bc[s->ic - 1] : 0, s->ic);
     s->ic++;
     return v;
 }
@@ -141,6 +161,9 @@ static u64 mem_addr(STRM* s, VMContext* c) {
         else if (b == REG_RSP)    a = c->regs[REG_RSP] - (u64)VM_DELTA + (u64)(i64)(int)d;
         else                      a = img + c->regs[b] + (u64)(i64)(int)d;
         if (ix != SIB_NOBASE) a += c->regs[ix] << sc;
+#ifdef VM_TRACE
+        if (vm_trace_on) tputn("[mem] a=", a, ((u64)(b & 0xFF) << 8) | (ix & 0xFF));
+#endif
         return a;
     }
 }
@@ -200,7 +223,21 @@ static int cond_eval(VMContext* c, int cc) {
 static u64 do_shift(int shi, u64 a, int n, int sz, u64* fl) {
     int sbits = sz * 8;
     u64 r = a, f = 0;
+    /* x86: sayac 8/16/32-bitte &31, 64-bitte &63 ile maskelenir */
+    n &= (sbits >= 64) ? 63 : 31;
     if (n) {
+        if (shi == SHI_ROL) {
+            r = ((a << n) | (a >> ((sbits - n) & (sbits - 1)))) & szmask(sz);
+            f |= r & 1;                      /* ROL: yalniz CF (x86) */
+            *fl = f;
+            return r;
+        }
+        if (shi == SHI_ROR) {
+            r = ((a >> n) | (a << ((sbits - n) & (sbits - 1)))) & szmask(sz);
+            f |= (r >> (sbits - 1)) & 1;     /* ROR: yalniz CF */
+            *fl = f;
+            return r;
+        }
         if (shi == SHI_SHL) {
             if (n <= sbits) { if ((a >> (sbits - n)) & 1) f |= FCF; }
             r = (a << n) & szmask(sz);
@@ -324,15 +361,48 @@ static void vm_run(VMContext* c) {
     s.ic  = 0;
 
     VM_TRACE_CHECK();
-    while (!c->done) {
-        u8 op = sf8(&s);
+    /* 0.8.0 polimorfik isleyiciler: fonksiyon-bazina opcode permütasyonu.
+       Stub tohumu ctx->scratch[3]'e yazdi (fonksiyon RVA'si); ayni
+       vm_perm_tab ile raw->gercek tablosu turetilir. */
+    unsigned char itab[VM_OPN];
+    vm_perm_tab((u32)c->scratch[3], itab, 1);
+#ifdef VM_TRACE
+    if (vm_trace_on) {
+        tputn("[bc] len=", c->bc_len, (u64)(unsigned long)c->bc);
+        {
+            /* tam PLAIN akis (sf8 ile birebir cozum) + itab -> dosya */
+            int fd = open2("/tmp/plain.bin");
+            if (fd >= 0) {
+                unsigned di;
+                for (di = 0; di < (unsigned)c->bc_len; di++) {
+                    unsigned char raw = ((const unsigned char*)u2p(c->bc))[di];
+                    unsigned char pv = di ? ((const unsigned char*)u2p(c->bc))[di - 1] : 0;
+                    unsigned char p1 = (unsigned char)(raw ^ VM_KSC(c->key, pv, di));
+                    wr2(fd, &p1, 1);
+                }
+                close2(fd);
+            }
+            fd = open2("/tmp/itab.bin");
+            if (fd >= 0) { wr2(fd, itab, VM_OPN); close2(fd); }
+        }
+    }
+#endif
+    /* 0.8.0 adim butcesi: CFB tamper-yayilimi bozuk akisi JUMP dongusune
+       cevirebilir -> butcesiz while sonsuz aski (DoS sinifi) demek.
+       Butce 1<<24 (16.7M adim): meşru lifted donguler (kucuk fonksiyon
+       govdesi) asla ulasamaz; tamper-derailment sinirli surede durur. */
+    {
+        u64 budget = (u64)1 << 24;
+        while (!c->done) {
+            if (budget-- == 0) { c->done = 1; break; }
+        u8 op = itab[sf8(&s)];
         int alu, shi, cc, ud, sz, ssz, r1, r2, form, n;
         u32 v32;
         u64 a, b, r, addr, fl;
         i64 sv;
-        c->scratch[0] = op;        /* hata ayiklama izi */
-        c->scratch[1] = s.ic;
-        c->scratch[2] = s.key;
+            c->scratch[0] = op;        /* hata ayiklama izi */
+            c->scratch[1] = s.ic;
+            c->scratch[2] = s.key;
 #ifdef VM_TRACE
         if (vm_trace_on) tputn("[vm] ic=", s.ic, ((u64)op << 56) | s.key);
 #endif
@@ -522,8 +592,12 @@ static void vm_run(VMContext* c) {
             }
             if (op == OP_MOVZX) r = a & szmask(ssz);
             else {
-                if (ssz == 1) r = (u64)(i64)(signed char)(a & 0xFF);
-                else          r = (u64)(i64)(short)(a & 0xFFFF);
+                /* 0.8.0 fix: ssz==4 (movslq/MOVSXD) 16-bit degil 32-bit
+                 * isaret genisletme olmali — eski kod (i64)(short) ile
+                 * ssz==4'u 16-bit'e dusuruyordu (sdk_ext kanit bug'i). */
+                if (ssz == 1)      r = (u64)(i64)(signed char)(a & 0xFF);
+                else if (ssz == 2) r = (u64)(i64)(short)(a & 0xFFFF);
+                else               r = (u64)(i64)(int)(a & 0xFFFFFFFF);
             }
             rset(c, r1, sz, r);
 
@@ -552,6 +626,12 @@ static void vm_run(VMContext* c) {
 
         } else if (op == OP_NCALL) {
             v32 = sf32(&s);
+#ifdef VM_TRACE
+            /* harness modu: native cagri YOK — sahte donus (rax=gumus),
+               akis devam eder (mem/SIB teshisi icin). */
+            if (vm_trace_on) tputn("[ncall] hedef=", c->base + (u64)v32, c->regs[REG_RSP]);
+            c->regs[0] = 0;
+#else
 #ifdef VM_IS_X64
             c->regs[0] = vm_natcall(c->base + (u64)v32, c->regs);
 #else
@@ -566,6 +646,7 @@ static void vm_run(VMContext* c) {
                 c->regs[REG_RSP] = nesp + (u64)VM_DELTA;
             }
 #endif
+#endif /* VM_TRACE */
 
         } else if (op == OP_RET) {
             c->done = 1;
@@ -621,9 +702,28 @@ static void vm_run(VMContext* c) {
 #endif
 #endif
 
-        } else if (op == OP_STRDEC) {
+                } else if (op == OP_BSWAP_R) {
+            /* 0.8.0 komut genisletme: bswap r (yalniz 32/64) */
+            sz = sf8(&s); r1 = sf8(&s);
+            u64 v = rget(c, r1, sz), w = 0;
+            int k2;
+            for (k2 = 0; k2 < sz; k2++) w = (w << 8) | ((v >> (8 * k2)) & 0xFF);
+            rset(c, r1, sz, w);
+
+        } else if (op == OP_XCHG_RR) {
+            /* 0.8.0 komut genisletme: xchg r1, r2 (bayrak etkisi yok) */
+            sz = sf8(&s); r1 = sf8(&s); r2 = sf8(&s);
+            u64 va = rget(c, r1, sz), vb = rget(c, r2, sz);
+            rset(c, r1, sz, vb);
+            rset(c, r2, sz, va);
+
+} else if (op == OP_STRDEC) {
             u32 strva = sf32(&s), stva = sf32(&s), k = sf32(&s), len = sf32(&s);
             u8* st = (u8*)u2p(c->base + (u64)stva);
+            /* 0.8.0 sertlik: CFB tamper len'i 4G'ye cevirebilir -> handler
+               ici 4G yineleme (bütce tek komutu sayar, ici döngüyü saymaz).
+               Meşru strenc dizgesi bolge buyuklugu sinifinda (<1MB). */
+            if (len > 0x100000u) len = 0;
             if (*st == 0) {
                 u8* p = (u8*)u2p(c->base + (u64)strva);
                 u32 i2;
@@ -634,6 +734,7 @@ static void vm_run(VMContext* c) {
         } else {
             c->done = 1;   // bilinmeyen opcode -> guvenli dur
         }
+    }
     }
 }
 
@@ -670,6 +771,13 @@ void vm_entry(VMContext* c) {
     c->regs[4] = c->init_rsp;
     c->flags = 0;
     c->done = 0;
+
+    /* 0.8.0 crypt_key: stub key^K2 tasiydi — gercek rolling anahtari geri
+       coz. K2 = (bc_rva, bc_len) fonksiyonu (engine_stub ile ayni makro). */
+    {
+        u32 bc_rva = (u32)(((const u8*)u2p(c->bc)) - (const u8*)u2p(c->base));
+        c->key ^= VM_KEYXOR(bc_rva, c->bc_len);
+    }
 
     vm_run(c);
 

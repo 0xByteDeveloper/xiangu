@@ -20,7 +20,8 @@ static void put64(std::vector<u8>& v, u64 x) {
 
 std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
                                u32 bc_rva, u32 bc_len,
-                               u32 xrt_entry_rva, u32 cfg_rva, u32 cont_rva) {
+                               u32 xrt_entry_rva, u32 cfg_rva, u32 cont_rva,
+                               u32 perm_seed) {
     std::vector<u8> s;
     Patch32 p_key{}, p_l1{}, p_bc{}, p_len{}, p_rel{}, p_call2{};
     u32 off_pop = 0;
@@ -54,6 +55,13 @@ std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
     put(s, {0x48,0x89,0x04,0x24});                      // mov [rsp], rax (bc)
     put(s, {0x48,0xB8}); p_len = {(u32)s.size(), 0}; put64(s, 0);   // mov rax,bc_len
     put(s, {0x48,0x89,0x44,0x24,0x08});                 // mov [rsp+0x08], rax
+    // 0.8.0 polimorfik: opcode permütasyon tohumu -> ctx scratch[3] (+0xE0)
+    // DİKKAT: C7 44 24 <disp8> disp8'i İMZALI yorumlar (0xE0 = -32!) —
+    // yazım ctx ALTINA duser. disp32 formu zorunlu: C7 84 24 E0 00 00 00.
+    if (perm_seed) {
+        put(s, {0xC7,0x84,0x24,0xE0,0x00,0x00,0x00});
+        for (int k = 0; k < 4; k++) put(s, {(u8)(perm_seed >> (8 * k))});
+    }
     // --- 0.5.0: XProtect Runtime kapisi (bir-kez butunluk kontrolu) ---
     // xrt_entry SysV'dir; rax,rcx,rdx,rsi,rdi,r8-r11 bozar — 15 GPR
     // zaten push'lu, rax'in son kullanimi (len yazimi) geride kaldi.
@@ -98,8 +106,12 @@ std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
     // --- yamalar ---
     u32 l1_rva = stub_rva + off_pop;
     u32 buf[8]; (void)buf;
-    // key (imm64)
-    for (int k = 0; k < 8; k++) s[p_key.off + k] = (u8)(key >> (8 * k));
+    // key (imm64) — 0.8.0 crypt_key: obfuscated (key ^ VM_KEYXOR(bc_rva,bc_len));
+    // vm_entry giriste geri cozer (vm_opcodes.h'daki ayni makro).
+    {
+        u64 kx = key ^ VM_KEYXOR(bc_rva, bc_len);
+        for (int k = 0; k < 8; k++) s[p_key.off + k] = (u8)(kx >> (8 * k));
+    }
     // L1 rva
     s[p_l1.off]     = (u8)(l1_rva);
     s[p_l1.off + 1] = (u8)(l1_rva >> 8);
@@ -137,7 +149,8 @@ std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
 
 std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva, u64 key,
                                u32 bc_rva, u32 bc_len, u32 retimm,
-                               u32 xrt_entry_rva, u32 cfg_rva, u32 cont_rva) {
+                               u32 xrt_entry_rva, u32 cfg_rva, u32 cont_rva,
+                               u32 perm_seed) {
     // BUGFIX #12 (x86 w+Enter cokmesi): retimm eskiden u16 idi.
     // engine.hpp'deki "ret yok" sentinel'i 0xFFFFFFFF (u32) u16'ya
     // kirpilinca 0xFFFF oluyor, asagidaki sentinel kontrolu atlaniyor
@@ -169,6 +182,13 @@ std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva, u64 key,
     put(s, {0x89,0x04,0x24});                           // mov [esp], eax
     put(s, {0xB8}); off_len = (u32)s.size(); put32(s, 0);           // mov eax,len
     put(s, {0x89,0x44,0x24,0x08});                      // mov [esp+0x08], eax
+    // 0.8.0 polimorfik: opcode permütasyon tohumu -> ctx scratch[3] (+0xE0)
+    // DİKKAT: C7 44 24 <disp8> disp8'i İMZALI yorumlar (0xE0 = -32!) —
+    // yazım ctx ALTINA duser. disp32 formu zorunlu: C7 84 24 E0 00 00 00.
+    if (perm_seed) {
+        put(s, {0xC7,0x84,0x24,0xE0,0x00,0x00,0x00});
+        for (int k = 0; k < 4; k++) put(s, {(u8)(perm_seed >> (8 * k))});
+    }
     // --- 0.5.0: XProtect Runtime kapisi (bir-kez butunluk kontrolu) ---
     // xrt_entry cdecl'dir; eax/ecx/edx bozar — bu noktada ucude de ihtiyac yok.
     if (xrt_entry_rva && cfg_rva) {
@@ -203,8 +223,11 @@ std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva, u64 key,
     }
 
     u32 l1_rva = stub_rva + off_pop;
-    for (int k = 0; k < 4; k++) s[off_key + k] = (u8)((u32)key >> (8 * k));
-    for (int k = 0; k < 4; k++) s[off_key2 + k] = (u8)((u32)(key >> 32) >> (8 * k));
+    {   /* 0.8.0 crypt_key: obfuscated key (key ^ K2) — iki yarmaya da */
+        u64 kx = key ^ VM_KEYXOR(bc_rva, bc_len);
+        for (int k = 0; k < 4; k++) s[off_key + k]  = (u8)((u32)kx >> (8 * k));
+        for (int k = 0; k < 4; k++) s[off_key2 + k] = (u8)((u32)(kx >> 32) >> (8 * k));
+    }
     for (int k = 0; k < 4; k++) s[off_l1 + k]  = (u8)(l1_rva >> (8 * k));
     for (int k = 0; k < 4; k++) s[off_bc + k]  = (u8)(bc_rva >> (8 * k));
     for (int k = 0; k < 4; k++) s[off_len + k] = (u8)(bc_len >> (8 * k));

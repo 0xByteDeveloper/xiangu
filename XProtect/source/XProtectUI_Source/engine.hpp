@@ -60,7 +60,7 @@ enum XOp {
     XP_MOV_MI, XP_MOV_RI, XP_MOV_RI64, XP_LEA, XP_ALU, XP_SHIFT, XP_IMUL_RRI,
     XP_IMUL_RR, XP_INCDEC_R, XP_INCDEC_M, XP_MOVZX, XP_MOVSX, XP_JMP, XP_JCC,
     XP_CALL, XP_RET, XP_RETI16, XP_SETCC, XP_CWDE, XP_CDQ, XP_IDIV, XP_TEST_RM, XP_PUSH_I, XP_LEAVE, XP_CMOV,
-    XP_NEG, XP_NOT, XP_CALLI, XP_JMPI
+    XP_NEG, XP_NOT, XP_CALLI, XP_JMPI, XP_XCHG, XP_BSWAP
 };
 
 struct MemOp {
@@ -108,7 +108,7 @@ struct VFn {
 VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                   u64 imagebase, u32 imagesize, bool allow_call,
                   u32 rdata_rva, u32 rdata_size, int junk_level, u32 junk_seed,
-                  bool pad_terminates, bool region_mode);
+                  bool pad_terminates, bool region_mode, u32 perm_seed = 0);
 
 // ---------------- Mutasyon cekirdegi (0.3.0) ----------------
 // VMProtect "Mutation" tipinin yerli uygulaması: fonksiyon makine
@@ -129,6 +129,12 @@ struct MutFn {
     MutStats st;
     std::vector<std::string> notes;
     bool region_tail = false;  // 0.5.0: bolge kipi — sona region_end E9 eklendi
+    // 0.8.0 SEH: prolog yigin-ayarlama haritasi (x64 .vmpx UNWIND_INFO)
+    // kind 0=push reg (reg), 1=stack alloc (val bayt). off = cikis ofseti.
+    struct MUW { u32 off; u8 kind; u8 reg; u32 val; };
+    std::vector<MUW> uw;
+    bool uw_ok = true;
+    u32 prolog_out = 0;
 };
 
 // strength: 1=hafif 2=normal 3=agir (ikame/junk/kapi olasiliklari)
@@ -136,17 +142,20 @@ struct MutFn {
 // buna göre hesaplanir; M modunda iki geçişte çağrılır: ölçüm + gerçek)
 MutFn mutate_function(const u8* code, u32 rva, u32 size, bool is64,
                       u64 imagebase, u32 imagesize, bool allow_call,
-                      int strength, u32 seed, u32 base_rva, bool region_mode);
+                      int strength, u32 seed, u32 base_rva, bool region_mode,
+                      u32 prolog_size = 0);
 
 // ---------------- Stub ureteci ----------------
 // x64: 15 reg push + ctx + call vm_entry(RDI) + geri
 // x86: pushad + ctx + push ctxptr + call vm_entry(cdecl) + popad + ret[imm16]
 std::vector<u8> build_stub_x64(u32 stub_rva, u32 vm_entry_rva, u64 key,
                                u32 bc_rva, u32 bc_len,
-                               u32 xrt_entry_rva, u32 cfg_rva, u32 cont_rva);
+                               u32 xrt_entry_rva, u32 cfg_rva, u32 cont_rva,
+                               u32 perm_seed = 0);
 std::vector<u8> build_stub_x86(u32 stub_rva, u32 vm_entry_rva, u64 key,
                                u32 bc_rva, u32 bc_len, u32 retimm,
-                               u32 xrt_entry_rva, u32 cfg_rva, u32 cont_rva);
+                               u32 xrt_entry_rva, u32 cfg_rva, u32 cont_rva,
+                               u32 perm_seed = 0);
 // 0.5.0: M-govdesi onu runtime kapisI + gecikmeli import thunk'lari
 std::vector<u8> build_mgate_x86(u32 gate_rva, u32 xrt_entry_rva, u32 cfg_rva, u32 body_rva);
 std::vector<u8> build_mgate_x64(u32 gate_rva, u32 xrt_entry_rva, u32 cfg_rva, u32 body_rva);
@@ -189,7 +198,8 @@ std::vector<u8> build_packstub_x86(u32 stub_rva, u32 unpack_rva, u32 cfg_rva, u3
 // cpPack ana adimi: bolumleri paketle, .vmp1 kur, EP'yi yonlendir,
 // dosyayi sikistir. donus 0=tamam (pack_rva), 1=red (err)
 int  do_pack(PEFile& pe, u32 cfg_rva, u32 unpack_rva,
-             std::vector<std::string>& log, u32& pack_rva_out, std::string& err);
+             std::vector<std::string>& log, u32& pack_rva_out,
+             u32 sectcrypt, u64 ck0, u64 ck1, std::string& err);
 // cpStripFixups: .reloc dizinini kaldirir + ASLR bayraklarini temizler
 bool strip_fixups(PEFile& pe, std::vector<std::string>& log);
 // cpStripDebugInfo: debug dizini + COFF sembol tablosunu kaldirir
@@ -230,6 +240,7 @@ struct Options {
     bool sdk_only   = false;   // yalniz SDK/manual bolgeleri koru
     // --- 0.6.0: paketleme + PE temizligi (VMProtect cp* bayraklari) ---
     bool pack        = false;  // cpPack: LZMA paketleme (.vmp1 + EP redirect)
+    bool sectcrypt   = false;  // 0.8.0 SectionCryptor: pakli akislari CFB-64 sifrele
     bool strip_fixups = false; // cpStripFixups: .reloc kaldir + ASLR temizle
     bool strip_debug  = false; // cpStripDebugInfo: debug dizini + COFF sembol
     // --- 0.7.0: lisans (RSA serial + HWID + watermark; cpIncludeWatermark) ---

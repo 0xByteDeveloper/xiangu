@@ -15,6 +15,7 @@
 #include "engine.hpp"
 #include <cstdlib>
 #include <cstring>
+#include "xr_cipher.h"   // 0.8.0 SectionCryptor (runtime ile ORTAK sozlesme)
 
 extern "C" {
 #include "lzma/LzmaEnc.h"
@@ -168,9 +169,13 @@ bool strip_debug(PEFile& pe, std::vector<std::string>& log) {
 }
 
 // ---------------- cpPack: bolum paketleme + dosya sikistirma ----------------
+// 0.8.0 SectionCryptor: sectcrypt=1 iken LZMA akislari CFB-64 ile sifrelenir
+// (anahtar cfg'de maskeli; runtime xrt_unpack yerinde cozer). Kayit 16B:
+// {src_rva, dst_rva, dst_size, src_size} — srcsz CFB icin zorunlu.
 // donus: 0 = tamam (pack_rva cfg'ye yazilir), >0 = red (err'de neden)
 int do_pack(PEFile& pe, u32 cfg_rva, u32 unpack_rva,
-            std::vector<std::string>& log, u32& pack_rva_out, std::string& err) {
+            std::vector<std::string>& log, u32& pack_rva_out,
+            u32 sectcrypt, u64 ck0, u64 ck1, std::string& err) {
     char b[320];
     pack_rva_out = 0;
     u32 opto = pk_opt(pe);
@@ -249,7 +254,7 @@ int do_pack(PEFile& pe, u32 cfg_rva, u32 unpack_rva,
     u32 dict = pow2ceil(maxsec);
 
     // --- adaylari sikistir ---
-    struct Reg { u32 dst_rva, dst_size, src_off; std::vector<u8> stream; };
+    struct Reg { u32 dst_rva, dst_size, src_off; u32 src_len; std::vector<u8> stream; };
     std::vector<Reg> regs;
     u8 props[5]; bool props_ok = false;
     for (size_t i = 0; i < pe.secs.size(); i++) {
@@ -261,27 +266,29 @@ int do_pack(PEFile& pe, u32 cfg_rva, u32 unpack_rva,
         bool ok; u32 raw = pe.rva2raw(s.va, &ok);
         if (!ok || (u64)raw + s.rawsz > pe.buf.size()) continue;
         Reg r; r.dst_rva = s.va; r.dst_size = s.rawsz; r.src_off = 0;
+        r.src_len = (u32)r.stream.size();   // lzma_compress sonrasi asagida guncellenir
         if (!lzma_compress(&pe.buf[raw], s.rawsz, dict, r.stream, props)) {
             snprintf(b, sizeof b, "[PACK] %s sikistirilamadi — muaf tutuldu", s.name);
             log.push_back(b);
             continue;
         }
         props_ok = true;
+        r.src_len = (u32)r.stream.size();
         regs.push_back(std::move(r));
-        snprintf(b, sizeof b, "[PACK] %s RVA=0x%08X %u B -> LZMA %zu B (%%%.1f)", s.name, s.va, s.rawsz, regs.back().stream.size(), 100.0 * regs.back().stream.size() / s.rawsz);
+        snprintf(b, sizeof b, "[PACK] %s RVA=0x%08X %u B -> LZMA %zu B (%%%.1f)%s", s.name, s.va, s.rawsz, regs.back().stream.size(), 100.0 * regs.back().stream.size() / s.rawsz, sectcrypt ? " [CFB]" : "");
         log.push_back(b);
     }
     if (regs.empty() || !props_ok) { err = "hicbir bolum sikistirilamadi"; return 1; }
 
     // --- .vmp1 verisini kur ---
-    u32 cur = pk_align(16 + (u32)regs.size() * 12 + 5, 16);
+    u32 cur = pk_align(16 + (u32)regs.size() * 16 + 5, 16);
     std::vector<u8> data;
     auto put32 = [&](u32 v) { data.push_back((u8)v); data.push_back((u8)(v>>8)); data.push_back((u8)(v>>16)); data.push_back((u8)(v>>24)); };
     put32(0x31504B58u);           // 'XPK1'
     put32((u32)regs.size());
     put32(0);                     // props_rva (RVA'lari bolum RVA'si bilinince yazariz)
-    put32(0);                     // rezerve
-    for (auto& r : regs) { put32(0); put32(r.dst_rva); put32(r.dst_size); }  // src placeholder
+    put32(sectcrypt ? 1u : 0u);   // 0.8.0: hdr+12 rezerv = SectionCryptor flag
+    for (auto& r : regs) { put32(0); put32(r.dst_rva); put32(r.dst_size); put32(0); }  // src + srcsz placeholder
     data.resize(pk_align((u32)data.size(), 16), 0);
     u32 props_off = (u32)data.size();
     data.insert(data.end(), props, props + 5);
@@ -289,6 +296,14 @@ int do_pack(PEFile& pe, u32 cfg_rva, u32 unpack_rva,
     for (auto& r : regs) {
         data.resize(pk_align((u32)data.size(), 16), 0);
         r.src_off = (u32)data.size();
+        if (sectcrypt) {
+            // 0.8.0 SectionCryptor: AKISIN KENDISINI sifrele (kayit-bagi nonce).
+            // KRITIK: compaction asamasi r.stream.data() yazar — o yuzden
+            // sifreleme r.stream uzerinde yapilmali (data'da yerali sifreleme
+            // compaction'in yazacagi plain ile EZILIRDI — 0.8.0 bulgusu).
+            xr_cfb(ck0, ck1, XRC_NONCE(ck0, r.dst_rva),
+                   r.stream.data(), r.src_len, 0 /*sifrele*/);
+        }
         data.insert(data.end(), r.stream.begin(), r.stream.end());
     }
     data.resize(pk_align((u32)data.size(), 16), 0);
@@ -304,9 +319,13 @@ int do_pack(PEFile& pe, u32 cfg_rva, u32 unpack_rva,
         bool ok; u32 praw = pe.rva2raw(vmp1_rva, &ok);
         if (!ok) { err = ".vmp1 raw erisilemiyor"; return 1; }
         gwr32(pe.buf, praw + 8, vmp1_rva + props_off);
-        for (size_t i = 0; i < regs.size(); i++)
-            gwr32(pe.buf, praw + 16 + (u32)i * 12, vmp1_rva + regs[i].src_off);
+        for (size_t i = 0; i < regs.size(); i++) {
+            gwr32(pe.buf, praw + 16 + (u32)i * 16, vmp1_rva + regs[i].src_off);
+            gwr32(pe.buf, praw + 16 + (u32)i * 16 + 12, regs[i].src_len);   // 0.8.0: srcsz
+        }
     }
+    if (sectcrypt)
+        log.push_back("[SECTCRYPT] akislar CFB-64 sifrelendi (anahtar cfg'de maskeli, kayit-bagi nonce)");
     // stub'i gercek RVA'lerle uret ve yerlestir
     u32 stub_rva = vmp1_rva + stub_off;
     {

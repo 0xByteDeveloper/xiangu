@@ -258,7 +258,8 @@ static void ud_of(MInsn& m) {
 // ============================================================
 MutFn mutate_function(const u8* code, u32 rva, u32 size, bool is64,
                       u64 imagebase, u32 imagesize, bool allow_call,
-                      int strength, u32 seed, u32 base_rva, bool region_mode) {
+                      int strength, u32 seed, u32 base_rva, bool region_mode,
+                      u32 prolog_size) {
     MutFn F; F.st.orig_bytes = size;
     if (strength < 1) strength = 1;
     if (strength > 3) strength = 3;
@@ -600,6 +601,27 @@ MutFn mutate_function(const u8* code, u32 rva, u32 size, bool is64,
                 F.notes.push_back(std::string("  [SUB] ") + hex32(m.pc) + ": " + m.I.text);
         } else {
             emit_copy(m);
+        }
+        // 0.8.0 SEH: prolog yigin-ayarlama haritasi (x64 .vmpx UNWIND_INFO)
+        // Ikame kurallari yigin etkisini korur (push/pop ciftleri, add<->sub)
+        // -> delta orijinal talimattan okunur, ofset cikis akisindan (pc2new).
+        if (prolog_size && (m.pc - rva) < prolog_size) {
+            const Insn& I2 = m.I;
+            i64 dl = 0; int kind = -1; int reg = 0;
+            if (I2.op == XP_PUSH_R && I2.r1 >= 0) { dl = is64 ? 8 : 4; kind = 0; reg = I2.r1; }
+            else if (I2.op == XP_PUSH_I) { dl = is64 ? 8 : 4; kind = 1; }
+            else if (I2.op == XP_ALU && !I2.mem.present && I2.r1 == 4 && I2.immsz > 0) {
+                i64 v = (i64)(long long)(int)(u32)I2.imm;
+                dl = (I2.alu == ALU_SUB) ? v : -v;
+                kind = 1;
+            } else if (I2.op == XP_POP_R || I2.op == XP_LEAVE ||
+                       ((I2.op == XP_MOV_MR) && !I2.mem.present && I2.r1 == 4)) {
+                F.uw_ok = false;   // prologda pop rsp/leave/mov rsp: emin olamayiz
+            }
+            if (kind == 0) F.uw.push_back({ pc2new[m.pc], 0, (u8)reg, 0 });
+            else if (kind == 1 && dl > 0) F.uw.push_back({ pc2new[m.pc], 1, 0, (u32)dl });
+            else if (kind == 1 && dl < 0) F.uw_ok = false;
+            F.prolog_out = (u32)out.size();
         }
     }
 

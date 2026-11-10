@@ -7,12 +7,45 @@
 #ifndef VM_OPCODES_H
 #define VM_OPCODES_H
 
-// Pozisyon-bazli keystream: sifre byte'i salt (anahtar, pozisyon) ciftinin
-// fonksiyonudur. JMP/JCC ile akis icinde sicransa bile encoder/decoder
-// uyumu bozulmaz (rolling-key tasarim hatasini onler).
+// 0.8.0 crypt_command — IKI-KATMANLI konum keystream'i (VMProtect
+// crypt_command'a es-karsilik): katman-1 ince (byte pozisyon), katman-2
+// kaba (8-byte periyot, roll edilmis anahtar). Ikisi de SALT (key,pos)
+// fonksiyonu oldugu icin JMP/JCC siralamasindan bagimsiz encoder/decoder
+// uyumu korunur; tek-bayt tamper artik 8-byte blok degradesini de degistirir.
+// NOT: eski tek-katman VM_KS kullanan tum ciktilar bu surumle yeniden
+// sifrelenir (encoder + decoder ayni makrodan turetir).
+#define VM_ROLL(k) ((((unsigned long long)(k)) * 0x100000001B3ULL) \
+    ^ (((unsigned long long)(k)) >> 23) ^ 0x51ED270B4C5A3D0FULL)
 #define VM_KS(key, pos) ((unsigned char)( \
-    ((((unsigned long long)(key)) ^ ((unsigned long long)(pos)) * 0x9E3779B97F4A7C15ULL) \
-      * 0x2545F4914F6CDD1DULL + 0x9E3779B97F4A7C15ULL) >> 56))
+    ( ((((unsigned long long)(key)) ^ ((unsigned long long)(pos)) * 0x9E3779B97F4A7C15ULL) \
+        * 0x2545F4914F6CDD1DULL + 0x9E3779B97F4A7C15ULL) \
+    ^ ( ((((VM_ROLL(key))) ^ ((unsigned long long)((pos) >> 3)) * 0xD1B54A32D192ED03ULL) \
+        * 0x94D049BB133111EBULL) ) \
+    ) >> 56))
+
+// 0.8.0 crypt_command — CFB geribesleme katmani: her baytin akisi BIR
+// ONCEKI SIFRELI bayta baglanir (cipher-feedback). encoder sira ile
+// uretir (enc[i-1] elinde), decoder konumdan okur (bc[i-1] buffer'da) —
+// JMP/JCC konum-degisikligi zinciri BOZMAZ (saf (key, prev, pos) fonksiyonu),
+// tek-bayt tamper sonraki baytin cozumunu de degistirir (yayilim).
+#define VM_KSC(key, prev, pos) VM_KS( \
+    ((unsigned long long)(key)) ^ ((unsigned long long)(unsigned char)(prev)) * 0x2545F4914F6CDD1DULL, \
+    (pos))
+
+// 0.8.0 crypt_key — stub'in tasiydigi anahtar obfuscated: stub key^K2
+// yazar; vm_entry giriste K2 ile geri cozer. K2 = (bc_rva, bc_len) purely
+// fonksiyonu — encoder ve decoder ayni makrodan turetir; `mov rax,imm64`
+// artik duz anahtar tasimaz. (splitmix64 finalizer; salt-ifade)
+#define VM_KXI(rva, len) (0x5850424DULL \
+    ^ ((unsigned long long)(unsigned int)(rva) << 32) \
+    ^ (unsigned long long)(unsigned int)(len))
+#define VM_KXA(x) ((x) ^ ((x) >> 30))
+#define VM_KXB(x) ((x) * 0xBF58476D1CE4E5B9ULL)
+#define VM_KXC(x) ((x) ^ ((x) >> 27))
+#define VM_KXD(x) ((x) * 0x94D049BB133111EBULL)
+#define VM_KXE(x) ((x) ^ ((x) >> 31))
+#define VM_KEYXOR(bc_rva, bc_len) \
+    (VM_KXE(VM_KXD(VM_KXC(VM_KXB(VM_KXA(VM_KXI(bc_rva, bc_len)))))))
 
 // --- opcode numaralari ---
 #define OP_NOP       0x00   // mutation junk / alignment
@@ -56,6 +89,34 @@
 #define OP_NOT_R     0x26   // sz r1             (~r; bayrak etkisi yok)
 #define OP_NEG_M     0x27   // sz mem
 #define OP_NOT_M     0x28   // sz mem
+#define OP_BSWAP_R   0x2A   // sz r1
+#define OP_XCHG_RR   0x2B   // sz r1 r2        (bayrak etkisi yok)
+// ROL/ROR: OP_SHI_RI/CL'nin shi=3/4 degeriyle (yeni op gerekmez)
+
+// --- 0.8.0 polimorfik isleyiciler: opcode permütasyonu ---
+// π = anahtar-turetilmis (Fisher-Yates; tohum = fonksiyon RVA'si).
+// Encoder (engine_lift eop) gercel->raw yazar (vm_perm_enc); interpreter
+// (vm_run) raw->gercek cozumler (vm_perm_dec). Her iki taraf AYNI
+// fonksiyondan turer -> tablo tasimaya gerek yok (stub yalniz tohumu
+// ctx->scratch[3]'e yazar). Tohum 0 = kimlik degil, gecerli permütasyon
+// (determinizm iki tarafta da ayni fonksiyondan).
+#define VM_OPN 0x2C   // opcode uzayi (0x00..0x2B)
+static void vm_perm_tab(unsigned int seed, unsigned char* t, int dec) {
+    unsigned char p[VM_OPN]; int i, j;
+    for (i = 0; i < VM_OPN; i++) p[i] = (unsigned char)i;
+    {
+        unsigned long long z = ((unsigned long long)seed ^ 0x5850424D9E3779B9ULL) | 1ULL;
+        for (i = VM_OPN - 1; i > 0; i--) {
+            z ^= z >> 30; z *= 0xBF58476D1CE4E5B9ULL;
+            z ^= z >> 27; z *= 0x94D049BB133111EBULL; z ^= z >> 31;
+            /* x86 freestanding: 64-bit modulo YOK (umoddi3) — yuksek 32B */
+            j = (int)(((unsigned int)(z >> 32)) % (unsigned int)(i + 1));
+            { unsigned char tmp = p[i]; p[i] = p[j]; p[j] = tmp; }
+        }
+    }
+    if (dec) { for (i = 0; i < VM_OPN; i++) t[i] = p[i]; }          // raw->gercek
+    else     { for (i = 0; i < VM_OPN; i++) t[p[i]] = (unsigned char)i; } // gercek->raw
+}
 
 // --- ALU alt kodlari ---
 #define ALU_ADD 0
@@ -70,6 +131,8 @@
 #define SHI_SHL 0
 #define SHI_SHR 1
 #define SHI_SAR 2
+#define SHI_ROL 3   // 0.8.0: donusumler (RCL/RCR desteklenmez -> RED)
+#define SHI_ROR 4
 
 // --- condition kodlari (x86 Jcc sirasi! JP/NP dahil) ---
 #define CC_O  0
@@ -135,7 +198,7 @@
 // son 8B'si (pack_rva + reserved) ilk bytecode'un ilk 8 baytini eziyor,
 // VM çöp opcode okuyor ve fonksiyon SESSIZCE no-op'a düşüyordu
 // (kullanıcı kanıtı: metin2 ULTRA+loaderCRC = damage yok, crash yok).
-#define XCFG_SIZE_E     0x48
+#define XCFG_SIZE_E     0x60   // 0.8.0: +16B (unw 0x44/0x48, sectcrypt 0x4C/0x50/0x58 — xr_cipher.h)
 
 // --- stub'in yigin rezervi (fonksiyonun kendi push/literal alani) ---
 #define VM_CTX_SZ   0xE8
