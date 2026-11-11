@@ -2564,6 +2564,7 @@ static void start_compile() {
     }
     if (g_proj.funcs.empty() || (opt.funcs.empty() && opt.manual.empty())) opt.all = true;
     opt.antidebug = (g_proj.options & cpCheckDebugger) != 0;
+    opt.checkvm = (g_proj.options & cpCheckVirtualMachine) != 0;   // 1.1.0-A7: motor baglandi
     opt.strenc = (g_proj.options & cpCryptValues) != 0;
     opt.memprot = (g_proj.options & cpMemoryProtection) != 0;
     opt.vmenc = (g_proj.options & cpEncryptBytecode) == 0;   // vmenc varsayilan ACIK
@@ -4030,6 +4031,7 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int nCmd) {
                             have_funcs = true;
                         }
                     } else if (!wcscmp(argv[j], L"--antidebug")) opt.antidebug = true;
+                    else if (!wcscmp(argv[j], L"--checkvm")) opt.checkvm = true;
                     else if (!wcscmp(argv[j], L"--strenc")) opt.strenc = true;
                     else if (!wcscmp(argv[j], L"--memprot")) opt.memprot = true;
                     else if (!wcscmp(argv[j], L"--novmenc")) opt.vmenc = false;

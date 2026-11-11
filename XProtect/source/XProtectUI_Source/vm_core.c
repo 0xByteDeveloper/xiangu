@@ -1039,7 +1039,22 @@ static void vm_run(VMContext* c) {
 #endif
 
         } else if (op == OP_ANTIDBG) {
+            /* 1.1.0-A7: maske bayti — bit0=anti-debug bataryasi (PEB/K1..K6),
+               bit1=Check VM (K7 CPUID hipervizor-present, leaf1 ECX bit31). */
+            ud = sf8(&s);
 #ifdef VM_WINDOWS
+            if (ud & 2) {
+#if defined(VM_IS_X64)
+                u32 ca, cb, ccx2, cd2;
+                __asm__ volatile("cpuid" : "=a"(ca), "=b"(cb), "=c"(ccx2), "=d"(cd2) : "a"(1));
+#else
+                u32 ca, cb, ccx2, cd2;
+                __asm__ volatile("pushl %%ebx\n\tcpuid\n\tpopl %%ebx"
+                                 : "=a"(ca), "=c"(ccx2), "=d"(cd2) : "a"(1) : "memory");
+#endif
+                if (ccx2 & 0x80000000u) c->done = 2;   /* hipervizor icinde */
+            }
+            if (ud & 1) {
 #if defined(VM_IS_X64)
             { u64 peb; __asm__ volatile("movq %%gs:0x60, %0" : "=r"(peb));
               u8* p = (u8*)u2p(peb);
@@ -1197,6 +1212,7 @@ static void vm_run(VMContext* c) {
                     }
                 }
             }
+            }   /* if (ud & 1) — anti-debug bataryasi */
 #endif
 
                 } else if (op == OP_BSWAP_R) {

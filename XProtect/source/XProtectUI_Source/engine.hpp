@@ -326,6 +326,7 @@ struct Options {
     std::map<std::string,int> ftypes;  // 0.3.0: fonksiyon -> tip (anahtar opt.funcs formatıyla aynı)
     int  mut_strength = 2;     // 0.3.0: mutasyon gucu 1..3
     bool antidebug = false;
+    bool checkvm = false;     // 1.1.0-A7: cpCheckVirtualMachine -> K7 CPUID
     bool strenc = false;
     bool memprot = false;
     bool vmenc = true;

@@ -235,11 +235,23 @@ static void scan_sdk_api(const PEFile& pe, std::vector<ApiSite>& out,
 }
 
 // ---- IAT dolayli-cagri noktasi tarayicisi ----
-struct IatSite { u32 site_rva; u32 iat_rva; bool is_jmp; u32 insn_len; };
+struct IatSite {
+    u32 site_rva, iat_rva, insn_len;
+    int kind = 0;    /* 0=call/jmp thunk (FF15/FF25), 1=mov r,[IAT] yukleme */
+    bool is_jmp = false;
+    int reg = -1;    /* kind=1: hedef reg (REX.R dahil); -1 = islenmez */
+    bool rex = false;
+};
 static void scan_iat_sites(const PEFile& pe, const std::vector<FnInfo>& fns,
                             const std::map<u32, ImpSlot>& by_rva,
                             std::vector<IatSite>& out, u32& n_func_skip) {
     for (auto& f : fns) {
+        /* 1.1.0-A6 VMProtect semantigi: import cagrilari YALNIZ korunan
+           (sanallastirilan) fonksiyonlarda thunk'a cevrilir. Korunmayan
+           kodun (CRT, exit yolu) cagrilari dogrudan IAT'ten devam eder —
+           CRT kapanisinda thunk-resolve ile kirisma yok (49-site kaniti:
+           main calisiyor, DETACH'ta base+0'a ziplama). */
+        if (!f.selected) continue;
         if (f.size < 8) continue;
         bool ok; u32 raw = pe.rva2raw(f.rva, &ok);
         if (!ok || raw + f.size > pe.buf.size()) continue;
@@ -249,8 +261,12 @@ static void scan_iat_sites(const PEFile& pe, const std::vector<FnInfo>& fns,
             Insn I = disasm(&pe.buf[raw + (pc - f.rva)], (int)(end - pc), pe.is64, pc,
                             (u64)pe.imagebase, pe.sizeofimage);
             if (I.op == XP_UNKNOWN || I.len == 0) { aborted = true; break; }
-            if (I.op == XP_CALLI || I.op == XP_JMPI) {
-                u32 slot_rva = 0;
+            /* 1.1.0-A6: kind=1 mov r,[IAT] — derleyicilerin 'mov rax,[__imp_X]'
+               + 'call rax' deseni; eski tarayici yalniz FF15/FF25 yiyordu.
+               Yama: x64 lea r,[rip+thunk] (ayni uzunluk; thunk adi-ilkinde
+               API'ye atlar), x86 mov r32, imm32=thunk-VA + nop. */
+            u32 slot_rva = 0;
+            if (I.op == XP_CALLI || I.op == XP_JMPI || I.op == XP_MOV_RM) {
                 if (I.mem.riprel)
                     slot_rva = pc + I.len + (u32)(i32)(u32)I.mem.disp;
                 else if (I.mem.absimage) {
@@ -258,12 +274,24 @@ static void scan_iat_sites(const PEFile& pe, const std::vector<FnInfo>& fns,
                     if (va >= pe.imagebase && va < (u64)pe.imagebase + pe.sizeofimage)
                         slot_rva = (u32)(va - pe.imagebase);
                 }
-                if (slot_rva && by_rva.count(slot_rva)) {
-                    IatSite s;
-                    s.site_rva = pc; s.iat_rva = slot_rva;
-                    s.is_jmp = (I.op == XP_JMPI); s.insn_len = I.len;
-                    out.push_back(s);
+            }
+            if (slot_rva && by_rva.count(slot_rva)) {
+                IatSite s;
+                s.site_rva = pc; s.iat_rva = slot_rva; s.insn_len = I.len;
+                s.is_jmp = (I.op == XP_JMPI);
+                if (I.op == XP_MOV_RM && I.mem.present) {
+                    /* mov r <- em] : r1 hedef reg; tam-genislik (4/8) yalniz */
+                    if (I.sz == 4 || I.sz == 8) {
+                        s.kind = 1;
+                        s.reg = I.r1;
+                        s.rex = I.r1 >= 8;
+                    }
                 }
+                /* beklenmedik kalip — dokunma (x64: 7B REX'li / 6B r32;
+                   x86: 6B 8B /r [abs32]) */
+                if (s.kind == 1 && pe.is64 && s.insn_len != 7 && s.insn_len != 6) s.kind = 0;
+                if (s.kind == 1 && !pe.is64 && s.insn_len != 6) s.kind = 0;
+                out.push_back(s);
             }
             pc += I.len;
         }
@@ -582,7 +610,9 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
 
     // ---- 0.7.0: LSD (License SeDiketi) — cfg sonrasi rezerve edilir ----
     // Duzen: [cfg 0x48][LSD 0x12C][bytecode...]
-    #define LSD_SIZE_E 0x12C
+    /* 1.1.0-A7: 0x130..0x16F = watermark metni (64B), 0x12C..0x12D = uzunluk.
+       CRC alani (0x000..0x11F) degismedi — runtime uyumlu. */
+    #define LSD_SIZE_E 0x170
     #define LSD_CACHE_E 0x104   /* 0.7.0-final: serial em önbelleği (flag+256B) */
     std::vector<u8> lsd;
     if (!opt.lic_pubkey.empty()) {
@@ -647,6 +677,27 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                 for (size_t q = 0; q < thunk_slots.size(); q++)
                     if (thunk_slots[q].iat_rva == st.iat_rva) { thr = thunk_rvas[q]; break; }
                 if (!thr) continue;
+                if (st.kind == 1 && st.reg >= 0) {
+                    /* mov r,[IAT] -> thunk adresi yukle */
+                    if (pe.is64) {
+                        /* [REX] 8B /r [rip+disp32] -> [REX] 8D /r [rip+thunk]
+                           8B konumu = insn_len-6 (7B:1, 6B:0); disp32 sonda */
+                        u32 rel = (u32)(thr - (st.site_rva + st.insn_len));
+                        pe.buf[sraw + st.insn_len - 6] = 0x8D;  /* mov->lea */
+                        u32 doff = sraw + st.insn_len - 4;
+                        pe.buf[doff + 0] = (u8)rel; pe.buf[doff + 1] = (u8)(rel >> 8);
+                        pe.buf[doff + 2] = (u8)(rel >> 16); pe.buf[doff + 3] = (u8)(rel >> 24);
+                    } else {
+                        /* 6B: 8B /r [abs32] -> B8+r imm32(thunk VA) + 90 */
+                        u32 va = pe.imagebase + thr;
+                        pe.buf[sraw + 0] = (u8)(0xB8 + (st.reg & 7));
+                        pe.buf[sraw + 1] = (u8)va; pe.buf[sraw + 2] = (u8)(va >> 8);
+                        pe.buf[sraw + 3] = (u8)(va >> 16); pe.buf[sraw + 4] = (u8)(va >> 24);
+                        pe.buf[sraw + 5] = 0x90;
+                    }
+                    n_iat_sites++;
+                    continue;
+                }
                 i32 rel = (i32)(thr - (st.site_rva + 5));
                 u8 jb[16];
                 jb[0] = st.is_jmp ? 0xE9 : 0xE8;   // jmp / call thunk
@@ -867,7 +918,13 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                 c.v.notes.push_back("  [STRDEC] str=0x" + hex32(s.rva) + " len=" + std::to_string(s.len) + " key=0x" + hex32(k2));
             }
         }
-        if (opt.antidebug) plain.push_back(ptab[OP_ANTIDBG]);
+        /* 1.1.0-A7: ANTIDBG maske bayti — bit0=anti-debug bataryasi,
+           bit1=Check VM (K7 CPUID hipervizor). UO/VMProtect CheckVirtual
+           Machine secenegi artik motora bagli. */
+        if (opt.antidebug || opt.checkvm) {
+            plain.push_back(ptab[OP_ANTIDBG]);
+            plain.push_back((u8)((opt.antidebug ? 1 : 0) | (opt.checkvm ? 2 : 0)));
+        }
         c.prefix_len = (u32)plain.size();     // 0.8.1: govde ref-site kaydirmasi
         plain.insert(plain.end(), c.v.plain.begin(), c.v.plain.end());
         c.plain = plain;
@@ -1038,6 +1095,14 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
                 w *= 0x100000001B3ull;
             }
             for (int wi = 0; wi < 8; wi++) lsd[0x118 + wi] = (u8)(w >> (8 * wi));
+            /* 1.1.0-A7: watermark METNI gomulu (UO cpIncludeWatermark 1:1:
+               sizinti izleme — korunan dosyada metin okunur bulunur).
+               LSD_CRC (0x000..0x11F) DISINDA — runtime etkisi yok. */
+            u32 wl = (u32)opt.lic_watermark.size();
+            if (wl > 64) wl = 64;
+            for (u32 wi = 0; wi < wl; wi++) lsd[0x130 + wi] = (u8)opt.lic_watermark[wi];
+            lsd[0x12C] = (u8)wl;
+            lsd[0x12D] = (u8)(wl >> 8);
         }
         /* 0.7.0-final FIX: CRC SADECE 0x000..0x11F (LSD_CRC_LEN) — state(0x120)
            /tick(0x124) runtime-yazılabilir; CRC'ye dahil edilirse ilk SetSerial
@@ -1537,6 +1602,7 @@ int protect(const std::string& in, const std::string& out, const Options& opt,
     L("[OZET] tipler: V=" + std::to_string(nV) + " M=" + std::to_string(nM) + " U=" + std::to_string(nU)
       + (nUf ? " (U->V dusus=" + std::to_string(nUf) + ")" : "")
       + " | antidebug=" + (opt.antidebug ? "ACIK" : "kapali")
+      + " | checkvm=" + (opt.checkvm ? "ACIK" : "kapali")
       + " | strenc=" + (opt.strenc ? "ACIK" : "kapali")
       + " | memprot=" + (opt.memprot ? "ACIK" : "kapali")
       + " | vmenc=" + (opt.vmenc ? "ACIK" : "KAPALI")
