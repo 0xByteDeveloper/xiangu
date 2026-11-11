@@ -126,6 +126,8 @@ static u64 peb_addr(void) { u64 v; __asm__ volatile ("movq %%gs:0x60, %0" : "=r"
 #define ENT_DLLBASE_OFF 0x30
 #define ENT_NAMEBUF_OFF 0x60
 #define ENT_NAMELEN_OFF 0x58
+#define ENT_FULLBUF_OFF 0x50   /* 1.1.0: FullDllName.Buffer (DLL dosya yolu) */
+#define ENT_FULLLEN_OFF 0x48   /*        FullDllName.Length          */
 #define PEB_LDR_OFF     0x18
 #else
 static u32 peb_addr(void) { u32 v; __asm__ volatile ("movl %%fs:0x30, %0" : "=r"(v)); return v; }
@@ -135,6 +137,8 @@ static u32 peb_addr(void) { u32 v; __asm__ volatile ("movl %%fs:0x30, %0" : "=r"
 #define ENT_NAMEBUF_OFF 0x30
 #define ENT_NAMELEN_OFF 0x2C   // 0.5.0 DUZELTME: x86 BaseDllName.Length +0x2C
                                // (+0x28 = FullDllName.Buffer'di — yanlis alan)
+#define ENT_FULLBUF_OFF 0x2C   /* 1.1.0: x86 FullDllName.Buffer */
+#define ENT_FULLLEN_OFF 0x24   /*        FullDllName.Length     */
 #define PEB_LDR_OFF 0x0C
 #endif
 
@@ -271,6 +275,41 @@ static u64 peb_module(u32 want) {
         if (nbuf && nlen && nlen < 128) {
             u32 h = fnv_w((const u16*)(unsigned long)nbuf, nlen >> 1);
             if (h == want) return LDPTR((const u8*)(unsigned long)(ent + ENT_DLLBASE_OFF));
+        }
+        cur = LDPTR((const u8*)(unsigned long)cur);
+    }
+    return 0;
+}
+
+/* 1.1.0-A4/DLL: VERILEN MODULE BASE'e AIT DOSYA YOLU (FullDllName).
+   DLL senaryosunda file-CRC hedefi DLL'in KENDISIDIR; GetModuleFileNameA
+   (h=NULL) HOST EXE'yi verir — yanlis hedef. PEB InLoadOrder listesinde
+   DllBase==base eslesmesi aranir. Donus: ANSI uzunluk (0=bulunamadi). */
+static u32 peb_path_for_base(const u8* base, char* out, u32 cap) {
+    u64 peb = peb_addr();
+    if (!peb || !base || cap < 4) return 0;
+    u64 ldr = LDPTR((const u8*)(unsigned long)(peb + PEB_LDR_OFF));
+    if (!ldr) return 0;
+    u64 head = ldr + LDR_INMEM_OFF;
+    u64 cur = LDPTR((const u8*)(unsigned long)head);
+    int guard = 0;
+    while (cur && cur != head && guard++ < 96) {
+        u64 ent = cur - ENT_INMEM_OFF;
+        u64 db = LDPTR((const u8*)(unsigned long)(ent + ENT_DLLBASE_OFF));
+        if (db == (u64)(unsigned long)base) {
+            u32 nlen = ld16((const u8*)(unsigned long)(ent + ENT_FULLLEN_OFF));
+            u64 nbuf = LDPTR((const u8*)(unsigned long)(ent + ENT_FULLBUF_OFF));
+            u32 i, n;
+            if (!nbuf || !nlen) return 0;
+            n = nlen >> 1;
+            if (n >= cap) n = cap - 1;
+            for (i = 0; i < n; i++) {
+                u16 w = ld16((const u8*)(unsigned long)(nbuf + 2 * i));
+                out[i] = (char)(w & 0xFF);   /* ASCII dusus; uzayici yol -> CRC fallback exe */
+                if (!out[i]) { n = i; break; }
+            }
+            out[n] = 0;
+            return n;
         }
         cur = LDPTR((const u8*)(unsigned long)cur);
     }
@@ -511,7 +550,12 @@ u32 xrt_entry(void* cfgp) {
             u64 ch   = find_export(k32, XH_CLOSEHANDLE);
             if (gmfn && cfa && rf && ch) {
                 char path[1056];
-                u32 r = api3(gmfn, 0, (u64)(unsigned long)(void*)path, 1040);
+                /* 1.1.0-A4/DLL: hedef = KORUMALI MODUL (base). DLL yukluyse
+                   PEB FullDllName ile DLL'in KENDI yolu; bulunamazsa eski
+                   GetModuleFileNameA(NULL) (host exe) davranisi. */
+                u32 plen = peb_path_for_base(base, path, 1040);
+                u32 r = plen;
+                if (!r) r = api3(gmfn, 0, (u64)(unsigned long)(void*)path, 1040);
                 if (r && r < 1040) {
                     // CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0)
                     u64 h = api7(cfa, (u64)(unsigned long)(void*)path, 0x80000000u, 1, 0, 3, 0, 0);

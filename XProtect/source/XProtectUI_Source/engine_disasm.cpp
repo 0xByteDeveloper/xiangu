@@ -79,9 +79,12 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
                 if (i + 4 > maxlen) return false;
                 long long d = 0; for (int k = 0; k < 4; k++) d |= ((long long)p[i + k]) << (8 * k);
                 i += 4;
-                if (is64) { m.riprel = false; m.absimage = true; m.absval = (u64)d; }
-                else      { m.absimage = true; m.absval = (u64)d; }
-                m.disp = 0;
+                /* 1.1.0-DUZELTME: x64'te SIB base=5 mod=0 index=var ->
+                   [idx*8 + disp32] (disp HAM; mutlak DEGIL). Yalniz index de
+                   yoksa (ix==4) [disp32] mutlak adreslemedir. x86: mod=0
+                   base=5 her zaman mutlak (eski davranis). */
+                if (is64 && ix != 4) { m.riprel = false; m.absimage = false; m.disp = d; }
+                else      { m.absimage = true; m.absval = (u64)d; m.disp = 0; }
             } else {
                 m.base = bs + (rexb ? 8 : 0);
                 if (mod == 1) { if (i >= maxlen) return false;
