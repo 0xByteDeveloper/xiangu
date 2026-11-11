@@ -1,0 +1,45 @@
+damage RVA=0x15B0 size=0x34
+013c:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+mode=clean r=3812 dr0=0
+x64 clean -> mode-satiri: mode=clean r=3812 dr0=0  rc=42  CALISTI
+0168:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+mode=ceveh r=3812 dr0=0
+x64 ceveh -> mode-satiri: mode=ceveh r=3812 dr0=0  rc=42  CALISTI
+0194:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+mode=gameveh r=3812 dr0=0
+x64 gameveh -> mode-satiri: mode=gameveh r=3812 dr0=0  rc=42  CALISTI
+01c0:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+DIAG main-verify r0 dr0=1400015b8 g1=1
+DIAG worker-try1 dr0=0 gtc=1 r=3812
+DIAG main-verify r1 dr0=1400015b8 g1=1
+DIAG worker-try2 dr0=0 gtc=1 r=3812
+DIAG main-verify r2 dr0=1400015b8 g1=1
+DIAG worker-try3 dr0=0 gtc=1 r=3812
+DIAG main-verify r3 dr0=1400015b8 g1=1
+DIAG worker-try4 dr0=0 gtc=1 r=3812
+DIAG main-verify r4 dr0=1400015b8 g1=1
+DIAG worker-try5 dr0=0 gtc=1 r=3812
+mode=gamedrx r=3812 dr0=0
+x64 gamedrx -> mode-satiri: mode=gamedrx r=3812 dr0=0  rc=42  CALISTI
+01f0:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+DIAG main-verify r0 dr0=1400015b8 g1=1
+DIAG worker-try1 dr0=0 gtc=1 r=3812
+DIAG main-verify r1 dr0=1400015b8 g1=1
+DIAG worker-try2 dr0=0 gtc=1 r=3812
+DIAG main-verify r2 dr0=1400015b8 g1=1
+DIAG worker-try3 dr0=0 gtc=1 r=3812
+DIAG main-verify r3 dr0=1400015b8 g1=1
+DIAG worker-try4 dr0=0 gtc=1 r=3812
+DIAG main-verify r4 dr0=1400015b8 g1=1
+DIAG worker-try5 dr0=0 gtc=1 r=3812
+mode=cevehdr r=3812 dr0=0
+x64 cevehdr -> mode-satiri: mode=cevehdr r=3812 dr0=0  rc=42  CALISTI
+0220:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+mode=sw r=-559038737 dr0=0
+x64 sw -> mode-satiri: mode=sw r=-559038737 dr0=0  rc=1  DURDU
+024c:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+mode=tfstep r=-559038737 dr0=0
+x64 tfstep -> mode-satiri: mode=tfstep r=-559038737 dr0=0  rc=1  DURDU
+0278:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+mode=peb r=-559038737 dr0=0
+x64 peb -> mode-satiri: mode=peb r=-559038737 dr0=0  rc=1  DURDU

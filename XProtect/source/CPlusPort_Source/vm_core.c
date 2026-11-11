@@ -285,6 +285,162 @@ static u64 vm_natcall(u64 t, const u64* regs) {
 #endif
 #endif
 
+// ============================================================
+// 0.8.4: VEH debugger yakalama — 0.8.1 tabanina IKI oyun-guvenli kontrol.
+// (0.8.2/0.8.3 dersi: TF-probunun istisna-dispatch'i yorumlayici
+//  cerceveleriyle carpisir; wine yigin-degistirme/is-parcacigi
+//  senaryolarinda VEH baglam-yazimi YITIRILIR -> temiz oyunda tek-adim
+//  dongusu/cokme. Asagidaki iki kontrol istisna-dispatch'i HIC devreye
+//  sokmaz — dispatcher karismasi TASARIM OLARAK IMKANSIZ.)
+//
+// (K1) KAPI-0xCC: korunan fonksiyonun ORIJINAL giris bayti (E9 tramp).
+//      CE VEH debugger yazilim-kirisini (F5/breakpoint) girise YAZAR ve
+//      ARMALI birakir (tek-adim sonrasi geri yazar). Temiz oyunda o
+//      bayt HICBIR ZAMAN 0xCC degildir (bizim E9'umuz) -> 0xCC = kesin
+//      kanit. (UniversalObfuscator loader.cc:2120 0xCC-taramasinin
+//      XProtect'e ozel, yanlis-pozitifsiz formu: yalniz KENDI girisimiz.)
+//
+// (K2) TF-BAYRAGI: pushfq ile anlik TF. Bir debugger (CE VEH / Windows)
+//      fonksiyonu TEK-ADIM izlerken TF=1'dir. Temiz oyunda ring3'te TF
+//      asla 1 kalmaz -> TF=1 = kesin kanit. (VMProtect loader.cc:2446
+//      TF-probunun istisnasiz formu.)
+//
+// KAPSAM (0.8.5): CE VEH debugger hwbp (F5 — kullanicinin senaryosu),
+//      CE VEH yazilim-kirici giriste (K1), CE VEH/Windows tek-adim (K2),
+//      Windows debugger (PEB + K1/K2/K3), x64dbg/winedbg.
+//      QIP, guard-page, ntdll-0xCC taramalari BILINCLI YOK: 0.8.2'nin
+//      temiz-oyun yanlis-pozitif yuzeyleri. Yabanci-VEH zincir gezinmesi
+//      de yok: AV/crash-raporlayici VEH'leri yanlis-pozitif yapar.
+// KURAL: libc YOK, string literal YOK, statik veri YOK (tam PIC).
+// ============================================================
+#if defined(VM_WINDOWS)
+
+/* --- isim hash'leri (derleme sabiti; FNV-1a, xrt_core.c ayni aile) --- */
+#define XA_K32   0xA3E6F6C3u   /* "kernel32.dll" (genis, kucuk-harf) */
+#define XA_NTD   0xA62A3B3Bu   /* "ntdll.dll"    (genis, kucuk-harf) */
+#define XA_GTC   0x85CCA27Eu   /* GetThreadContext */
+
+/* CONTEXT ofsetleri (winnt.h birebir) — yalniz DEBUG_REGISTERS alani */
+#if defined(VM_IS_X64)
+  #define XA_CTX_FLAGS   0x30
+  #define XA_CTX_DR0     0x48
+  #define XA_CTX_DR1     0x50
+  #define XA_CTX_DR2     0x58
+  #define XA_CTX_DR3     0x60
+  #define XA_CTX_SIZE    0x4D0
+  #define XA_CTX_DBGFL   0x00100010u   /* CONTEXT_DEBUG_REGISTERS|AMD64 */
+#else
+  #define XA_CTX_FLAGS   0x00
+  #define XA_CTX_DR0     0x04
+  #define XA_CTX_DR1     0x08
+  #define XA_CTX_DR2     0x0C
+  #define XA_CTX_DR3     0x10
+  #define XA_CTX_SIZE    0x2CC
+  #define XA_CTX_DBGFL   0x00010010u   /* CONTEXT_DEBUG_REGISTERS|i386 */
+#endif
+
+static u32 xa_fnv_a(u64 s) {
+    u32 h = 2166136261u;
+    for (;;) { u8 ch = (u8)mrd(s, 1); if (!ch) break; h ^= ch; h *= 16777619u; s++; }
+    return h;
+}
+static u32 xa_fnv_w(u64 s, u32 n) {
+    u32 h = 2166136261u; u32 i;
+    for (i = 0; i < n; i++) {
+        u16 ch = (u16)mrd(s + (u64)(2u * i), 2);
+        if (ch >= 'A' && ch <= 'Z') ch = (u16)(ch + 32);
+        h ^= (u32)ch; h *= 16777619u;
+    }
+    return h;
+}
+
+static u64 xa_module(u32 want) {
+#if defined(VM_IS_X64)
+    u64 peb; __asm__ volatile("movq %%gs:0x60, %0" : "=r"(peb));
+    u64 ldr  = mrd(peb + 0x18, 8);
+    u64 head = ldr + 0x20;
+    u64 cur  = mrd(head, 8);
+    int guard = 0;
+    while (cur && cur != head && guard++ < 96) {
+        u64 ent  = cur - 0x10;
+        u32 nlen = (u32)mrd(ent + 0x58, 2);
+        u64 nbuf = mrd(ent + 0x60, 8);
+        u64 db   = mrd(ent + 0x30, 8);
+        if (db && nbuf && nlen && nlen < 128) {
+            if (xa_fnv_w(nbuf, nlen >> 1) == want) return db;
+        }
+        cur = mrd(cur, 8);
+    }
+#else
+    u32 peb; __asm__ volatile("movl %%fs:0x30, %0" : "=r"(peb));
+    u64 ldr  = mrd((u64)peb + 0x0C, 4);
+    u64 head = ldr + 0x14;
+    u64 cur  = mrd(head, 4);
+    int guard = 0;
+    while (cur && cur != head && guard++ < 96) {
+        u64 ent  = cur - 0x08;
+        u32 nlen = (u32)mrd(ent + 0x2C, 2);
+        u64 nbuf = mrd(ent + 0x30, 4);
+        u64 db   = mrd(ent + 0x18, 4);
+        if (db && nbuf && nlen && nlen < 128) {
+            if (xa_fnv_w(nbuf, nlen >> 1) == want) return db;
+        }
+        cur = mrd(cur, 4);
+    }
+#endif
+    return 0;
+}
+
+static u64 xa_export(u64 kbase, u32 want) {
+    if (!kbase) return 0;
+    u64 d = kbase;
+    if (mrd(d, 1) != 'M' || mrd(d + 1, 1) != 'Z') return 0;
+    u32 lfa = (u32)mrd(d + 0x3C, 4);
+    if (!lfa || lfa > 0x400) return 0;
+    u64 pe = d + lfa;
+    if ((u32)mrd(pe, 4) != 0x00004550u) return 0;
+    u32 magic = (u32)mrd(pe + 24, 2);
+    u32 ddoff = (magic == 0x20B) ? 112 : 96;
+    u32 erva = (u32)mrd(pe + 24 + ddoff, 4);
+    if (!erva) return 0;
+    u64 ex = d + erva;
+    u32 nnames = (u32)mrd(ex + 24, 4);
+    u32 aofn = (u32)mrd(ex + 32, 4);
+    u32 aofo = (u32)mrd(ex + 28, 4);
+    u32 aoo  = (u32)mrd(ex + 36, 4);
+    u32 i;
+    if (nnames > 0x20000) return 0;
+    for (i = 0; i < nnames; i++) {
+        u32 nrva = (u32)mrd(d + aofn + (u64)(4u * i), 4);
+        if (!nrva) continue;
+        if (xa_fnv_a(d + nrva) == want) {
+            u32 ord = (u32)mrd(d + aoo + (u64)(2u * i), 2);
+            u32 frva = (u32)mrd(d + aofo + (u64)(4u * ord), 4);
+            if (!frva) return 0;
+            return kbase + frva;
+        }
+    }
+    return 0;
+}
+
+#if defined(VM_IS_X64)
+static u64 xa_call4(u64 t, u64 a1, u64 a2, u64 a3, u64 a4) {
+    u64 r[16]; int i;
+    for (i = 0; i < 16; i++) r[i] = 0;
+    r[1] = a1; r[2] = a2; r[8] = a3; r[9] = a4;
+    return vm_natcall(t, r);
+}
+#else
+static u32 xa_call2_86(u32 t, u32 a1, u32 a2) {
+    u32 ret;
+    __asm__ volatile("pushl %2\n\tpushl %1\n\tcall *%3\n\t"
+        : "=a"(ret) : "r"(a1), "r"(a2), "r"(t) : "memory", "cc");
+    return ret;
+}
+#endif
+
+#endif /* VM_WINDOWS */
+
 // --- yorumlayici ---
 static void vm_run(VMContext* c) {
     STRM s;
@@ -590,6 +746,53 @@ static void vm_run(VMContext* c) {
               u8* p = (u8*)u2p((u64)peb);
               if (p[2] || (p[0x68] & 0x70)) c->done = 2; }
 #endif
+            /* (K1) KAPI-0xCC — scratch[3] = orijinal fonksiyon RVA'si (stub).
+               CE VEH yazilim-kirici ARMALI oldugu surece giris 0xCC'dir. */
+            if (!c->done && (u32)c->scratch[3]) {
+                if (mrd(c->base + (u64)(u32)c->scratch[3], 1) == 0xCC) c->done = 2;
+            }
+            /* (K2) TF bayragi — debugger fonksiyonu tek-adim izlerken 1 */
+#if defined(VM_IS_X64)
+            if (!c->done) {
+                u64 fl;
+                __asm__ volatile("pushfq\n\t popq %0" : "=r"(fl));
+                if (fl & 0x100) c->done = 2;
+            }
+#else
+            if (!c->done) {
+                u32 fl;
+                __asm__ volatile("pushfl\n\t popl %0" : "=r"(fl));
+                if (fl & 0x100) c->done = 2;
+            }
+#endif
+            /* (K3) DRx — CE VEH/Windows debugger donanim-kirici (0.8.5).
+               GetThreadContext(GetCurrentThread) senkron okuma: istisna-
+               dispatch YOK, VEH yazimi YOK. DR0|DR1|DR2|DR3 != 0 ->
+               debugger (UniversalObfuscator core.cc:778 semantigi 1:1). */
+            if (!c->done) {
+                u64 gtc = xa_export(xa_module(XA_K32), XA_GTC);
+                if (gtc) {
+#if defined(VM_IS_X64)
+                    u8 cbuf[XA_CTX_SIZE + 16];
+                    u64 cal = ((u64)(unsigned long)cbuf + 15ull) & ~15ull;
+                    mwr(cal + XA_CTX_FLAGS, 4, XA_CTX_DBGFL);
+                    if (xa_call4(gtc, 0xFFFFFFFFFFFFFFFEull, cal, 0, 0)) {
+                        u64 dr = mrd(cal + XA_CTX_DR0, 8) | mrd(cal + XA_CTX_DR1, 8)
+                               | mrd(cal + XA_CTX_DR2, 8) | mrd(cal + XA_CTX_DR3, 8);
+                        if (dr) c->done = 2;
+                    }
+#else
+                    u8 cbuf[XA_CTX_SIZE + 16];
+                    u32 cal = ((u32)(unsigned long)cbuf + 3u) & ~3u;
+                    mwr((u64)cal + XA_CTX_FLAGS, 4, XA_CTX_DBGFL);
+                    if (xa_call2_86((u32)gtc, 0xFFFFFFFEu, cal)) {
+                        u32 dr = (u32)mrd((u64)cal + XA_CTX_DR0, 4) | (u32)mrd((u64)cal + XA_CTX_DR1, 4)
+                               | (u32)mrd((u64)cal + XA_CTX_DR2, 4) | (u32)mrd((u64)cal + XA_CTX_DR3, 4);
+                        if (dr) c->done = 2;
+                    }
+#endif
+                }
+            }
 #endif
 
         } else if (op == OP_STRDEC) {

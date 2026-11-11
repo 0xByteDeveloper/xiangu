@@ -819,45 +819,65 @@ duruyordu). Ayrica "belki baska ozellikler de bozuk" suphesi.
    mingw araci /tmp/mgw/usr/bin/x86_64-w64-mingw32-gcc-posix (pkgs deb'lerinden
    yeniden cikarilabilir); symlinks TAM YASAKLI (bind kullan).
 
-## 0.8.2 oturumu (2026-11-10) — CE VEH debugger yakalama TAM
-KULLANICI BILDIRIMI: 0.8.1'de CE "Windows debugger" F5 fonksiyonu durduruyordu
-ama "VEH debugger" durdurmuyordu. Istek: orijinal UniversalObfuscator
-kaynagindaki yontemi birebir gecir.
+---
+Task ID: 19 — 0.8.4: VEH debugger yakalama (0.8.1 tabani) + 0.8.2/0.8.3 cokme kok-nedeni
+Agent: main (Z.ai)
+Tarih: 2026-11-10 (oturum 8)
 
-1) KOK NEDEN: 0.8.1 OP_ANTIDBG yalniz PEB.BeingDebugged+NtGlobalFlag. CE VEH:
-   OS debug API'si YOK (DebugPort=0, PEB=0), yazilim-bp bayti tek-adimda GERI
-   yazilir (görünmez), donanim-bp DRx'te kalir.
-2) ORIJINAL ANALIZ (upload/universalObfusPublicSrc.zip runtime/):
-   loader.cc:2116 ntdll API girisi 0xCC taramasi (NtOpenFile/NtCreateSection/
-   NtMapViewOfSection/NtUnmapViewOfSection/NtClose/NtProtectVirtualMemory),
-   loader.cc:2246+2875 NtPVM eski-koruma PAGE_GUARD|NOACCESS,
-   loader.cc:2510 TF+RDTSC problamasi, core.cc:764 PEB, core.cc:785
-   ProcessDebugPort+DebugObjectHandle, core.cc:771 TF-istisna baglamindan DRx.
-3) PORT (vm_core.c, tam batarya — x64 ms_abi + x86 stdcall VEH isleyicisi,
-   PC-goreli isleyici adresi: x64 lea sym(%rip), x86 call/pop+(sembol-1b)):
-   PEB → DebugPort/ObjectHandle → GetThreadContext(DR0-3) → KAPI (fonksiyon
-   giris bayt-0 0xCC olamaz — XProtect'e ozgu, CE yazilim-bp'yi yakalayan
-   asil kontrol) → ntdll API CC taramasi → PAGE_GUARD → TF+RDTSC (kuyruk-VEH:
-   istisna bize ulasirsa rax=MAGIC temiz; yutulursa tespit). Isim cozumleri
-   PEB-gezgini + FNV-1a (hash'ler wine ntdll export tablosunda dogrulandi —
-   carpisma yok). VM_DELTA64/86 0x600→0xC00 (derin wine-server RPC cagrilari
-   emule-yigini eziyordu — bisekt kaniti: belirleyici bozuk hesap). scratch[3]
-   (u32) cast (stub 4 bayt yazar, ust 32 bit yigin copu — strenc'te faul).
-   DebugObjectHandle `|| ==0` tuhafligi alinmadi (yanlis-pozitif).
-4) KANIT (wine64+Xvfb, son binary; test/test_veh.c CE-VEH simulatörü:
-   bp yazar/tek-adimda geri yazar/tek-adim yutar — CE davranisi birebir):
-   - clean r=3812 rc=42 CALISIR ✓ | sw (0xCC@giris) DURDU ✓ | hw (DR0) DURDU ✓
-     | vehonly (tek-adim yutan VEH, bp yok) DURDU ✓ | peb (BeingDebugged=1)
-     DURDU ✓ — 5/5 (kanit: test/veh_matrix_x64.txt)
-   - R5 ULTIMATE a=78 b=0x16f9 c=0x1221 d=81 rc=42 ✓ | tamper rc=115 dur-ret ✓
-   - strenc+antidebug birlikte: str=XP-gizli-mesaj-0.8.1 ok=1 ✓
-   - metin2 d7610 U+antidebg: bc[0]=0x0A->itab->0x1E ANTIDBG ✓ + E9 kapi ✓
-   - x86 blob sabitleri + metin2(PE32) statik ✓ (x86 runtime: wine syswow64
-     yok — 0.8.1 ile ayni sinir)
-   - SELFTEST OK (funcs=0 baseline = 0.8.1 ayni) ✓
-   - wine DR round-trip yok → (D) DRx kontrolu kod-duzeyinde dogrulanmis
-5) SURUM 0.7.0'da kalmisti → 0.8.2 (About/baslik).
-6) PAKET: XProtect_0.8.2.zip 69 dosya 11.1MB (md5 564e85d0...) ->
-   download/XProtect/ + repo releases. CHANGELOG_0.8.2.md + README_0.8.2.txt.
-   Yeni arac: test/test_veh.c + test_veh_matrix.sh + find_damage_rva.py
-   (.pdata/prolog-taramasiyla gercek fonksiyon siniri).
+Kullanici raporu: 0.8.2 temiz oyunda cokuyor, 0.8.3 debugger acilinca
+cokuyor; 0.8.1 calisiyordu (Windows debugger karsi korumali, VEH'siz).
+TALEP: "0.8.1 i ac, sadece veh debugger korumasi ekle; UniversalObfuscator
+kayagina bak."
+
+KOK-NEDEN (kanitli):
+1) 0.8.2/0.8.3 vm_core.c'de x86 CONTEXT ofsetleri YANLIS:
+   XA_CTX_EFLAGS=0xB8 (Eip!), XA_CTX_RAX=0xA8 (Edx!). VEH isleyicisi TF
+   temizleyemiyor + Eip bit-8 sifirliyor -> temiz surecte tek-adim
+   dongusu/Eip bozulumu = oyun cokmesi. (winnt.h PE32: EFlags=0xC0,
+   Eax=0xB0.) 0.8.3'un "kanit" x86 matrisi da bozuktu (kendi commit'i
+   kabul eder).
+2) TF-probu yorumlayicinin canli cerceveleri arasinda istisna dispatch
+   ediyor -> dispatch + wine ic cagrilari s.ic/regs[RSP] bozuyor
+   (wine +seh izi: SS sonrasi sf8 garbage s.ic -> wild write).
+3) wine 10 kaniti (tfprobe/tfprobe2): VEH baglam-yazimi normal ana
+   yiginda CALISIR (mark=MAGIC CLEAN-OK); yigin-degistirme veya yeni
+   is-parcacigi yigininda YITIRILIYOR (mark=0) -> yigin-oyunlari yasak.
+
+0.8.4 TASARIM (kullanici talimati: "sadece o kadar"):
+- 0.8.1 kodu birebir; OP_ANTIDBG'ye iki kontrol:
+  K1 KAPI-0xCC: stub scratch[3]=fonksiyon RVA; orijinal giris bayti
+    0xCC ise (CE VEH yazilim-kirici ARMALI) -> zehir. loader.cc:2120'nin
+    XProtect'e ozel yanlis-pozitifsiz formu.
+  K2 TF-bayragi: pushfq anlik TF=1 (debugger tek-adim izliyor) -> zehir.
+    loader.cc:2446'nin istisnasiz formu.
+- BILINCLI YOK: GetThreadContext-DRx, QIP, guard-page, ntdll-0xCC,
+  yabanci-VEH zinciri (hepsi 0.8.2'nin temiz-oyun FP yuzeyleri).
+
+KANITLAR (scripts/xp081/test + XProtect/kanit_084):
+- x64 wine matrisi 8/8: clean/gameveh/gamedrx/ceveh/cevehdr TEMIZ
+  (rc=42); sw/tfstep/peb ZEHIR (0xDEADBEEF). Oyun-VEH yutmasi ve oyun
+  DRx gozetim noktasi YANLIS-POZITIF VERMIYOR (0.8.1 davranisi).
+- x86 Unicorn matrisi 5/5 (oyun mimarisi PE32; 0.8.3'un unic matris
+  yonteminden): clean TEMIZ; kapicc/beingdbg/ntglobal/tf POISON.
+- R5 ULTIMATE rc=42 (0.8.1 ile ayni cikti); SELFTEST OK (env paritesi);
+  tamper parite (0.8.1 ile ayni).
+- metin2 d7610 statik: seed=0xD7610 bc_len=546 bc[0]=0x0A->0x1E=ANTIDBG;
+  BC BAYT-BAYT = kullanicinin calisan 0.8.1 ciktisi
+  (metin2client_vmp_ultra_checkdebugger.exe) — tek fark VM blob K1/K2.
+- KAPSAM NOTU: CE VEH "bos bagli" (kirici/izleme yok) bilincli
+  yakalanmaz; kirici konan/izleme yapan VEH debugger yakalanir.
+
+PAKET: XProtect_0.8.4.zip 134 dosya 8.5MB (md5 ed1d3c7c48d81b45a3a9e
+8d1f248ff38) -> releases/ + download/XProtect/ + download/.
+Surum 0.8.4 (About/title).
+
+PUSH: GitHub PAT 401 Bad credentials (token suresi dolmus) — commit
+yerel: 19d18df (xiangu_local main + xp081 worktree). Yeni token
+istenecek.
+
+Stage Summary:
+- 0.8.4 teslim: 0.8.1 tabani + K1/K2 VEH yakalama; 0.8.2/0.8.3 kok-
+  nedeni kanitli (yanlis x86 CONTEXT ofsetleri + dispatch carpismasi
+  + wine yigin baglam kaybi); temiz-oyun guvenligi matrislerle kanitli.
+- Siradaki: yeni PAT ile push; kullanici oyun testi (temiz + CE VEH
+  bp/step + x64dbg); 0.9.0 anti-debug paketi icin kapsam karari.
