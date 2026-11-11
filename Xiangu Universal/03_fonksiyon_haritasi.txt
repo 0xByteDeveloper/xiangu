@@ -1,0 +1,365 @@
+================================================================================
+ XIANGU UNIVERSAL — 03 · FONKSİYON HARİTASI (FUNCTION MAP)
+================================================================================
+ Hedef   : universalObfusPublicSrc (vmp ağacı) — kritik fonksiyon envanteri
+ Kapsam  : Bu harita, doküman 01'deki ÖZELLİK haritasının "fonksiyon
+           seviyesi" ikizidir: her yeteneğin HANGİ fonksiyon tarafından
+           gerçekleştirildiğini dosya:satır referansıyla gösterir.
+ Biçim   : [M] modül başlığı → fonksiyon tablosu (isim · satır · görev).
+           Tablolarda yalnızca mimari öneme sahip giriş noktaları listeleni-
+           r; get/set tarzı erişimciler tek satırda gruplanmıştır.
+================================================================================
+
+================================================================================
+ [M1] core/core.cc + core.h — PROJE ORKESTRASYONU
+================================================================================
+ FONKSİYON                     SATIR      GÖREV
+ Core::Open                    core.cc:524  Dosyayı sırayla PEFile/MacFile/
+                                          ELFFile ile açar; kod segmenti
+                                          yoksa reddeder; şablon + XML/ini +
+                                          varsayılan fonksiyonlar + lisans.
+ Core::Compile                 1693        Tam derleme: script önişlemi →
+                                          CompileOptions (lisans durumuna
+                                          göre cpEncryptBytecode/vm_count=10)
+                                          → BeginCompileTransaction →
+                                          output_file_->Compile → End.
+ Core::BeginCompileTransaction 1811        Hedef dosya kilidi + girdinin
+                                          kopyası geçici dosyaya (atomic swap).
+ Core::EndCompileTransaction   —           Sonuç taşıma + hata temizliği.
+ Core::version/build/copyright 1978-1986   version.h'den kimlik.
+ Core::check_license_edition    1988        VMProtectProductId kontrolü.
+ LoadFromXML/LoadFromIni/Save   —           .vmp proje biçimi (tinyxml).
+ LoadDefaultFunctions          —           EP + marker fonksiyonlarının
+                                          otomatik eklenmesi.
+ (Yardımcı sınıflar: License/RSA/LicensingManager [GenerateSerialNumber,
+ DecryptSerialNumber], Watermark [Compile/SearchByte],
+ WatermarkManager, FileManager/FileFolder/InternalFile,
+ ProjectTemplateManager, GlobalLocker.)
+
+================================================================================
+ [M2] core/intel.cc (31.493 satır) — X86/X64 DERLEYİCİ + VM ÜRETİCİ
+================================================================================
+ --- Keşif ---
+ IntelFileHelper::Parse       19368       Marker/import/derleyici-imza/
+                                          string taraması; otomatik fonksiyon
+                                          tespiti (VMProtect begin/end
+                                          "EB10564D50..." imzası).
+ --- Fonksiyon seviyesi ---
+ IntelFunction::Init          —           x64 unwind işleme (LPStart/TTable)
+                                          + SEH temizliği.
+ IntelFunction::Prepare       15822-15950 Fonksiyon girişine anti-trace + CPU
+                                          hash kontrol bloğu (pushf/push
+                                          rep... test TF; cpuid; PEB
+                                          OSBuildNumber; loader data XOR).
+ IntelFunction::Compile       18434-18452 ctMutation→CompileToNative;
+                                          ctVirtualization→CompileToVM;
+                                          ctUltra→Mutate+CompileToVM.
+ IntelFunction::CompileToVM   18377       Komutları VM komutlarına; blok
+                                          başına RASTGELE VM seçimi.
+ IntelFunction::Mutate         16039-16561 Çöp kod + eşdeğer dönüşümler
+                                          (B2'deki mekanik).
+ IntelFunction::AddGate        18141       VM giriş kapısı (entry_cryptor;
+                                          IntelObfuscation çağrısı ÖLÜ).
+ --- Komut seviyesi ---
+ IntelCommand::ReadFromFile    —           x86/x64 çözücü (577 tip).
+ IntelCommand::CompileToVM     9744-11433  VM yığın makinesi kod üretimi.
+ IntelCommand::AddVMCommand    8735-8886    IntelVMCommand üretimi; vo* bayrak-
+                                          ları; cmXadd session-key şifrelemesi.
+ IntelCommand::AddGate/EncryptBuffer 8744-8834  LockToKey blok şifrelemesi.
+ CompileOperand                9622-9742   İşlenen başına VM komut dizileri.
+ AddCombineFlags/CorrectFlag/ExtractFlag 8947-9065  Bayrak er yürütme.
+ AddJmpWithFlagSection         9067        Koşullu atlamaların VM karşılığı.
+ AddCorrectESPSection         9597        ESP düzeltmeleri.
+ --- VM üretimi ---
+ IntelVirtualMachineList::Prepare 30637-30814  Görünür opcode kümesi topla;
+   vm_count kadar IntelVirtualMachine + 1 processor üret.
+ IntelVirtualMachine::Init/InitCommands 27744/28570  Yazmaç tahsisi (kayıtsız
+   sabit / kayıtlı rastgele + Fisher-Yates), giriş kodu, crypt_registr,
+   check stack, tüm handler üretimi (28832-30203).
+ IntelVirtualMachine::CompileCommand/CompileBlock 30225/30446  Bayt kodu emis-
+   yonu; Classic opcode yerleştirme / Advanced rel32 ofsetler; iki geçişli
+   şifreleme (need_encrypt).
+ IntelVirtualMachine::GetOpcode 30205  Advanced klon rotasyonu (circular_queue).
+ AddReadCommand                27793-27825 itab okuma komutu + handler'ın
+                                          kendi kendini çözmesi.
+ AddCallCommands               27905      cmCall/cmSyscall handler (çağrı
+                                          kuralı başına arg aktarımı).
+ cmCrc handler                 29990-30062 CRC zinciri VM komutu.
+ CloneHandler                  27861-27903 Advanced 10-klon gövde kopyası.
+ IntelVirtualMachineProcessor  30976      Tüm handler gövdelerini barındıran
+   ::Init/Compile               ctMutation'lu makro-fonksiyon.
+   ::AddExceptionHandler       30996       VM içinden SEH devam (unwind).
+ --- Loader serileştirmesi ---
+ BaseIntelLoader::Compile      22252+      Loader gövdesi (imports/IAT/isim
+   PEIntelLoader::Compile      22974-23109  tabloları, resource, TLS, delay
+   MacIntelLoader::Compile     24889-25090  import, packer verisi, fixup,
+                                          CRC, cfg_check; EP=loader).
+ (Ek: PEIntelExport, PEIntelSDK, IntelImport::AddAntidebug — kernel32
+  anti-debug ithalatı; IntelCRCTable, IntelRuntimeData, IntelLoaderData,
+  IntelWatermark, IntelRuntimeCRCTable.)
+
+================================================================================
+ [M3] core/processors.cc — KOMUT MODELİ + ŞİFRELEYİCİLER
+================================================================================
+ ValueCommand::Calc            590+        add/sub/xor/not/neg/bswap/rol/ror.
+ ValueCryptor::Init            711-758     4-100 adımlı tersinir zincir
+                                          (fork: OpcodeCryptor tipi ccXor
+                                          sabit — processors.cc:779).
+ CommandLink::Encrypt          897-907     Link değer şifreleme.
+ CommandBlock::Compile         1114-1181   Blok kodunun hedef adrese/VM'e
+                                          yazımı (rtBackwardDirection dahil).
+ BaseFunction::virtual_machine 2215-2228   Blok başına rastgele VM seçimi.
+ BaseFunctionList::Prepare/Compile 2480/2539  4 fazlı fonksiyon üretimi;
+   (Compile içinde blok karıştırma: processors.cc:2572-2574.)
+ BaseIntelLoader::virtual_machine 22252     Loader'da VM sabitlemesi.
+
+================================================================================
+ [M4] core/files.cc — ORTAK DOSYA/MİMARİ AKIŞI
+================================================================================
+ IFile::Compile                3987        Her mimari → arch->Compile.
+ BaseArchitecture::Compile    3224-3354   Kopyala → script DoBeforeCompilation
+                                          → Prepare → list->Prepare →
+                                          list->Compile → Save.
+ BaseArchitecture::Prepare     3116-3222   runtime_options hesabı; ft* tag'lere
+                                          göre need_compile.
+ Folder/FunctionBundle/MapFunction kayıt altyapısı; MemoryManager::Alloc/
+ Pack; CRCTable; CompileOptions/CompileContext.
+
+================================================================================
+ [M5] core/pefile.cc (6.124) — PE FORMATI
+================================================================================
+ PEFile::Open/ReadHeader       3617        DOS→NT→optional(32/64)→16 dizin.
+ PEArchitecture::ReadFromFile  3983        export/import/resource/fixup/
+                                          debug/TLS/load-config/pdata/
+                                          delay-import okuma; .NET →
+                                          NETArchitecture (4144-4149);
+                                          MAP→PDB→COFF sembol denemeleri.
+ PEFile::Compile               3644-3700   Runtime blob seçimi (12 ResourceInfo:
+                                          win_runtime32/64 dll+sys, dotnet20/
+                                          40, netcore, netstandard [+demo]);
+                                          runtime'ı OpenResource ile aç.
+ PEArchitecture::Prepare       4364-4548   cpPack hizası; ASLR yoksa
+                                          StripFixups zorla; bölüm optimiza-
+                                          syonu; runtime rebase + bölge
+                                          tahsisi; .vmp için manager->Add.
+ PEArchitecture::Save          4556+       Bölüm başlıkları yeniden yazma;
+                                          loader verisi; fixup yazımı;
+                                          checksum; **entry_point = loader
+                                          girişi** (5213).
+ PEFixupList::WriteToData/Pack; PEExportList::WriteToData (yönlendirme);
+ PEResource ağacı yazımı (RC5); PERelocation::ParseMinGW;
+ PELoadConfigDirectory (CFG/SEH/cookie); PEDelayImportList.
+ dotnet tarafı: NETArchitecture::Compile/Save (dotnetfile.cc 8028 meta-
+                                          data yeniden akıtma).
+
+================================================================================
+ [M6] core/elffile.cc · macfile.cc · objc.cc · dwarf.cc · pdb.h
+================================================================================
+ ELFFile: ELFDirectory (.dynamic), ELFImport (PLT/GOT + jmp referansları),
+   ELFRelocation/ELFFixupList (x86-64 tabanlı), ELFVerneed/Verdef,
+   ELFRuntimeFunctionList (.eh_frame FDE/CIE), disable_options (5505).
+ MacFile: MacSymbolList, MacImport (stubs/lazy), MacExportNode (export
+   trie), MacFixup (chained fixups), LC_DYLD_INFO RLE çözümü,
+   MacArchitecture::Prepare (packed_segment_list/patch_section),
+   fat/universal (FAT_CIGAM) ikili mimari.
+ objc.cc: objc_module/class_ro_t/method_list_t/protocol_list_t çözümleme —
+   __objc_* sembollerinin MapFunction olarak bulunması.
+ dwarf.cc: EncodedData (ULEB/SLEB), CommonInformationEntryList (CIE),
+   DwarfParser::CreateCompactEncodingForX32/X64 — FDE'den compact unwind.
+ pdb.h: MSF/CodeView PDB ayrıştırıcı (RSDS GUID eşleşmeli).
+
+================================================================================
+ [M7] core/packer.cc — LZMA SARMALAYICI
+================================================================================
+ Packer::Packer                packer.cc:86  LzmaEnc_Create; level 9;
+                                             dict 1<<24; writeEndMark.
+ Packer::WriteProps/Code       —           5 bayt props + LzmaEnc_Encode.
+
+================================================================================
+ [M8] runtime/loader.cc (2.945) — LOADER (bkz. 01/F1 32 adım)
+================================================================================
+ SetupImage                    880-2946    32 adımlık kurulum (idempotans →
+                                          ... → LOADER_SUCCESS).
+ FreeImage                     794-838     Detach + EXIT_PROCESS.
+ LoaderAlloc/LoaderFree        13-34       LocalAlloc/malloc/ExAllocatePool.
+ LoaderFindFirmwareVendor      36-56       DMI/BIOS tarama yardımcısı.
+ Loader_stricmp/Loader_strcmp  62-108      Şifreli-isim karşılaştırma.
+ LoaderGetModuleHandle         139-189     Sürücüde SystemModuleInformation
+                                          + MDL/performance-counter referansı;
+                                          kullanıcıda GetModuleHandleA.
+ LoaderLoadLibraryEnc          191-201     Şifreli isimli yükleme.
+ LoaderFindFileVersion/        203-260     ntdll kaynak sürüm dizgisinden OS
+ LoaderParseOSBuildBumber                   build parse.
+ LoaderParseSyscall            262-273     ntdll kopyasından syscall no.
+ LoaderGetProcAddress          277-421     İkili arama + forward çözümü.
+ LoaderMessage                  514-771     %s/%c/%d + NtRaiseHardError /
+                                          CFUserNotification / zenity / DbgPrint.
+ LoaderProcessFixups           840-876     HIGHLOW/DIR64/HIGH/LOW (win),
+                                          REBASE (mac), R_386_RELATIVE+
+                                          IRELATIVE ifunc (linux).
+ LzmaDecode props/decode       2285-2322   Packer açılımı.
+
+================================================================================
+ [M9] runtime/core.cc — RUNTIME ÇEKİRDEK
+================================================================================
+ Core::Init                     1119-1180  FACE_CORE_OPTIONS'a göre alt sistem
+                                           kurulumu (Strings/License/TrialHWID/
+                                           Resources/Storage/Registry/
+                                           MemoryProtection hook'ları).
+ ExportedIsVirtualMachinePresent 288-368    CPUID/firmware/BIOS/Sandboxie.
+ ExportedIsDebuggerPresent      769+        DebugPort/ObjectHandle/sürücü listesi.
+ ExportedDecryptStringA/W, ExportedFreeString → StringManager delegasyonu.
+ ExportedSetSerialNumber/GetSerialNumberState/GetSerialNumberData →
+   LicensingManager delegasyonu.
+ ExportedActivateLicense/DeactivateLicense/GetOffline* → aktivasyon modülü.
+ ExportedDecryptBuffer            licensing tarafındaki anahtarlı blok şifre
+                                  çözme (code lock).
+ HookedDbgUiRemoteBreakin         1221-1244  Debug girişini 0xDEADC0DE ile bitir.
+
+================================================================================
+ [M10] runtime/crypto.cc · hwid.cc · licensing_manager.cc
+================================================================================
+ CryptoContainer                crypto.cc   Get/Set + RC5 şifreli depo
+                                             (18-90 CipherRC5; 93-108
+                                             RDTSC anahtar).
+ BigNumber::modpow              328+        RSA çekirdeği (tahsis
+                                             karıştırma 459-466).
+ SHA1::Input/Result             922-1073    Tam gömülü.
+ Base64Encode/Decode            818-920     Standart + ATL varyantları.
+ CalcCRC                        1075-1085   CRC32 export.
+ HardwareID                     hwid.cc     Ctor 84-102 (RDTSC anahtar;
+                                             eski+yeni CPU blokları);
+                                             AddBlock 112-133 (SHA-1+bswap);
+                                             GetCPU/ProcessCPU 136-244;
+                                             GetMachineName 247-293;
+                                             ProcessMAC 295-310 (OUI
+                                             filtresi); GetMacAddresses
+                                             309-459; GetHDD 462-542;
+                                             GetCurrentHWID 606-634 (Base64);
+                                             IsCorrect 636-675.
+ LicensingManager::SetSerialNumber licensing_manager.cc:178-252 (Base64 →
+   CRC → blacklist → RSA modpow → PKCS#1 → ParseSerial).
+ ParseSerial                    338-455    Chunk döngüsü (tarih/süre/
+   HWID/maxbuild/END doğrulama).
+ GenerateSerialNumber/DecryptSerialNumber — üretim tarafı (core/Licensing-
+   Manager aynası).
+ VerifyCode/BuildUrl/Process    936-1050    Aktivasyon kodu + URL + yanıt.
+ Activate/Deactivate            518/1052    Online + offline stringler.
+ DecryptBuffer                  592-616     Session-key'li 16-bayt blok.
+ CheckLicenseDataCRC            165-176     Lisans dosyası SHA-1.
+
+================================================================================
+ [M11] runtime/{file,registry,resource,string}_manager.cc + hook_manager.cc
+================================================================================
+ FileManager::OpenFiles/HookAPIs  file_manager.cc:233/183   13 Nt hook +
+                                          OBJECT_DIRECTORY çözümü
+                                          (DecryptDirectory/Entry 375-391;
+                                          DecryptString 222-231).
+ ReadFile/ReadImage             972-1006/500-540  Gömülü veri + PE yükleme.
+ RegistryManager::Ctor/HookAPIs  321/339      WOW node + 10 Nt hook.
+ BeginRegisterServer/EndRegisterServer 381-386  RegisterServer modu.
+ ResourceManager::Decrypt        445-500     RESOURCE_DATA çözümü +
+   ExportedLoadResource/Find*/LoadString*/Enum*  23-150  virtual kaynak
+   API yüzeyi (CompareStringEnc 462-473).
+ StringManager::DecryptString    90-107     RVA + ikili arama; yoksa
+   VirtualString                  139-184    orijinal pointer (şifresiz geçiş);
+                                             Release secure-zero.
+ HookManager::HookAPIs/UnhookAPIs hook_manager.cc  Kayıtlı API'lerin takibi.
+
+================================================================================
+ [M12] sdk/ — SDK SAPLAMASI (korunmamış geliştirme)
+================================================================================
+ VMProtectBegin*/End            sdk.cc      Boş davranış.
+ VMProtectIsProtected          —           false.
+ VMProtectIsDebuggerPresent    —           Win32 IsDebuggerPresent.
+ VMProtectDecryptStringA/W     —           identity.
+ Lisans yüzeyi                  —           INVALID vb. sabit dönüşler.
+ (Korunmuş derlemede motor bu çağrıları runtime export'larına yeniden
+  yönlendirir — bkz. 01/E1 ImportOption ioFromRuntime.)
+
+================================================================================
+ [M13] GUI (VMProtect/) + Console (VMProtectCon/) — giriş noktaları
+================================================================================
+ Application::main              main.cc:54   --help <qhc> ayrı HelpBrowser
+                                             süreci; DPI/QSS dönüşümü.
+ MainWindow::MainWindow          mainwindow.cc:110-402 menü kurulumu;
+   createLayout                  551-588     3 sekmeli sol panel;
+   showBootPage/showProjectPage   921-1049    Welcome/Recent/Quick Start;
+   showCurrentObject             1883-2100    Node→widget haritası;
+   openProject/closeProject/saveProjectAs/compileProject/executeProtected
+   goToDump/goToDirSection/goToSegment  2551+  Dump/Calculator/segment
+                                             gezinme; lokalize 1178-1240.
+ Models: ProjectModel::setCore 1581 (ağaç), InfoModel::setCore 2022
+   (Details), FunctionsModel, LogModel, DumpModel, DisasmModel,
+   WatermarkScanModel, MapFunctionListModel.
+ PropertyEditor: FunctionPropertyManager / CorePropertyManager /
+   LicensePropertyManager / InternalFilePropertyManager ...
+ Widgets: ScriptEdit (Scintilla), BinEditor (hex), FindWidget.
+ HelpBrowser::showTopic  + RemoteControl (remotecontrol.cc:77-92
+   "navigatetokeyword#id" stdin protokolü).
+ Console main                   VMProtectCon/main.cc:56-231  parametre
+   parse + Core::Open/Compile; Console::PrintMessage (console.cc:18-58
+   [V|M|U|-] olay formatı), StepProgress 106-142 (tty yüzdeli), set_warnings
+   _as_errors.
+
+================================================================================
+ [M14] utils/ + shellext/ + minidumpfixer/ — araç fonksiyonları
+================================================================================
+ ipn_sqlclr: GenerateKey (keygen.cs:134-211) chunk'lar → SHA-1 → PKCS#1
+   v1.5 3072-bit doldurma → Rsa.Encrypt → Base64; ParseKey; VmpLicenseKey
+   SQL UDF'leri; Taggant/TaggantWebService (PEM/X509).
+ ipn_tool: ExportWatermarks, CheckIfPresent (exe'de filigran arama),
+   aktivasyon SQL kayıtları, CheckSsvTest.
+ x86disasm: GenerateInstructions — tüm x86/x64 kombinasyon korpusu.
+ shellext: ContextMenuExt::InvokeCommand (cc:215-247 — VMProtect.exe'i
+   seçili dosyayla başlatır); DllRegisterServer (main.cc).
+ minidumpfixer: GetFileInfo + FixDump — DMP ModuleListStream CheckSum/
+   SizeOfImage düzeltmesi.
+
+================================================================================
+ [M15] .NET tarafı (runtime/VMProtect.Runtime/) — C# aynalar
+================================================================================
+ Loader.cs (SetupImage karşılığı — LZMA/LzmaDecoder dahil), Core.cs,
+ Faces.cs (FACE enum'larının C# kopyası), LicensingManager.cs, HardwareID.cs,
+ StringManager.cs, Crypto.cs (RC5/SHA1/BigNumber), Win32.cs,
+ VirtualMachine.cs (4.284 satır MSIL VM yorumlayıcı — ILVirtualMachine
+ üretimine runtime hizmeti), RefVm test paketi (VmExecutor,
+ VmInstrCodesDb, MsilToVmTestCompiler, StringDecryptor).
+
+================================================================================
+ HIZLI BAKIŞ — "BİR ÖZELLİĞİ KİM YAPIYOR?" ÇAPRAZ TABLOSU
+================================================================================
+ ÖZELLİK                          vmp FONKSİYONU (módül)
+ ----------------------------------------------------------------
+ Virtualization                   IntelFunction::CompileToVM + IntelVirtualMachine
+                                 ::InitCommands + CompileBlock [M2]
+ Mutation                         IntelFunction::Mutate [M2]
+ Ultra                            IntelFunction::Compile (ctUltra) [M2]
+ Pack (LZMA)                      Packer::Code [M7] + PEIntelLoader::Compile
+                                 [M2] + loader LzmaDecode [M8]
+ Import gizleme                   PEIntelLoader::Compile (IAT) [M2] +
+                                 loader import çözümü [M8]
+ Resource şifreleme               PEResource ağacı yazımı [M5] +
+                                 ResourceManager::Decrypt [M11]
+ String şifreleme                 StringManager::DecryptString [M11]
+ Memory CRC                       IntelFunctionList::Prepare (AddCRCTable +
+                                 cmCall→cmCrc) [M2] + loader adım 23 [M8]
+ Loader CRC / File CRC            loader.cc adım 11/12 [M8]
+ Anti-debug                       loader.cc:1699-1839 + core.cc:769+ [M8/M9]
+ Anti-VM                          ExportedIsVirtualMachinePresent [M9]
+ HWID                             HardwareID::* [M10]
+ Lisans seri parse                LicensingManager::SetSerialNumber/
+                                 ParseSerial [M10]
+ Aktivasyon                        VerifyCode/BuildUrl/Process [M10]
+ Keygen                           ipn_sqlclr GenerateKey [M14]
+ Watermark                         Watermark::Compile/SearchByte [M1]
+ Virtual files                     FileManager + 13 Nt hook [M11]
+ Registry sanal                    RegistryManager + 10 Nt hook [M11]
+ .NET koruma                       NETArchitecture::Compile/Save [M5] +
+                                 ILFunction::CompileToVM (il.cc:3429)
+ Lua script                        Core::Compile script aşamaları [M1] +
+                                 script.cc Binder'ları
+ Console                           VMProtectCon/main.cc [M13]
+ GUI derleme                       MainWindow::compileProject [M13]
+================================================================================
+ [BELGE SONU — 03/05]

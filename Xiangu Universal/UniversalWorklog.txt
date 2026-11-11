@@ -1,0 +1,123 @@
+# UniversalWorklog — Xiangu Universal Analiz & Port Projesi
+================================================================
+Süreç: 2026-11-11 (Europe/Istanbul)
+Operatör: Z.ai asistanı
+Amaç: universalObfusPublicSrc.zip analizi (Özellik Haritası / Blueprint yapı zinciri / Fonksiyon Haritası),
+      XProtect_0.8.4 port karşılaştırması, TXT sınıflandırma, modern HTML viewer, GitHub push, .exe derleme.
+
+----------------------------------------------------------------
+[ADIM-000] BAŞLANGIÇ — Oturum başlatıldı
+Saat: 2026-11-11 (UTC+3)
+Yapıldı:
+  - Görev planı (11 adım) oluşturuldu.
+  - Dizin iskeleti kuruldu:
+      /home/z/my-project/work/XianguUniversal   (kaynak + analiz çalışma alanı)
+      /home/z/my-project/work/XProtect          (port projesi alanı)
+      /home/z/my-project/worklogs               (worklog)
+      /home/z/my-project/download               (final çıktılar)
+  - Upload klasörü tarandı:
+      * tum_ozellikler_hafif_arastirma.txt  (MEVCUT — analiz temeli)
+      * XProtect_0.8.4.zip                   (YOK — GitHub repo içinde aranacak; bulunamazsa kullanıcıya not düşülecek)
+Not: PAT tokenı hiçbir dosyaya yazılmayacak, yalnızca git push sırasında kullanılacak.
+
+----------------------------------------------------------------
+[ADIM-010] İNDİRME + ÇIKARMA — TAMAMLANDI
+  - universalObfusPublicSrc.zip (21.182.531 B) indirildi → work/XianguUniversal/src/vmp/ (1.451 dosya).
+    Ağaç: VMProtect 3.x tarzı tam kaynak (core 116.565 satır, runtime, sdk, GUI Qt, VMProtectCon,
+    help en/ru, examples, third-party: lua/lzma/qt/scintilla/libffi/tinyxml/gtest...).
+    Kökte: vmprotect.sln (MSVC), lin_/mac_*.mak, README (build.sh/build.bat YOK — README referansı boş).
+  - XProtect_0.8.4.zip (8.505.827 B) repo içinden indirildi → work/XProtect/xprotect/XProtect_0.8.4/
+    (source/XProtectUI_Source + CPlusPort_Source + VMPHelper_Source + Test_exe_Source + kanit/ + kanit_084/).
+  - Repo kökü ayrıca: XProtect/ klasörü, prj1_v1.txt, prj1_v2.txt (kullanılmadı, bilgi amaçlı).
+[ADIM-020] DERİN ANALİZ — 4 PARALEL KEŞİF AJANI TAMAMLANDI
+  1) Core motor analizi: tüm enum'lar (ProjectOption hex değerli, IntelCommandType 577 üye, ILCommandType 239 üye,
+     FACE_* tam listesi), sınıf hiyerarşisi, koruma akışı (Core::Open→Compile 7 aşama), virtualization mekaniği
+     (vtClassic/vtAdvanced!, 10 VM, itab switch, Advanced 10 klon + rel32 ofset zinciri), mutation (70 şablon),
+     packer LZMA (level 9, 16MB dict), format motorları (PE/ELF/Mach-O/ObjC/.NET/BAML/DWARF/PDB).
+     KRİTİK FORK BULGULARI: version.h=1.0.0.0; core.cc:1702-1705 rand_seed=0 (DETERMİNİSTİK!);
+     intel.cc:18148-18154 IntelObfuscation if(false) ile ÖLÜ; processors.cc:777-779 OpcodeCryptor tipi
+     ccXor'a SABİT; cpCryptValues+cpEncryptRegs ÖLÜ bitler; Çince yorumlar (bian yi / xu ni hua);
+     VMProtectLicense.ini içinde kalıcı test lisansı; runtime.vmp otomasyon scripti.
+  2) Runtime/SDK/lisans analizi: SetupImage 32 adımlık loader akışı (satır referanslı), anti-debug tam döküm
+     (PEB, DebugPort 0x7, DebugObjectHandle 0x1e, ThreadHideFromDebugger 17, ProcessInstrumentationCallback 40,
+     SystemKernelDebuggerInformation 0x23, SoftICE ailesi sürücüleri, 0xCC taramaları, PAGE_GUARD, CloseHandle
+     0xDEADC0DE probu, TF+RDTSC/DRx probu, DbgUiRemoteBreakin hook'u, hardcoded syscall tablosu XP→19045,
+     ikinci ntdll kopyası NtCreateSection hilesi, WoW64 kodlaması), anti-VM (CPUID hypervisor bit, Hyper-V root
+     ayrımı, firmware FIRM tabloları, \Device\PhysicalMemory BIOS taraması, Sandboxie, Wine, /sys DMI),
+     crypto (RC5 r=15, SHA1, BigNumber RSA, modpow tahsis karıştırma), HWID (4 blok tipi, MAX 16, sanal NIC
+     OUI filtresi), virtual files (13 Nt hook), registry (10 Nt hook, WOW şeffaf node), resource (6 nokta),
+     string manager, lisans (chunk kodları 0x01..0x09/0xFF, durum kodları, PKCS#1 v1.5, blacklist ikili arama,
+     aktivasyon URL kurulumu, Date başlığı sunucu saati), runtime.def 32 export, SDK 23 fonksiyon + DDK VAR,
+     .NET Runtime (VirtualMachine.cs 4.284 satır MSIL VM + RefVm test paketi), keygen GERÇEKTE sadece SQL CLR
+     (ipn_sqlclr) — PHP keygen KAYNAK AĞAÇTA YOK (yalnızca help dokümanı) [BASE DÜZELTMESİ].
+  3) GUI/console/help analizi: Qt 5.6 GUI (menü/komut tam liste, 14 diyalog, NodeType 41, boot ekranı, dil
+     sistemi en/ru/zh/fr), console CLI 8 parametreli (File [Out] -pf -sf -lf -bd -wm -we), help 41 htm + 5 Lua
+     olay kancası, langs üretim zinciri, examples (5 Lua script + dotnet forms_cil/forms_mixed), vmprotect.sln
+     16 proje + 6 konfigürasyon (Lite/Pro/Ultimate/Demo/Debug/Checked), VMProtectCon.Tests asılı
+     (CommandLineParser.h yok!), shellext (Explorer sağ-tık "Protect with VMProtect"),
+     minidumpfixer, tools/ yalnız ikili.
+  4) XProtect port analizi: 0.8.4 mimarisi (GUI 4.207 satır saf Win32 + engine_* 8 dosya + vm_core.c 843 satır
+     freestanding VM + xrt_core.c/xrt_license.c runtime + SDK 37 fnid + keygen RSA-2048), LOC tabloları,
+     zig çapraz derleme zinciri (blob: gcc -ffreestanding → ld -Ttext=0x100000 → objcopy -O binary),
+     43 opcode VM (CFB şifreli, polimorfik itab, adım bütçesi), V/M/U tam, STRDEC özel-kopya modeli,
+     anti-debug K1 (kapı-0xCC) + K2 (TF) istisna-dispatch'siz, LZMA packing XPK1, IAT deneysel, kanıt
+     matrisleri (8/8 wine x64, 5/5 Unicorn x86, metin2 d7610), EKSİKLER listesi (18 madde: loader/registry/
+     virtual files/resource şifreleme/.NET/ELF/MachO/Lua/aktivasyon ağ...), PORT ORANI: M1 ~%1,7 / M2 ~%9
+     / M3 sanallaştırma yolu %65 / UI ~%90+.
+Sonraki adım: 5 sınıflandırılmış TXT doküman üretimi.
+
+----------------------------------------------------------------
+[ADIM-030] 5 SINIFLANDIRILMIŞ TXT DOKÜMAN ÜRETİLDİ — TAMAMLANDI
+  Yer: /home/z/my-project/download/XianguUniversal/
+  01_ozellik_haritasi.txt      (~660 satır) — temel belgenin düzeltilmiş+genişletilmiş
+      hali: 0-ü bölüm + A..U bölümleri; hex değerli enum tabloları; DÜZELTME etiketli
+      madde düzeltmeleri; fork bulguları (Bölüm U).
+  02_yapi_zinciri_blueprint.txt (~570 satır) — Obsidian-tarzı vault: 6 MOC + 38 not +
+      [[wikilink]] + frontmatter + #tag + backlink listeleri + ASCII graf +
+      bağlantı yoğunluğu hub'ları + Obsidian'a taşıma talimatı (MOC deseni web
+      araştırmasıyla doğrulandı: obsidian.md/help/links, MOC rehberleri).
+  03_fonksiyon_haritasi.txt   (~370 satır) — M1..M15 modül modül fonksiyon envanteri
+      (dosya:satır referanslı) + "bir özelliği kim yapıyor?" çapraz tablosu.
+  04_XProtect_port_analizi.txt (~260 satır) — kimlik karşılaştırması + bileşen karşılık
+      haritası (30 satır) + 7 yapısal farklılık + VAR/KISMEN/YOK cetveli + ölçüm
+      yöntemi (M1-M4) + güncel port oranı (M1 %1,7 / M2 %9 / M3 %65 / UI %90+) +
+      18 maddelik eksik envanteri + 0.9.0-1.0.0 yol haritası.
+  05_bulgular_duzeltmeler.txt (~150 satır) — A bölümü: 12 yanlış/yanıltıcı madde → kanıtlı
+      düzeltme; B: 20 eksik bulgu; C: 13 kanıtlanmış doğru madde; D: bu oturum
+      doğrulamaları.
+[ADIM-040] MODERN HTML GÖRÜNTÜLEYİCİ ÜRETİLDİ VE TEST EDİLDİ
+  Dosya: XianguUniversal_Viewer.html (183 KB, tek dosya, çevrimdışı; 5 doküman +
+  graf verisi gömülü; üretici script: scripts/build_viewer.py)
+  Özellikler: koyu tema, sol doküman paneli, tam metin arama (vurgulu), bölüm katlama,
+  [[wikilink]] → tıklanabilir çip → ilgili bölüme atlama + flash, Obsidian-tarzı SVG
+  graf görünümü (68 düğüm / 157 wikilink; hub=yeşil; tek tık bağlantı vurgusu, çift
+  tık nota atlama), Yazdır/PDF, mobil burger menü.
+  Testler (agent-browser): sayfa hatasız açıldı; arama "rand_seed" 4 eşleşme; graf
+  68 düğüm/157 bağ; wikilink tıkı → doküman 02'ye atlama; JS sözdizimi node ile OK.
+Sonraki adım: XProtect 0.8.4 zig derlemesi → exe zip.
+
+----------------------------------------------------------------
+[ADIM-050] XProtect 0.8.4 YENİDEN DERLENDİ — TAMAMLANDI
+  - ziglang 0.17.1 (pip) kuruldu; bash build_ui.sh çalıştırıldı
+    (source/XProtectUI_Source/). LZMA C nesneleri ayrı derlendi.
+  - Çıktılar: XProtectUI.exe (PE32+ x86-64, 7 section, 1.199.104 B) ve
+    XProtectUI32.exe (PE32 i386, 9 section, 1.246.720 B).
+  - Boyutlar orijinal XProtect_0.8.4.zip içindeki ikililerle BİRBİR
+    (derleme zinciri doğrulaması). MD5'ler farklı (derleyici sürümü/zaman
+    damgası — beklenen): 5fb9fb30… / 6aca2bf1…
+  - Uyarılar: 4 snprintf %x/%llx biçim uyarısı (engine_lift.cpp) — hata değil.
+  - NOT: sandbox'ta wine YOK → runtime/çalıştırma testi yapılamadı. Kullanıcı
+    ortamında --selftest veya kanit_084 matrisi önerilir.
+  - Paket: XProtect_0.8.4_derleme.zip (1.103.539 B) — 2 exe + DERLEME_NOTU.txt.
+[ADIM-051] vmp (universalObfus) kaynak ağacının derlenmesi — YAPILAMADI (gerekçe)
+  - vmprotect.sln MSVC 16 + Qt 5.6 + Lua/FFI/LZMA/Scintilla/tinyxml zinciri
+    gerektirir; sandbox Linux (MSVC yok, mingw'ye Qt5 cross paketi yok).
+  - lin_*.mak yalnız Linux-native hedef; .exe üretmez.
+  - Karar: XProtect (kullanıcının kendi port hedefi, zig zinciriyle)
+    derlendi; vmp ağacı analiz teslimatı olarak bırakıldı.
+[ADIM-060] GITHUB PUSH — BAŞLIYOR
+  - repo: 0xByteDeveloper/xiangu (shallow clone --depth 1).
+  - Klasör: "Xiangu Universal" — 5 TXT + Viewer HTML + derleme zip + worklog.
+  - PAT: yalnızca clone/push URL'lerinde kullanıldı; repo config'e
+    YAZILMADI (push'tan sonra origin temiz URL), hiçbir teslimat dosyasına
+    kopyalanmadı.

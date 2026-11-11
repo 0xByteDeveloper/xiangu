@@ -1,0 +1,259 @@
+================================================================================
+ XIANGU UNIVERSAL — 04 · XPROTECT PORT ANALİZİ
+ (universalObfusPublicSrc ↔ XProtect 0.8.4 — fark listesi, port oranı,
+  yapı farkı, karşılaştırma sistemi)
+================================================================================
+ KAYNAKLAR
+  A (kaynak)   : universalObfusPublicSrc.zip → vmp/ (1.449 dosya, ~1.130.477
+                 satır, 113 MB) — VMProtect 3.x tabanlı fork, version 1.0.0.0
+  B (port)     : XProtect_0.8.4.zip → XProtectUI.exe/32 + source/ + kanit/
+                 + kanit_084/ (girdi-zincir ~17.172 satır el yazımı + blob'lar
+                 + LZMA SDK 5.710; toplam paket 8,5 MB)
+  C (kullanıcı hedefi beyanı): "universalObfusPublicSrc'den portlayarak
+                 yaptım; amaç FULL C++ olması ve VS2019 C++'da derlenebilme;
+                 fakat TAM PORTLAYAMADIM — aradaki fark ve port oranını,
+                 yapı farkını listeleyebilecek bir sistem istiyorum."
+  D (kendi ölçümü, worklog.md): M1 ~%1,7 · M2 ~%9 (v2.0-r %20,5) · M3
+                 fonksiyonel sanallaştırma yolu %65 · UI ~%90+
+ Bu belge o "sistemin" çıktısıdır: ölçüm yöntemleri (§5) + güncel ölçüm
+ (§6) + tam fark cetveli (§7) + yapı karşılık haritası (§2) + yapısal
+ farklılıklar (§3) + eksik envanteri (§8) + yol haritası (§9).
+
+================================================================================
+ 1. KİMLİK KARŞILAŞTIRMASI
+================================================================================
+                        vmp (kaynak)                        XProtect 0.8.4 (port)
+ Dil/çatı           C++ + Qt 5.6 (GUI) + Lua + C#           C++17 (saf Win32 GUI)
+                                                          + freestanding C (VM/XRT)
+ Derleyici          MSVC (sln) / g++ (mak)                 zig cc/c++ → mingw-w64
+                                                          (x86_64/x86-windows-gnu)
+ Derleme ortamı     Windows + Qt + invariant statik kütü.  Linux çapraz derleme
+                     (lua/lzma/ffi/scintilla/tinyxml...)    (gcc -ffreestanding
+                                                          blob zinciri + zig)
+ Çıktı              VMProtect.exe/.Con/.Con.Tests + SDK     XProtectUI.exe (x64) +
+ + runtime DLL'leri  dll'eri + runtime blob .inc            XProtectUI32.exe (x86)
+                     (runtime.vmp ile üretilmiş)            + gömülü VM/XRT blob
+ Formatlar          PE + Mach-O + ELF + .NET               YALNIZ PE32/PE32+
+ Mimari sayısı      x86+x64+NET (çok mimarili aynı dosya)   x64 + x86 (iki exe,
+                                                          aynı kaynak)
+ Sürüm              1.0.0.0 fork                            0.8.4 (2026-11-09)
+
+================================================================================
+ 2. BİLEŞEN KARŞILIK HARİTASI (yapı zinciri — doküman 02 ile eş dinli)
+================================================================================
+ vmp BİLEŞENİ                      XPROTECT KARŞILIĞI            TAŞIMA DURUMU
+ core/core.cc (Core::Open/Compile) engine_main.cpp::protect()      YENİDEN TASARIM
+ core/intel.cc (derleyici+VM)      engine_disasm + engine_lift      KISMİ (alt küme)
+                                   (31.493 satır)      (876 satır)  ~%3 komut yüzeyi
+ core/processors.cc (şifreleyiciler) vm_opcodes.h VM_KS/VM_KSC +     FARKLI ALGORİTMA
+                                   xr_cipher.h CFB-64
+ core/intel.cc IntelVirtualMachine  vm_core.c MiniVM                KAVRAM AKTARIMI
+ runtime/loader.cc (SetupImage)    xrt_core.c xrt_entry             DARALTILMIŞ
+ runtime/core.cc (Exported*)        xrt_license.c lic_sdk_core       KISMİ (37 fnid)
+ runtime/licensing_manager.cc       xrt_license.c lic_parse_serial  BİRBİR (format)
+ runtime/crypto.cc (RC5/SHA1/RSA)   SHA-1 birebir; RSA-2048 modexp;   KISMİ
+                                   RC5 yok (CFB+keystream eşdeğeri)
+ runtime/hwid.cc (4 blok tipi)      lic_cur_hwid (volser+hostname)   BASITLEŞTIRME
+ runtime/file_manager.cc           —                                 YOK
+ runtime/registry_manager.cc        —                                 YOK
+ runtime/resource_manager.cc       SDK-40 API delegesi yalnız        KISMEN (motor yok)
+ runtime/string_manager.cc          OP_STRDEC + .vmp0 özel kopya      BİRBİR (farklı model)
+ core/packer.cc + PEIntelLoader     engine_pack.cpp XPK1 + xrt_unpack BİRBİR (LZMA)
+ runtime/loader.cc anti-debug       OP_ANTIDBG K1+K2                 KASITLI DARALTMA
+ sdk/VMProtectSDK.h (23 API)        xprotect_sdk.h (37 fnid)         TAM + SDK-40 eki
+ sdk/VMProtectDDK.h                 —                                 YOK
+ VMProtect/mainwindow.cc (3.711)    xprotect_ui.cpp (4.207)           BİRBİR (Win32'e
+                                   (Qt)                    (Win32)   yeniden yazım)
+ VMProtectCon/main.cc               --cli modu (WinMain içinde)       KISMEN (GUI'ye
+                                                                    gömülü)
+ core/script.cc (Lua+FFI)           —                                 YOK
+ utils/ipn_sqlclr keygen            xprotect_keygen.py                BİRBİR (Python)
+ shellext / minidumpfixer           —                                 YOK
+ help/ dokümanasyon                 README + CHANGELOG + worklog      KISMEN
+ unit-tests (102 gtest)             kanit/ + kanit_084/ + verify_mut  FARKLI yöntem
+                                   .py + vmstep.py (Unicorn/wine)    (diferansiyel)
+ runtime.vmp otomasyonu             gen_blob.py + gen_xrt_blob.py     EŞDEĞER amaç
+ (.inc blob üretimi)                (vm_blob.cpp/xrt_blob.cpp)
+ vmprotect.sln (16 proje)           build_ui.sh + build_vmblob.sh +   3 scriptlik
+                                   build_xrt.sh                      zincir
+
+================================================================================
+ 3. YAPISAL FARKLILIKLAR (tasarım felsefesi)
+================================================================================
+ 3.1 BÜTÜNLÜK: vmp tek çekirdek + çok format; XProtect "motor + İKİ
+     freestanding blob (VM, XRT) + UI" üç parçalı — blob'lar -fno-jump-
+     tables/-fno-stack-protector ile PIC, libc'siz.
+ 3.2 DERLENMİŞLİK: vmp MSVC/Qt zinciri (Windows makinada); XProtect Linux'ta
+     çapraz: gcc blob → ld -Ttext=0x100000 → objcopy -O binary → python
+     gen_*_blob.py → C++ dizi → zig link. "VS2019'da derlenebilme" hedefi
+     için not: mevcut kaynak saf Win32 + C++17 olduğundan MSVC'ye taşınması
+     düşük engelli görünür; blob'lar zaten önceden üretilmiş veri olarak
+     commitlenmiştir (vm_blob.cpp/xrt_blob.cpp) — MSVC tarafında da aynı
+     veri dizileri bağlanabilir; gereken şey proje dosyası (.vcxproj)
+     üretimidir.
+ 3.3 VM FELSEFESİ: vmp — handler üretimi C++ ile derleme zamanında,
+     itab switch/case, 10 farklı VM, opcode cryptor zincirleri;
+     XProtect — 43 opcode tek yorumlayıcı, if/else zinciri (PIC şartı),
+     polimorfik itab FNV tohumlu Fisher-Yates (tablo taşınmaz),
+     CFB bayt-kodu (tek-bayt tamper yayılımı) + adım bütçesi 1<<24.
+ 3.4 ANTI-DEBUG FELSEFESİ: vmp — geniş yüzey (20+ sinyal, kernel mod dahil);
+     XProtect — istisna-dispatch'siz 2 kesin-kanıt kontrolü (K1/K2) +
+     bilinçli yok-liste (oyun DRx/int3-hook/AV-VEH yanlış-pozitifleri).
+ 3.5 STRING MODELİ: vmp orijinali şifreleyip yazar; XProtect şifreli ÖZEL
+     KOPYA .vmp0'da üretir, orijinale dokunmaz (native/M referansları
+     güvende).
+ 3.6 SEH: vmp .pdata'yi derlemede yeniden üretir; XProtect RtlAddFunction-
+     Table ile ÇALIŞMA ANINDA dinamik kayıt (JIT modeli — dd[3]'e dokunmaz).
+ 3.7 KANIT KÜLTÜRÜ: vmp gtest xtest seti; XProtect diferansiyel koşular
+     (Unicorn orijinal↔korumalı), wine RCODE matrisi, statik çözümleyici
+     (static_ad_check.py — çıktı EXE'den bytecode'u çözüp ilk op'u
+     doğrular), 3-yönlü T1/T2/T3 + "sahte-başarı koruması" (rc!=0'da
+     çıktı hiç yazılmaz).
+
+================================================================================
+ 4. ÖZELLİK CETVELİ (VAR / KISMEN / YOK)
+================================================================================
+ ÖZELLİK                            DURUM     NOT
+ Virtualization (V)                  VAR       43 opcode MiniVM, CFB, perm itab
+ Mutation (M)                        VAR       liveness tabanlı; kaynak ~70
+                                               şablona karşılık ~8-10 ikame
+                                               sınıfı (derinlik farkı)
+ Ultra (V+U)                         VAR       M-geçişi → lifter; RED'de V'ye düşer
+ String şifreleme (STRDEC)           VAR       0.8.1 tasarımı (özel kopya)
+ Anti-debug                         KISMEN    K1 kapı-0xCC + K2 TF (+PEB/
+                                               NtGlobalFlag 0.8.1 tabanı);
+                                               DRx/DebugPort/0xCC-tarama
+                                               BİLİNÇLİ YOK (oyun güvenliği)
+ Anti-VM                             YOK*      UI biti var, motor bağlı
+                                               değil; IsVirtualMachinePresent
+                                               MVP=0 döner (*0.9.0 paketi)
+ HWID                                KISMEN    2 kaynak (volser+hostname)
+                                               vs kaynak 4 blok tipi/16 max
+ Lisans (offline RSA-2048)          VAR       chunk formatı BİRBİR; state
+                                               kodları aynı; LSD + CRC
+ Lisans (aktivasyon ağ)             KISMEN    API yüzeyi VAR, sunucu YOK
+                                               (0/"bağlantı yok")
+ Keygen                              VAR       xprotect_keygen.py (PKCS#1
+                                               v1.5; DER/PKCS#8/openssl)
+ Packing (LZMA)                      VAR       XPK1 blokları + EP redirect +
+                                               xrt_unpack; TLS-callbackli
+                                               exe'lerde bilinen sınır
+ SectionCrypt (CFB-64)              VAR       0.8.0 — kaynağın
+                                               cpEncryptBytecode+cryptor
+                                               zincirlerinin XProtect tarzı
+ Import koruması (IAT)              KISMEN    FF15→E8/FF25→E9 yamaları +
+                                               thunk + xrt_resolve;
+                                               "EXPERIMENT" bayrağı (0.5.0)
+ Resource koruması                   YOK       SDK-40 delegesi var; motor yok
+ Virtual files                      YOK       UI biti askıda
+ Registry sanallaştırma              YOK       —
+ Watermark                          KISMEN    FNV-64 izi LSD+0x118; kaynak
+                                               dump+mask izleme+arama yok
+ CRC seti (self/text/file)          VAR       reloc-atlamalı TEXT CRC;
+                                               state kilidi; rt_fatal
+ SEH dinamik kayıt                   VAR       RtlAddFunctionTable (0.8.0)
+ Memprot (.text WRITE kaldırma)      VAR       —
+ Strip fixups/debug                 VAR       ASLR bayrağı temizleme dahil
+ Debug mode                         YOK       UI biti motora bağlı değil
+ Kernel debugger kontrolü            YOK       UI biti motora bağlı değil
+ ELF / Mach-O                       YOK       —
+ .NET                                YOK       —
+ Lua script motoru                   YOK       —
+ Watermark arama süreci              YOK       —
+ MinidumpFixer / shellext            YOK       —
+ Çok VM (10)                         YOK       tek MiniVM (permutasyonlu)
+ Çağrı kuralı köprüsü                KISMEN    x86 thiscall/fastcall
+                                               destekli; RCL/RCR, FPU/SSE
+                                               YOK (komut alt kümesi)
+ .vmp proje uyumluluğu               VAR       0.4.0'tan beri (XML okuma)
+ PDB/PDBScope sembol keşfi           VAR       PDB MAP COFF export pdata
+
+================================================================================
+ 5. PORT ORANI ÖLÇÜM YÖNTEMİ (istenen "listeleyebilen sistem")
+================================================================================
+ M1 — SATIR ORANI: (XProtect el yazımı satır) / (vmp satır) — ham ölçek.
+ M2 — AĞIRLIK: her vmp alt sistemi bir ağırlık katsayısına bölünüp
+      XProtect'teki karşılığının kapsamı ile oranlanır (kavram notları
+      G1..G12 üzerinden — bkz. doküman 02).
+ M3 — FONKSİYONEL YOL: uçtan uca "korumalı çıktı üretme" akışındaki
+      adımların tamamlanma oranı (PE oku → sembol → seçim → lifter → VM
+      → stub → şifre → IAT → CRC → pack → SEH → imza/checksum).
+ M4 — UI YÜZEYİ: menü/diyalog/komut eşleşmesi (Win32 yeniden yazım).
+ KANIT TABANLI: her ölçüm kanıt dosyasına bağlanır (Unicorn diferansiyeli,
+      wine matrisi, statik çözümleyici) — "sahte başarı" kilidi ile.
+
+================================================================================
+ 6. GÜNCEL PORT ORANI (0.8.4, bu analizle uzlaşılmış)
+================================================================================
+ M1  ~%1,7     (17.172 el yazımı / 1.130.477) — ham satır
+ M2  ~%9       ağırlıklı fonksiyonel kapsam (v2.0-r envanterinde %20,5
+               — GUI/kanıt dosyaları dahilse; çekirdek motor ~%9)
+ M3  %65       fonksiyonel sanallaştırma yolu (PE→V/M/U→CRC→pack→SEH
+               uçtan uca ÇALIŞIYOR; eksik: resource/registry/VFS/anti-VM/
+               ağ-aktivasyon/çok-VM)
+ M4  ~%90+     UI yüzeyi (menü/diyalog/ağaç/özellik ızgarası/log/dil;
+               Qt→Win32 yeniden yazım)
+ TOPLAM HÜKÜM: ÇEKİRDEK SANALLAŞTIRMA ZINCIRI KAPALI (çalışır durumda,
+               kanıtlı); "tam port"tan uzak: 18 eksik alt sistem (bkz. §8).
+
+================================================================================
+ 7. FARK LİSTESİ (kısa madde — detay cetvel §4'te)
+================================================================================
+ VAR OLANLAR (kaynaktan taşınmış): V/M/U · STRDEC · offline RSA lisans ·
+   HWID (basit) · LZMA pack · CFB section crypt · IAT (deneysel) ·
+   self/text/file CRC · SEH dinamik · SDK 37 fnid · keygen · PDB/MAP sembol ·
+   .vmp uyumluluğu · GUI yeniden yazım · konsol (--cli) · vm/kanıt kültürü.
+ KISMEN: anti-debug (2/20+ sinyal) · anti-VM (0) · aktivasyon (API yüzeyi) ·
+   resource (yalnız SDK delegesi) · watermark (yalnız iz gömme) · çağrı
+   kuralları · komut seti (43/577).
+ YOK: registry · VFS · .NET · ELF · Mach-O · Lua · çok-VM · Advanced VM
+   (rel32 zincir) · RC5 · şifreleyici zincir çeşitliliği · kernel-debugger ·
+   debug-mode · minidumpfixer · shellext · Taggant · WLM.
+ ÖZGÜN (kaynakta olmayan XProtect ilerlemeleri): polimorfik itab (taşınmaz
+   tablo) · CFB bayt-kodu + adım bütçesi · istisna-dispatch'siz K1/K2 ·
+   string özel-kopya modeli · sahte-başarı kilidi · LVS_OWNERDATA 39.078
+   satırlı sanal liste · .vmp uyumluluğu · çift-mimari tek kaynak.
+
+================================================================================
+ 8. EKSİK ENVANTERİ (0.9.0+ için sıralı liste)
+================================================================================
+ 1  Anti-debug paketi (0.9.0 beyanlı) — kapsam kararı oyun-güvenliğiyle
+ 2  Tam loader (TLS callback desteği) — pack bilinen sınırı
+ 3  Aktivasyon ağ katmanı (WebLM protokolü: OK/BAD/BANNED/USED/EXPIRED)
+ 4  Resource şifreleme motoru (SDK-40 zaten hazır)
+ 5  Virtual Files (file_manager 13 Nt hook modeli)
+ 6  Registry sanallaştırma (10 Nt hook + WOW node)
+ 7  Anti-VM (CPUID hypervisor + firmware tarama)
+ 8  Çok-VM + Advanced (rel32 ofset zinciri) mimarisi
+ 9  Komut seti genişletme (FPU/SSE/string-op/RCL-RCR)
+ 10 Watermark derin izleme + arama penceresi
+ 11 HWID kaynak genişletme (MAC + CPU blokları, OUI filtresi)
+ 12 ELF motoru (elffile modelinden)
+ 13 Mach-O motoru (macfile modelinden)
+ 14 .NET/IL motoru (dotnetfile/il modelinden)
+ 15 Lua script katmanı (5 olay kancası)
+ 16 Debug-mode bitinin motora bağlanması
+ 17 MinidumpFixer eşdeğeri (korumalı dmp düzeltme)
+ 18 Taggant/AV-uyum sertifikası
+
+================================================================================
+ 9. YOL HARİTASI (worklog'un önerisiyle uyumlu)
+================================================================================
+ 0.9.0  anti-debug paketi (K-seti genişletme, oyun-güvenli kalan sinyaller)
+ 0.9.x  tam-loader (TLS callback) + aktivasyon ağ
+ 0.10.x resource şifreleme + VFS/registry başlangıcı
+ 1.0.0  hedef: M3 %65 → %85+; "tam port" tanımı: çekirdek + lisans +
+        pack + sanal yüzeyler + anti-analiz tam seti
+ Ayrıca: her vm_core.c/xrt_core.c değişiminde blob zinciri YENİDEN
+ çalıştırılmalı (üç kez "bayat blob" hatası yaşandı — build_vmblob.sh →
+ gen_blob.py → build_ui.sh sırası ZORUNLU).
+
+================================================================================
+ 10. DERLEME DOĞRULAMASI (bu oturumda yapılacak — bkz. UniversalWorklog)
+================================================================================
+ build_ui.sh zig zinciriyle XProtectUI.exe + XProtectUI32.exe yeniden
+ üretilecek; ikililer XProtect_0.8.4_derleme.zip içinde teslim edilecek.
+ (vmp tarafının MSVC/Qt bağımlılığı nedeniyle sandbox'ta tam derleme
+ yapılmaz — gerekçe worklog'a işlenecek.)
+================================================================================
+ [BELGE SONU — 04/05]

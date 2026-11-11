@@ -1,0 +1,151 @@
+================================================================================
+ XIANGU UNIVERSAL — 05 · BULGULAR VE DÜZELTMELER SİCİLİ
+ (temel belge: tum_ozellikler_hafif_arastirma.txt → kanıtlı düzeltmeler)
+================================================================================
+ YÖNTEM: temel belgedeki her madde, kaynak kodda dosya:satır düzeyinde
+ doğrulandı. Aşağıdaki tablo (1) YANLIŞ olanları, (2) EKSİK ama önemli
+ olanları, (3) DOĞRU TEYİT EDİLEN kritik maddeleri listeler.
+ Kısaltma: "kaynak" = universalObfusPublicSrc.zip içi vmp/ ağacı.
+
+================================================================================
+ BÖLÜM A — YANLIŞ / YANILTICI MADDELER (düzeltildi)
+================================================================================
+ A1) "PHP keygen" (tembel G7 + L5)
+     YANLIŞ: ağaçta PHP keygen KAYNAK KODU yok.
+     DOĞRUSU: gerçek keygen kodu utils/ipn_sqlclr/keygen.cs (.NET SQL CLR,
+     212 satır) + Taggant web servisi; DLL/.NET/PHP keygen kurulumları
+     YALNIZCA help dokümanlarında anlatılır (help/en/manager/keygen/*.htm).
+
+ A2) "Seri numarası chunk'ları" isimleri (G2/G3) — kısa adlar (USER_NAME...)
+     DÜZELTİLDİ: gerçek tanımlar HAS_USER_NAME 0x1... (core.h:145-154) ve
+     chunk kodları 0x01..0x09/0xFF (licensing_manager.h:21-33). Format
+     tanımı birebir korundu, hex değerler eklendi.
+
+ A3) "APIType 39 tip" (F10)
+     DÜZELTİLDİ: 40 üye (files.h:239-280, atNone dahil).
+
+ A4) "cpCryptValues / cpEncryptRegs aktif özellikler" (C tablosu + B3)
+     DÜZELTİLDİ: bu ağaçta ÖLÜ bitler — tanımlı (core.h) ama hiçbir .cc
+     kullanmıyor (cpMaximumProtection bileşiminde geçer). Şifreleme yüzeyi:
+     cpEncryptBytecode + CommandLink::Encrypt + entry_cryptor + cmXadd
+     session-key (intel.cc:8744-8834).
+
+ A5) "VMProtect 3.8.x sürüm geçmişi" ima (baştan)
+     DÜZELTİLDİ: version.h = 1.0.0.0; copyright 2003-2021. Ağaç VMProtect
+     3.x ailesinin FORK'u; sürüm sıfırlanmış. History/help dokümanı bu
+     ağacın gerçek sürümünü anlatmaz.
+
+ A6) "Wine tespiti WineGetVersion" — doğru ama eksik bağlam (D1)
+     TAMAMLANDI: Wine YOKSA OS-build doğrulama bloğu çalışır; bilinmeyen
+     build = debugger şüphesi; ntdll'nin ikinci kopyası NtCreateSection ile
+     eşlenip syscall numaraları elle okunur (loader.cc:962-1023).
+
+ A7) "NtRaiseHardError yolu debugger tespiti" (D1 iması)
+     DÜZELTİLDİ: kullanım yeri LoaderMessage (mesaj gösterimi, loader.cc:
+     514-771). Debugger tespitindeki gerçek yenilikler: ProcessInstrumenta-
+     tionCallback sıfırlama (loader.cc:1796-1807), ProcessDebugObjectHandle
+     (0x1e, loader.cc:1815), 0xCC taramaları (loader.cc:2117-2127, 2256,
+     2893), PAGE_GUARD tespiti, CloseHandle(0xDEADC0DE) probu (2432),
+     DbgUiRemoteBreakin hook (core.cc:1221-1244).
+
+ A8) "Bölüm başına tek VM / gömülü VM DLL'si" iması (B3)
+     DÜZELTİLDİ + GÜÇLENDİ: 10 farklı VM (kayıtlı), CommandBlock başına
+     RASTGELE VM ataması; İKİ mimari: vtClassic (itab) / vtAdvanced
+     (rel32 ofset zinciri + 10 klon/handler).
+
+ A9) "FACE_ yüzeyi = gömülü isim/string placeholder'ları" (Q)
+     KISMEN DOĞRU: FACE_* yalnız isim değil — 4 blok: 0xFACE0000 temel +
+     isim yüzeyi, 0xFACE0100 packer bilgileri, 0xFACE0200 VAR değişkenleri,
+     0xFACE0300 VAR tuzları; GlobalData XOR-tuzlu erişir (common.h:74-283).
+
+ A10) "Şifreleme: RC5 + SHA1 + RSA" (F2) — doğru algoritmalar, eksik detay
+     TAMAMLANDI: RC5 w=32/r=15; RSA modpow'da tahsis düzeni RDTSC ile
+     karıştırılır (crypto.cc:459-466); RUNTIME anahtarları RDTSC'den
+     türetilir (crypto.cc:93-108).
+
+ A11) "Console parametreleri" (N) — doğru; EK: File .vmp proje de olabilir;
+     -bd (y<<16)+(m<<8)+d kodlanır; VMProtectCon.Tests projesi asılı
+     (CommandLineParser.h yok — ağaçta derlenmez).
+
+ A12) "GUI: MainWindow, dialogs..." (M) — doğru ama çatısız; EK: Qt 5.6,
+     41 NodeType, 14 diyalog, boot ekranı, dil sistemi, RemoteControl
+     stdin protokolü, Scintilla/BinEditor editörleri.
+
+================================================================================
+ BÖLÜM B — TEMEL BELGEDE EKSİK OLAN ÖNEMLİ BULGULAR (eklendi)
+================================================================================
+ B1) Fork'un deterministik üretimi: rand_seed=0; srand(0) (core.cc:1702-1705)
+     + OutputDebugStringA izi. Aynı girdi → aynı çıktı. (En kritik bulgu.)
+ B2) IntelObfuscation motoru if(false) ile kapatılmış (intel.cc:18148-18154).
+ B3) OpcodeCryptor tipi ccXor'a sabit (processors.cc:777-779).
+ B4) Kalıcı test lisansı: core/VMProtectLicense.ini (MyHWID
+     +L7reY1X2iCLr+TKSsVHtQ==) → kayıtlı yol otomatik (core.cc:1735).
+ B5) runtime.vmp otomasyonu: runtime DLL'lerini kendini koruma + .inc
+     blob üretimi (28 blob bu scriptin ürünü); vmprotect.vmp = konsolun
+     kendini koruması.
+ B6) Hardcoded syscall tablosu XP→19045 + WoW64 kodlaması (0x8000 |
+     argCount<<24) + ikinci-ntdll hilesi.
+ B7) Sanal-NIC OUI filtresi (VMware/Hyper-V/Parallels/Virtual Iron MAC
+     önekleri HWID'e girmez — hwid.cc:295-310).
+ B8) Hyper-V kök-partition ayrımı (root ise VM sayılmaz; loader.cc:2472-2486).
+ B9) Linux R_386_IRELATIVE (ifunc) relocation çağrısı (loader.cc:2377-2421).
+ B10) KUSER_SHARED_DATA saat + sunucu Date spoof koruması
+      (max(current, server_date); licensing_manager.cc).
+ B11) Blacklist: 20-bayt SHA-1 parmak izi ikili arama (cc:188-208).
+ B12) .NET: VirtualMachine.cs 4.284 satır MSIL VM + RefVm dış doğrulama
+      paketi; RenameSymbols/ObfuscationAttribute; BAML string taraması.
+ B13) IntelCommandType 577 üye / ILCommandType 239 üye (sayılar kesinleşti).
+ B14) unit-tests 102 TEST dağılımı + test-binaries 24 ikili + invariant
+      statik kütüphane modeli.
+ B15) VMProtectCon.Tests ASILI (yukarıda A11).
+ B16) FACE_VAR/VAR_SALT GlobalData XOR-tuzlu yüzeyi.
+ B17) LDPTR/dispersiyon: Compact unwind üretimi (DwarfParser) — mac/PE
+      ortak yardımcı.
+ B18) MinidumpFixer / shellext ("Protect with VMProtect" menüsü, CLSID
+      {6416B534-...}) / tools yalnız-ikili dizin.
+ B19) Bu ağaca özgü Çince not: "_CxxThrowException dönüş adresi Nop ile
+      doldurulmalı" (kök New Text Document.txt).
+ B20) Bölüm U listesi (01 dokümanında 10 fork farkı) — tamamı yeni.
+
+================================================================================
+ BÖLÜM C — DOĞRU TEYİT EDİLEN KİLİT MADDELER (kanıt noktalarıyla)
+================================================================================
+ C1) CompilationType 3+1 (files.h:308-313) → IntelFunction::Compile
+     (intel.cc:18434-18452) — doğru.
+ C2) ProjectOption cp* tam listesi — doğru; hex değerler eklendi (core.h:6-32).
+ C3) LZMA packer RAM'de açılır, EP loader'a düşer (pefile.cc:5213) — doğru.
+ C4) Seri veri yapısı wUserName[256]/bUserData[255] (VMProtectSDK.h) — doğru.
+ C5) VMProtectDDK.h VAR — doğru (sdk/).
+ C6) Watermark DB %AppData%/.../VMProtect.dat — TEYİT: core/inifile.cc:127
+     (os::CombineThisAppDataDirectory("VMProtect.dat")).
+ C7) Minimum prosedür boyutu 5 bayt — TEYİT: help/en/faq.htm ("Minimum
+     procedure size for compilation is 5 bytes").
+ C8) Hook'lanan Win32 API listesi (FindResource/LoadString/Enum*) — doğru
+     (resource_manager.cc; + ntdll LdrFindResource_U/LdrAccessResource).
+ C9) UI dilleri en/ru/fr/zh — doğru (langs/).
+ C10) 5 Lua olay kancası sırası — doğru (help script_events + core/script.cc).
+ C11) Şifreli string çözümü _rotl32 tabanlı — doğru (string/resource/file
+      manager'lar; formül: byte[i]^(_rotl32(key,i)+i)).
+ C12) HWID blokleri CPU/HOST/MAC/HDD + max 16 — doğru (hwid.h:21-26).
+ C13) Demir başlıklar: mutation teknikleri listesi, import/resource
+      koruması kapsamı, SDK 23 fonksiyon, taggant/minidumpfixer varlığı —
+      doğru; ayrıntılar 01'de genişletildi.
+
+================================================================================
+ BÖLÜM D — DOĞRULAMA ÖRNEKLERİ (bu oturumda bizzat teyit edilenler)
+================================================================================
+ D1) repo kökü API listelemesi: universalObfusPublicSrc.zip (21.182.531 B),
+     XProtect_0.8.4.zip (8.505.827 B), XProtect/ klasörü, prj1_v1/v2.txt.
+ D2) zip → vmp/ (1.449 dosya; uzantı dağılımı: 224 h / 120 cc / 124 cs /
+     251 png / 150 htm / 18 vcxproj / 5 sln...).
+ D3) core 116.565 satır toplam (wc -l); runtime/loader.cc 2.945 satır.
+ D4) Grep teyitleri: VMProtect.dat (inifile.cc:127), minimum 5 bayt
+     (faq.htm), VPI_SENS_* (core.h).
+ D5) 4 paralel derin inceleme raporu (core / runtime+sdk / GUI+help /
+     XProtect) — 01-04 dokümanlarının ham maddesi.
+================================================================================
+ SONUÇ: temel belgenin iskeleti sağlamdı (~%80 doğru); kritik hatalar 5
+ kalemde toplandı (A1-A5), eksikler 20 kalemde tamamlandı (B1-B20), 13
+ kalem kanıt noktasıyla mühürlendi (C1-C13).
+================================================================================
+ [BELGE SONU — 05/05]

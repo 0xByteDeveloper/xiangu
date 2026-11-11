@@ -1,0 +1,887 @@
+================================================================================
+ XIANGU UNIVERSAL — 01 · ÖZELLİK HARİTASI (FEATURE MAP)
+================================================================================
+ Hedef          : universalObfusPublicSrc.zip (içerik: vmp/ ağacı — VMProtect
+                  3.x tabanlı "universalObfuscator" kaynak kodu)
+ Kaynak         : github.com/0xByteDeveloper/xiangu :: universalObfusPublicSrc.zip
+                  (21.182.531 bayt, 1.451 dosya, kök klasör: vmp/)
+ Temel belge    : tum_ozellikler_hafif_arastirma.txt (kullanıcının hafif
+                  araştırması — BU BELGE onun düzeltilmiş + genişletilmiş hali)
+ Doğrulama yönt.: 4 paralel derin kod incelemesi (core 116.565 satır, runtime
+                  ~12.000 satır, GUI/console/help, utils/shellext/tools) +
+                  dosya:satır referanslı teyitler. Teyit edilmeyen maddeler
+                  [HELP] etiketiyle işaretlendi (help/en dokümanından).
+ Sürüm kimliği  : core/version.h = 1.0.0.0 (fork, standart 3.8.x değil!)
+                  Core::copyright = "Copyright 2003-2021 VMProtect Software"
+ Not            : "DÜZELTME" etiketi, temel belgedeki hatalı/eksik bilgiyi
+                  gösterir. Ayrıntılı düzeltme sicili: 05_bulgular_duzeltmeler.txt
+================================================================================
+
+================================================================================
+ 0. AĞACIN KİMLİĞİ VE KAPSAM (temel belgeye İLK EK)
+================================================================================
+ Temel belge bu ağacı "VMProtect" olarak tarif ediyordu. Gerçek durum:
+ - Ağaç, VMProtect 3.x ailesinin (3.4–3.8 dönemi) resmi kaynak dağıtımı
+   görünümünde bir FORK'tur; sürüm numarası 1.0.0.0'a sıfırlanmıştır
+   (core/version.h: 6 satır). Bu nedenle temel belgedeki "3.8.x sürüm
+   geçmişi/history" maddeleri bu ağaç için doğrudan okunamaz.
+ - EDITION'lar vcxproj konfigürasyonlarıyla tanımlı: Lite / Professional /
+   Ultimate (+ Demo, Debug, Checked) — core.h:428-434 ("VMProtect " EDITION).
+ - Fork'a özgü davranış yamaları (bkz. Bölüm U — "Bu Ağaca Özgü Farklar"):
+   * rand_seed=0 sabitlenmiş (DÜZELTME: üretim DETERMİNİSTİK),
+   * VM giriş kapısı obfuscation motoru if(false) ile ölü bırakılmış,
+   * OpcodeCryptor tipi ccXor'a sabitlenmiş,
+   * cpCryptValues + cpEncryptRegs bitleri ÖLÜ (uygulanmamış),
+   * Çince (pinyin) yorum kalıntıları mevcut.
+ - Toplam ölçek: 1.449 dosya / ~1.130.000 satır kaynak / 113 MB açılmış
+   boyut (XProtect worklog ölçümü; bu oturumda ağaç yapısıyla teyit).
+ - README'de söz edilen build.sh / build.bat AĞAÇTA YOK; gerçek derleme
+   vmprotect.sln (MSVC) veya lin_*.mak / mac_*.mak (GNU make) iledir.
+
+================================================================================
+ A. ÜRÜN / SÜRÜM / PLATFORM MATRİSİ
+================================================================================
+
+A1. Ürün kimlikleri (VMProtectProductId — core.h:377-426, 25 üye, TAM liste)
+--------------------------------------------------------------------------------
+ KOD                          DEĞER   ANLAM
+ VPI_NOT_SPECIFIED            0       tanımsız
+ VPI_LITE_WIN_PERSONAL        1       Lite · Windows · Kişisel
+ VPI_LITE_WIN_COMPANY         2       Lite · Windows · Şirket
+ VPI_PROF_WIN_PERSONAL        3       Professional · Windows · Kişisel
+ VPI_PROF_WIN_COMPANY         4       Professional · Windows · Şirket
+ VPI_ULTM_WIN_PERSONAL        5       Ultimate · Windows · Kişisel
+ VPI_ULTM_WIN_COMPANY         6       Ultimate · Windows · Şirket
+ VPI_LITE_OSX_PERSONAL        7       Lite · macOS · Kişisel
+ VPI_LITE_OSX_COMPANY         8       Lite · macOS · Şirket
+ VPI_PROF_OSX_PERSONAL        9       Professional · macOS · Kişisel
+ VPI_PROF_OSX_COMPANY        10       Professional · macOS · Şirket
+ VPI_ULTM_OSX_PERSONAL       11       Ultimate · macOS · Kişisel
+ VPI_ULTM_OSX_COMPANY        12       Ultimate · macOS · Şirket
+ VPI_WLM_PERSONAL            13       Web License Manager · Kişisel
+ VPI_WLM_COMPANY             14       Web License Manager · Şirket
+ VPI_YEAR_PESONAL            15       Yıllık lisans · Kişisel (typo kaynakta)
+ VPI_YEAR_COMPANY            16       Yıllık lisans · Şirket
+ VPI_SENS_WIN_PERSONAL       17       Sensitized · Windows · Kişisel
+ VPI_SENS_WIN_COMPANY        18       Sensitized · Windows · Şirket
+ VPI_LITE_LIN_PERSONAL       19       Lite · Linux · Kişisel
+ VPI_LITE_LIN_COMPANY        20       Lite · Linux · Şirket
+ VPI_PROF_LIN_PERSONAL       21       Professional · Linux · Kişisel
+ VPI_PROF_LIN_COMPANY        22       Professional · Linux · Şirket
+ VPI_ULTM_LIN_PERSONAL       23       Ultimate · Linux · Kişisel
+ VPI_ULTM_LIN_COMPANY        24       Ultimate · Linux · Şirket
+ Kontrol: Core::check_license_edition (core.cc:1988) lisans bUserData[0]
+ ile karşılaştırır. Temel belgedeki liste doğruydu; platform eş takma
+ adları (#ifdef __unix__/__APPLE__) eklendi.
+
+A2. Özellik kapıları (Lite/Professional/Ultimate) [HELP — yardım dokümanı]
+--------------------------------------------------------------------------------
+ Özellik                        Lite    Professional   Ultimate
+ Mutation                        VAR         VAR          VAR
+ Virtualization                  VAR         VAR          VAR
+ Ultra (M+V)                     VAR         VAR          VAR
+ Memory/Import/Resource prot.    VAR         VAR          VAR
+ Packing (LZMA)                  VAR         VAR          VAR
+ Debugger + VM detection         VAR         VAR          VAR
+ Console (VMProtectCon)          YOK         VAR          VAR
+ Watermark                       YOK         VAR          VAR
+ Script (Lua+FFI)                YOK         VAR          VAR
+ Licensing sistemi               YOK         YOK          VAR
+ License Manager                 YOK         YOK          VAR
+ Virtual Files / File prot.      YOK         YOK          VAR
+ Ek: Demo konfigürasyonu (vcxproj) → NAG + cpUnregisteredVersion yolu;
+     Checked konfigürasyon → aşama aşama hash doğrulama print'leri.
+
+A3. Desteklenen işletim sistemleri / formatlar (kaynak doğrulamalı)
+--------------------------------------------------------------------------------
+ - Windows PE 32/64: pefile.cc (6.124 satır) — EXE/DLL/SYS sürücü;
+   PEArchitecture x86+AMD64; sürücü runtime blob'ları win_runtime32/64.sys.
+   [HELP] Win2000+ iddiası yardım dokümanından; loader'daki hardcoded
+   syscall tablosu XP(2600)→Win10 22H2(19045) build'lerini kapsar (bkz. D1).
+   Not: Win11 build'leri (22000/22621) syscall TABLOSUNDA ayrı dal değil;
+   bilinmeyen build'de loader ntdll'nin ikinci bir kopyasını NtCreateSection
+   ile eşleyip syscall numaralarını elle okur (loader.cc:996-1023).
+ - macOS Mach-O 32/64: macfile.cc (6.714 satır) + FAT/universal ikili
+   (fat_header, FAT_CIGAM) + objc.cc entegrasyonu; mac_runtime32/64.dylib blob.
+ - Linux ELF 32/64: elffile.cc (5.513 satır); ET_EXEC/ET_DYN; Verneed/Verdef
+   sürüm tabloları; .eh_frame + DWARF; lin_runtime32/64.so blob.
+ - .NET: dotnetfile.cc (12.425 satır) + il.cc (7.840 satır); net20/net40/
+   netcore/netstandard gömülü runtime DLL'leri (core/*.dll + *.inc bloblar);
+   BAML (WPF) string taraması; ObfuscationAttribute desteği.
+ - Cross-protect: aynı Windows araç dosyası Mach-O/ELF üretebilir (tüm
+   format motorları aynı core içinde).
+ - Sürücü koruması: VMProtectDDK + win_runtime*.sys (PEIntelLoader sürücü
+   yolu: driver_object->DriverUnload, NON_PAGED_POOL_NX vb. FACE sabitleri).
+
+A4. Desteklenen derleyiciler / diller (derleyici imza taramasıyla — files.h:1036-1051)
+--------------------------------------------------------------------------------
+ cfBaseRegistr / cfGetBaseRegistr : MSVC x86 temel yazmaç kalıbı
+ cfCxxSEH, cfCxxSEH3, cfCxxSEH4    : MSVC C++ SEH aileleri
+ cfSEH4Prolog                      : SEH4 prolog
+ cfVB6SEH, cfDllFunctionCall       : VB6 (DllFunctionCall imzası)
+ cfInitBCBSEH, cfBCBSEH            : Borland C++ Builder SEH
+ cfRelocatorMinGW                  : MinGW relocator (PERelocation::ParseMinGW)
+ cfPatchImport                     : Delphi6 TlsAlloc yaması
+ (Ayrıca MAP çözümü: MSVC/GCC/GCC-Apple/Delphi — unit-tests MapFunctionListTest)
+
+A5. UI dilleri
+--------------------------------------------------------------------------------
+ langs/en.lng, ru.lng, zh.lng, fr.lng (INI biçimi) + core/lang.bat üretim
+ zinciri (lang_def.inc / lang_enum.inc / lang_info.inc). Çalışma anında
+ LanguageManager yürütülebilir yanındaki langs/*.lng'yi tarar. Temel belge
+ doğruydu. GUI çatısı Qt 5.6 (lin_gui.mak: Qt5Core/Gui/Widgets/Help).
+
+================================================================================
+ B. KOD KORUMA MOTORU (core/)
+================================================================================
+
+B1. Derleme tipleri (CompilationType — files.h:308-313)
+--------------------------------------------------------------------------------
+ ctVirtualization : native komutlar → gömülü VM bayt kodu
+ ctMutation       : komut seviyesi obfuscation (native kalır)
+ ctUltra          : önce mutation, sonra virtualization
+ ctNone = 0xFF    : korumasız
+ Sevk noktası: IntelFunction::Compile (intel.cc:18434-18452). Kaynakta
+ Çince yorum kalıntıları: "//bian yi" (ctMutation), "//xu ni hua"
+ (ctVirtualization), "//xu ni hua + bian yi" (ctUltra).
+
+B2. Mutasyon (IntelFunction::Mutate — intel.cc:16039-16561)
+--------------------------------------------------------------------------------
+ - ~70 ölü-kod şablonu: mov reg,reg / mov reg,imm / movsx-movzx / not-neg-
+   inc-dec / cmp-test / and-or-xor-add-adc-sub-sbb / shl-shr-sal-sar-rol-
+   ror-rcl-rcr / bt-bts-btr-btc / setXX / cmov / clc-stc-cmc / cbw-cwde-
+   cwd-cdq-cdqe-cqo / lahf / bswap / xchg / xadd / jmp rel32 ...
+ - rastgele işlenen maskeleri (osRandom/osRandomStartWord, regFree(0xf),
+   flRandom(0xff)) + GetCommandInfo/GetFreeRegisters ile ölü yazmaç-bayrak
+   analizi; her araya "rand()%4" adet çöp komut.
+ - ön dönüşümler: kısa jmp→uzun; JCXZ/LOOP → push+jmp blok yapısına açma;
+   call $+5 kalıplarının push/lea/xchg ile değişimi.
+ - komut içi eşdeğerler: xor r,r → sub r,r; add reg,x → lea [reg+x];
+   sub → lea [reg-x]; native modda jmp imm → push imm; ret.
+ - DÜZELTME (önemli): IntelObfuscation (stack/yazmaç/bayrak simülasyonlu
+   agresif parçalama motoru, intel.cc:17252-18130) bu forkta ÇAĞRILMAZ —
+   IntelFunction::AddGate içindeki çağrı "if(false)" ile ölü (intel.cc:18149).
+
+B3. Virtualization (intel.cc — 577 komut tipi destekli)
+--------------------------------------------------------------------------------
+ - Gömülü VM yorumlayıcı; harici DLL yok; runtime blob imaja eklenir.
+ - DÜZELTME + EK: İKİ VM MİMARİSİ (VirtualMachineType, intel.h:1471-1474):
+   * vtClassic : 1-bayt opcode + 0x100 girişli itab (switch/jump table),
+   * vtAdvanced: opcode baytı YOK; komutlar göreli 32-bit ofset zinciriyle
+     bağlı; her opcode için 10 handler klonu (CloneHandler).
+   Seçim: kayıtsız sürüm/vm_flags&1 → Classic; kayıtlı → Advanced.
+ - DÜZELTME + EK: VM SAYISI — kayıtsız ya da vm_flags&2 → 1 VM; kayıtlı
+   sürüm → 10 FARKLI VM (core.cc:1745-1751), her CommandBlock rastgele
+   bir VM'e atanır (BaseFunction::virtual_machine, processors.cc:2215-2228).
+   "Her build'de komut seti değişebilir" maddesi böyle gerçekleşir:
+   her VM kendi opcode sırasını Fisher-Yates ile karıştırır.
+ - cpEncryptBytecode: OpcodeCryptor + ValueCryptor zincirleri; her handler
+   kendi kodunu çalışma anında çözer (AddReadCommand, intel.cc:27806-27822);
+   bayt kodu iki geçişli şifrelenir (IntelVirtualMachine::CompileBlock).
+ - VM yazmaç modeli: 16 GP yazmaç (x64 R8-R15 dahil) + regEFX/regETX/
+   regERX/regEIX sözde-yazmaçları (processors.h:58-65); VM context ayrı
+   yığında (x64: esp-128-context*8, 16-bayt hizalı).
+ - DÜZELTME (önemli): cpEncryptRegs ve cpCryptValues bu ağaçta ÖLÜ
+   bitlerdir — tanımlıdır (cpMaximumProtection bileşimi) ama hiçbir .cc
+   kullanmaz. Şifreleme yüzeyi: cpEncryptBytecode + link şifreleme
+   (CommandLink::Encrypt) + gate entry_cryptor + cmXadd session-key
+   blokları (bkz. B5/B10).
+
+B4. Ultra
+--------------------------------------------------------------------------------
+ ctUltra = Mutate(ctx, true) + CompileToVM; en yüksek anti-analiz.
+
+B5. Seri anahtarına kilitleme (code lock — ULTIMATE)
+--------------------------------------------------------------------------------
+ - Marker: VMProtectBeginVirtualizationLockByKey / BeginUltraLockByKey
+   (sdk.h) — ioLockToKey (files.h:282-294) + CompilationOption coLockToKey
+   (processors.h:632-634).
+ - Mekanik: cmXadd'li değer, loader'dan VAR_SESSION_KEY ile 4 dword'lük
+   bloklar hâlinde EncryptBuffer ile şifreli gömülür; çalışma anında
+   atDecryptBuffer SDK çağrısıyla çözülür (intel.cc:8744-8834).
+   Geçersiz seride VM komutları çözülemez → fonksiyon çalışmaz.
+
+B6. Koruma nesne tipleri (ObjectType — files.h:739-749)
+--------------------------------------------------------------------------------
+ otCode, otData, otExport, otMarker, otAPIMarker, otImport, otString,
+ otUnknown(ek).
+
+B7. Marker API'leri (sdk/VMProtectSDK.h — 23 export)
+--------------------------------------------------------------------------------
+ VMProtectBegin / BeginVirtualization / BeginMutation / BeginUltra /
+ BeginVirtualizationLockByKey / BeginUltraLockByKey / VMProtectEnd.
+ - Fonksiyon seçimi: MAP dosyası (MapFile::Parse; MSVC/GCC/Delphi), PDB
+   (pdb.h — MSF/CodeView, GUID doğrulamalı), COFF sembol tablosu.
+ - Klasör bazında toplu CompilationType + "Excluded From Compilation".
+ - [HELP] Minimum korunacak prosedür boyutu 5 bayt (faq.htm'de belgeli).
+ - External address işaretleme (ExtCommandList) + End-of-function ile
+   koruma sınırını bitirme; debug modda INT3 yerleştirme (cpDebugMode).
+
+B8. SEH / derleyici yolları (CompilerFunctionType — A4'te listelendi)
+--------------------------------------------------------------------------------
+ Ek: x64 unwind (.pdata RUNTIME_FUNCTION) okuma + VM içinden SEH devam
+ ettirme (IntelVirtualMachineProcessor::AddExceptionHandler) + DwarfParser
+ ile compact unwind üretimi (dwarf.cc: CreateCompactEncodingForX32/X64).
+
+B9. Çağrı kuralları (CallingConvention — files.h:1553-1559)
+--------------------------------------------------------------------------------
+ ccStdcall, ccCdecl, ccMSx64, ccABIx64, ccStdcallToMSx64 (köprü).
+
+B10. Komut/operand modeli (Intel katmanı — intel.h, 577 üye)
+--------------------------------------------------------------------------------
+ - IntelCommandType: 577 komut tipi (temel GP, x87 FPU tam seti, MMX,
+   SSE1-4.2, AVX (VEX), AES-NI, RDRAND/RDSEED, CRC32, XSAVE, sistem
+   komutları...) — intel.h:4-138 + intel_command_name[] mnemonik tablosu.
+ - OperandType: value/register/memory/segment/control/debug/FPU/MMX/XMM/
+   hi-part/base (processors.h:19-33, uint16_t maskeler).
+ - CommandOption (ro*): InverseFlag, LockPrefix, Far, VexPrefix, Breaked,
+   ClearOriginalCode, NeedCompile, CreateNewBlock, FillNop, Internal,
+   NoNative, NoSaveFlags, Writable, UseAsJmp, NoProgress, External,
+   NeedCRC, InvalidOpcode, DataSegment, ImportSegment (processors.h:35-56).
+ - LinkType: SEH/Finally/DualSEH/FilterSEH, Jmp(+flag varyantları), Call,
+   Case, Switch, Native, Offset, GateOffset, ExtSEH, MemSEH, ExtSEHHandler,
+   VBMemSEH, Delta (processors.h:69-91).
+ - SectionOption (rt*): LinkedToInt/Ext/From/Next, Begin/End/Close,
+   InverseResult/InverseWrite, BackwardDirection (ters yönde bayt kodu!)
+   (processors.h:93-108).
+ - VMCommandOption (vo*): LinkCommand, Fixup, SectionCommand, InverseValue,
+   UseBeginSectionCryptor, UseEndSectionCryptor, Begin/End/InitOffset,
+   NoCRC, NoCryptValue (processors.h:122-135).
+ - CryptCommandType (ccAdd/ccSub/ccXor/ccInc/ccDec/ccBswap/ccRol/ccRor/
+   ccNot/ccNeg) — ValueCryptor zincir elemanları (processors.h:391-403).
+
+B11. Packing (packer.cc + runtime LZMA)
+--------------------------------------------------------------------------------
+ - LZMA SDK (third-party/lzma): props level 9, dict 16 MB (1<<24),
+   writeEndMark=true; 5 bayt props başlığı loader verisine gömülür.
+ - Sadece RAM'de açılım; paketli bölüm dosyadan fiziksel olarak silinir
+   (set_physical_size, intel.cc:23075-23109).
+ - EP → loader'a yönlenir; loader LzmaDecode ile açar → OEP'e döner.
+ - OnBeforePackFile script kancası [HELP script_events].
+
+================================================================================
+ C. PROJE SEÇENEKLERİ (ProjectOption — core.h:6-32, HEX DEĞERLERLE TAM TABLO)
+================================================================================
+ BAYRAK                     HEX           ANLAM / BU AĞAÇTAKİ DURUM
+ cpDebugMode              0x00000002     INT3 davranışı (bölge tipleri gevşer)
+ cpCryptValues             0x00000008     ÖLÜ BIT — tanımlı, uygulanmamış (DÜZELTME)
+ cpIncludeWatermark        0x00000020     Filigran göm
+ cpRunnerCRC               0x00000040     Runtime CRC (eski ad)
+ cpEncryptRegs             0x00000080     ÖLÜ BIT — tanımlı, uygulanmamış (DÜZELTME)
+ cpPack                    0x00000100     LZMA paketleme
+ cpImportProtection        0x00000200     IAT gizleme
+ cpCheckDebugger           0x00000400     User-mode debugger tespiti
+ cpCheckVirtualMachine     0x00000800     VM/sandbox tespiti
+ cpMemoryProtection        0x00001000     Bellek CRC + int3 kontrol
+ cpStripFixups             0x00008000     Relocation tablosunu sil
+ cpResourceProtection      0x00010000     Resource şifreleme
+ cpCheckKernelDebugger     0x00020000     Kernel debugger tespiti
+ cpStripDebugInfo          0x00040000     Debug bilgisini sil
+ cpLoader                  0x02000000     Özel loader ekle
+ cpInternalMemoryProtection 0x04000000    İç bellek koruması
+ cpVirtualFiles            0x08000000     Sanal dosya sistemi (ULTIMATE)
+ cpLoaderCRC               0x10000000     Loader bütünlüğü
+ cpUnregisteredVersion     0x40000000     Kayıtsız kısıt (DEMO)
+ cpEncryptBytecode         0x80000000     Bayt kodu şifrele
+ cpUserOptionsMask         0x00FFFFFF     Kullanıcı maskesi
+ cpMaximumProtection       (bileşik)      CryptValues|RunnerCRC|EncryptRegs|Pack|
+                                          ImportProtection|MemoryProtection|
+                                          ResourceProtection|StripDebugInfo
+ EKLER (temel belgede yoktu):
+ - Kayıtlı lisans varsa cpEncryptBytecode+cpLoaderCRC otomatik açılır;
+   yoksa cpUnregisteredVersion (core.cc:1734-1741).
+ - VM segment adı: vm_section_name_ (varsayılan .vmp); özelleştirilebilir.
+ - 5 özelleştirilebilir mesaj + lisans parametre dosyası + build tarihi.
+ - Demo/kayıtsız yolda vm_count=1'e düşer (bkz. B3).
+
+================================================================================
+ D. ANTI-DEBUG / ANTI-VM / BÜTÜNLÜK (kaynak: runtime/loader.cc 2.945 satır)
+================================================================================
+
+D1. Debugger tespiti — TAM DÖKÜM (satır referanslı)
+--------------------------------------------------------------------------------
+ YÖNTEM                                               KAYNAK
+ PEB.BeingDebugged                                     loader.cc:1792; core.cc:769
+ NtQueryInformationProcess(ProcessDebugPort=0x7)       loader.cc:1810,1823,1947
+ NtQueryInformationProcess(ProcessDebugObjectHandle=0x1e) loader.cc:1815,1827
+ NtSetInformationThread(ThreadHideFromDebugger=17)      loader.cc:1835,1953
+ NtSetInformationProcess(ProcessInstrumentationCallback=40) sıfırlama (Win10+)
+                                                        loader.cc:1796-1807
+ NtQuerySystemInformation(SystemKernelDebuggerInfo=0x23) loader.cc:1855
+ NtQuerySystemInformation(SystemModuleInformation=0xb)   loader.cc:1861 (sürücü listesi)
+ 0xCC taraması: ntdll API ilk baytları (NtCreateSection, NtOpenFile,
+   NtMapViewOfSection, NtUnmapViewOfSection, NtClose)     loader.cc:2117-2127
+ 0xCC taraması: NtProtectVirtualMemory                   loader.cc:2256, 2893
+ PAGE_GUARD (eski koruma sayfa bayrağı = tespit)         loader.cc:2241,2274,2883,2917
+ CloseHandle(0xDEADC0DE) geçersiz-handle probu            loader.cc:2432
+ TF set + RDTSC (istisna YOKSA debugger; varsa CONTEXT Dr0-Dr3 kontrolü)
+                                                          loader.cc:2444-2455
+ TF+CPUID istisna-adresi 0x90-nop kontrolü (VM tespiti için de) loader.cc:2518-2551
+ Bilinmeyen OS build = debugger şüphesi                   loader.cc:1050-1056
+ HookedDbgUiRemoteBreakin (hook + 0xDEADC0DE exit)        core.cc:1221-1244
+ macOS sysctl(KERN_PROC_PID)+P_TRACED, PT_DENY_ATTACH     loader.cc:1704-1740
+ Linux /proc/self/status TracerPid (elle parse)           loader.cc:1746-1766
+ Hardcoded syscall tablosu: XP(2600)→Win10 22H2(19045)    loader.cc:1063-1752
+   (9 syscall: close, virtual_protect, open_file, create_section,
+    map/unmap view, query/set information, query virtual memory)
+ Anti-hook hilesi: ntdll'nin İKİNCİ kopyası NtCreateSection ile eşlenip
+   syscall no'ları o kopyadan okunur                      loader.cc:996-1023
+ WoW64: IsWow64Process tespiti + syscall kodlaması
+   (arg sayısı <<24 | 0x8000)                            loader.cc:963-1767
+ DÜZELTME (temel belge): "NtRaiseHardError yolu" listesi — ntdll isim
+ yüzeyinde VAR (FACE_NT_RAISE_HARD_ERROR_NAME) fakat kullanım yeri mesaj
+ gösterme (LoaderMessage, loader.cc:514-771), tespit değil.
+
+D2. Sanal makine / sandbox tespiti (loader.cc:2463-2652; core.cc:288-368)
+--------------------------------------------------------------------------------
+ - CPUID(1).ECX[31] hypervisor bayrağı.
+ - Hyper-V KÖK bölüm ayrımı: CPUID(0x40000000)="Microsoft Hv" +
+   CPUID(0x40000003).EBX[0] → root partition ise VM sayılmaz.
+ - TF+RDTSC / TF+CPUID istisna probu (adres 0x90 nop değilse VM).
+ - Linux: /sys/devices/virtual/dmi/id/sys_vendor → QEMU/Microsoft/innotek.
+ - Windows firmware tabloları: EnumSystemFirmwareTables/GetSystemFirmwareTable
+   ('FIRM') → VirtualBox/VMware/Parallels.
+ - Fallback: \Device\PhysicalMemory 0xC0000 ofsetinden BIOS alanı tarama.
+ - Sandboxie: sbiedll.dll yüklü mü.
+ - Wine: ntdll'de wine_get_version export araması.
+ - HWID sanal-NIC OUI filtresi: VMware/Microsoft(Hyper-V)/Parallels/
+   Virtual Iron MAC ön ekleri HWID'e girmez (hwid.cc:295-310).
+
+D3. CRC / patch / bütünlük
+--------------------------------------------------------------------------------
+ - Loader CRC (CRC_INFO tabloları CRCValueCryptor ile şifreli; rotate-xor).
+ - Dosya CRC (kendi dosyası NT API ile açılıp section-map ile doğrulanır;
+   unix mmap + FAT ikili mimari kaydırması).
+ - Bellek CRC (MEMORY_CRC_INFO + NtQueryVirtualMemory AllocationBase denetimi
+   — dump/hook tespiti) + vmCrc VM komutu (cpMemoryProtection).
+ - Image CRC (VMProtectIsValidImageCRC SDK yüzeyi).
+ - VAR_IS_PATCH_DETECTED / VAR_IS_DEBUGGER_DETECTED (FACE_VAR, XOR-tuzlu
+   GlobalData) + VAR_SESSION_KEY (RDTSC), VAR_CPU_HASH (32 slot),
+   VAR_SERVER_DATE, VAR_OS_BUILD_NUMBER, VAR_CPU_COUNT.
+
+D4. Çalışma anı mesajları (MessageType — common.h:50-55; ROT-şifreli gömülü)
+--------------------------------------------------------------------------------
+ 1 Initialization error / 2 Proc not found / 3 Ordinal not found /
+ 4 File corrupted / 5 Debugger found / 6 Unregistered version /
+ 7 Virtual machine found. Gösterim: NtRaiseHardError / CFUserNotification
+ (mac) / zenity (lin) / DbgPrint (sürücü).
+
+================================================================================
+ E. IMPORT / EXPORT / RESOURCE / STRING KORUMASI
+================================================================================
+
+E1. Import koruması (pefile.cc + runtime loader)
+--------------------------------------------------------------------------------
+ - IAT gizleme; IMPORT_INFO{Name,Address,Key} şifreli isim tablolu; sonuç
+   "adres - Key" ofsetiyle yazılır (loader.cc:2334-2373).
+ - Delay-import çözümü (DELAY_IMPORT_INFO; loader.cc:2810-2873).
+ - Internal import (imaj içi RVA çözümü; loader.cc:2371-2379).
+ - ImportOption (io*): NoReturn, HasDataReference, Native,
+   HasCompilationType, LockToKey, FromRuntime, NoReferences, IsRelative,
+   HasDirectReference, HasCallPrefix (files.h:282-294).
+ - DÜZELTME: temel belgedeki "FACE_IAT_*/FACE_DELAY_IMPORT_*" yüzey adları
+   FACE_PACKER_INFO bloğundadır: FACE_IAT_INFO(_SIZE),
+   FACE_DELAY_IMPORT_INFO(_SIZE) (runtime/common.h:148-175).
+
+E2. Resource koruması (resource_manager.cc 1.021 satır)
+--------------------------------------------------------------------------------
+ - RESOURCE_DIRECTORY yapısı RC5-anahtarlı serileştirme; icon/manifest/
+   servis resource'ları hariç [HELP].
+ - Hook noktaları: ntdll LdrFindResource_U + LdrAccessResource; user32
+   (ve varsa kernelbase) LoadStringA/W — toplam 6 nokta.
+ - Export ailesi: ExportedLoadResource/FindResourceA/ExA/W/ExW/
+   LoadStringA/W/EnumResourceNames|Languages|Types A/W (runtime.def).
+
+E3. String koruması (string_manager.cc 183 satır)
+--------------------------------------------------------------------------------
+ - STRING_DIRECTORY{NumberOfEntries} + STRING_ENTRY{Id,OffsetToData,Size}
+   XOR-key'li; Id = RVA; ikili arama.
+ - Decrypt formülü: byte[i] ^ (_rotl32(key,i)+i); VirtualString ref-count'lu;
+   Release'te secure-zero. SDK: VMProtectDecryptStringA/W + FreeString.
+
+E4. Strip
+--------------------------------------------------------------------------------
+ - Relocation/fixup strip (cpStripFixups; ASLR'siz EXE'de otomatik).
+ - Debug directory + COFF sembol strip (cpStripDebugInfo).
+ - .debug bölümlerinin bölüm optimizasyonu ile çıkarılması.
+
+================================================================================
+ F. RUNTIME ALT SİSTEMLERİ (runtime/)
+================================================================================
+
+F1. Loader (SetupImage — loader.cc:880-2946, 32 ADIMLIK AKIŞ)
+--------------------------------------------------------------------------------
+ 01 idempotans kontrolü → 02 GlobalData tahsisi → 03 kernel32+ntdll+PEB →
+ 04 Wine kontrolü → 05 WoW64 tespiti → 06 OS build doğrulama (bilinmeyen
+ build = şüphe) → 07 syscall tablosu → 08 WoW64 syscall kodlaması →
+ 09 user-mode debugger tespiti (D1) → 10 kernel debugger tespiti →
+ 11 loader/PE-header CRC → 12 dosya CRC (kendi dosyadan) → 13 bölümleri
+ yazılabilir yap → 14 LZMA packer açılımı → 15 fixup işleme (HIGHLOW/
+ DIR64/HIGH/LOW; mac REBASE; lin R_386_RELATIVE + IRELATIVE ifunc!) →
+ 16 IAT kopyası → 17 import çözümü (ordinal/isim, ileri-bağlı export
+ dahil; LoaderGetProcAddress ikili aramalı) → 18 internal import →
+ 19 relocation türleri → 20 CloseHandle probu → 21 TF+RDTSC/DRx probu →
+ 22 VM tespiti → 23 bellek CRC → 24 CPU hash (çekirdek başına affinity
+ +cpuid; Athlon hatası düzeltmesi; 32 slot) → 25 session key (RDTSC) →
+ 26 GlobalData kaydı → 27 runtime init (StringManager/Licensing/HWID/
+ hook'lar) → 28 delay import → 29 koruma geri yükleme → 30 GNU RELRO →
+ 31 kayıtsız NAG → 32 LOADER_SUCCESS.
+ FreeImage: DLL_PROCESS_DETACH + EXIT_PROCESS biti → ExitProcess(0xDEADC0DE).
+
+F2. Crypto (crypto.cc 1.085 satır)
+--------------------------------------------------------------------------------
+ - RC5: w=32, r=15 tur, 8-bayt anahtar; P/Q FACE_RC5_P/Q gömülü; RUNTIME
+   anahtar üretimi RDTSC'den (crypto.cc:93-108). CryptoContainer genel
+   amaçlı şifreli depo (lisans, HWID, trial).
+ - SHA-1: tam gömülü (seri checksum, blacklist, HWID özeti, aktivasyon hash).
+ - RSA: BigNumber (16-bit limb, PuTTY tarzı) + modpow; modpow'da bignum
+   dizisi tahsisi RDTSC ile karıştırılır (timing/bellek düzeni analizi
+   zorlaştırma; crypto.cc:459-466).
+ - Base64 encode/decode; CalcCRC (CRC32 export); CRCValueCryptor.
+ - rand32/rand64 (SDK tarafı).
+
+F3. Hardware ID (hwid.cc 687 satır)
+--------------------------------------------------------------------------------
+ - Blok tipleri: BLOCK_CPU(0), BLOCK_HOST(1), BLOCK_MAC(2), BLOCK_HDD(3);
+   TYPE_MASK=3; MAX_BLOCKS=16.
+ - AddBlock: SHA-1 özet → bswap32 → tip | değer; aynı tip+yine aynı değer
+   eklenmez.
+ - Kaynaklar: CPU (her çekirdek affinity+cpuid), makine adı (mac
+   SCDynamicStore / lin gethostname / win GetComputerNameW / sürücü
+   kayıt defteri), MAC (getifaddrs / /sys/class/net / GetAdaptersInfo /
+   sürücü IOCTL_NDIS), HDD (mac DASession DAVolumeUUID / lin disk-by-uuid
+   / win GetVolumeInformationW VolumeSerialNumber / sürücü ZwQueryVolume).
+ - GetCurrentHWID → Base64; IsCorrect: CPU bloğu zorunlu + "n==c ya da n>=3"
+   kuralı.
+
+F4. Sanal dosya sistemi (file_manager.cc 1.188 satır — ULTIMATE)
+--------------------------------------------------------------------------------
+ - OBJECT_DIRECTORY/ENTRY XOR-key'li ağaç; faLoad / faRegister
+   (DllRegisterServer) / faInstall (DllInstall) aksiyonları.
+ - 13 Nt hook: NtQueryAttributesFile, NtCreateFile, NtOpenFile, NtReadFile,
+   NtQueryInformationFile, NtQueryVolumeInformationFile, NtSetInformationFile,
+   NtQueryDirectoryFile, NtCreateSection, NtQuerySection, NtMapViewOfSection,
+   NtUnmapViewOfSection, NtQueryVirtualMemory.
+ - SEC_IMAGE map'te gömülü PE'yi ReadImage ile yükler; NtQueryVirtualMemory
+   MEM_IMAGE gösterir (dump araçlarını yanıltma).
+
+F5. Sanal kayıt defteri (registry_manager.cc 1.389 satır — ULTIMATE)
+--------------------------------------------------------------------------------
+ - RegistryKey ağacı (is_real/is_wow; last_write_time); 10 Nt hook:
+   NtSetValueKey, NtDeleteValueKey, NtCreateKey, NtOpenKey, NtOpenKeyEx,
+   NtQueryValueKey, NtDeleteKey, NtQueryKey, NtEnumerateValueKey,
+   NtEnumerateKey.
+ - WOW node: "Wow6432Node" şeffaf geçirilir; Begin/EndRegisterServer modu.
+
+F6. Kaynak yöneticisi + F7. Hook yöneticisi + F8. String yöneticisi
+--------------------------------------------------------------------------------
+ - HookManager: HookedAPI kayıtları, HookAPIs/UnhookAPIs.
+ - VirtualResource listeleri + decrypt; StringManager (bkz. E2/E3).
+
+F9. RuntimeOptions (files.h:296-306)
+--------------------------------------------------------------------------------
+ roHWID 0x1 | roKey 0x2 | roResources 0x4 | roStrings 0x8 | roBundler 0x10 |
+ roRegistry 0x20 | roActivation 0x40 | roMemoryProtection 0x80
+ (Core::Init FACE_CORE_OPTIONS'a yansıtır; hangi alt sistem gömülecek.)
+
+F10. APIType (40 üye — files.h:239-280; temel belge "39 tip" diyordu → DÜZELTME)
+--------------------------------------------------------------------------------
+ atBegin/atEnd, atIsVirtualMachinePresent, atIsDebuggerPresent,
+ atIsValidImageCRC, atDecryptStringA/W, atFreeString, atActivateLicense,
+ atDeactivateLicense, atGetOfflineActivation/DeactivationString,
+ atSetSerialNumber, atGetSerialNumberState/Data, atGetCurrentHWID,
+ atLoadResource, atFindResourceA/ExA/W/ExW, atLoadStringA/W,
+ atEnumResourceNames/Languages/Types A/W, atDecryptBuffer, atRuntimeInit,
+ atLoaderData, atIsProtected, atSetupImage, atFreeImage, atCalcCRC,
+ atRandom, atBoxPointer, atUnBoxPointer + atNone.
+ runtime.def 32 export (Exported* önekli + CalcCRC + LoaderData).
+
+================================================================================
+ G. LİSANSLAMA (ULTIMATE — licensing_manager.cc 1.134 satır)
+================================================================================
+
+G1. Algoritma
+--------------------------------------------------------------------------------
+ enum Algorithm (core.h:140-143): alNone | alRSA. Key length 1024..4096
+ (GUI seçenekleriyle); public/private exp + modulus + product code.
+
+G2. Seri numarası bayrakları (SerialNumberFlags — core.h:145-154, HEX)
+--------------------------------------------------------------------------------
+ HAS_USER_NAME 0x1 | HAS_EMAIL 0x2 | HAS_EXP_DATE 0x4 | HAS_MAX_BUILD_DATE
+ 0x8 | HAS_TIME_LIMIT 0x10 | HAS_HARDWARE_ID 0x20 | HAS_USER_DATA 0x40
+ (temel belgedeki kısa adlar DÜZELTİLDİ; SN_FLAGS_PADDING=0xFFFF).
+
+G3. Seri chunk tipleri (licensing_manager.h:21-33, HEX KODLARLA)
+--------------------------------------------------------------------------------
+ VERSION 0x01 | USER_NAME 0x02 | EMAIL 0x03 | HWID 0x04 | EXP_DATE 0x05
+ (yıl<<16|ay<<8|gün) | RUNNING_TIME_LIMIT 0x06 (dakika) | PRODUCT_CODE
+ 0x07 (8 bayt) | USER_DATA 0x08 | MAX_BUILD 0x09 | END 0xFF (SHA-1'in ilk
+ 4 baytı TERS sırada).
+
+G4. Seri durum bayrakları (SDK VMProtectSDK.h:41-51, HEX)
+--------------------------------------------------------------------------------
+ SUCCESS 0 | CORRUPTED 0x1 | INVALID 0x2 | BLACKLISTED 0x4 | DATE_EXPIRED
+ 0x8 | RUNNING_TIME_OVER 0x10 | BAD_HWID 0x20 | MAX_BUILD_EXPIRED 0x40.
+
+G5. Seri veri yapısı
+--------------------------------------------------------------------------------
+ nState + wUserName[256] + wEMail[256] + dtExpire + dtMaxBuild +
+ bRunningTime (dakika) + nUserDataLength + bUserData[255] (pack(1)).
+
+G6. Üretim / doğrulama
+--------------------------------------------------------------------------------
+ GenerateSerialNumber / DecryptSerialNumber; blacklist (20 bayt SHA-1
+ parmak izi, ikili arama); License Manager dosyası (VMProtectLicense.ini
+ biçimi) aç/kaydet; key pair export; aktivasyon sunucu URL'si.
+ PKCS#1 v1.5 tip-2 doldurma denetimi (00 02 NN.. 00 veri).
+ Tarih kaynağı: KUSER_SHARED_DATA 0x7FFE0000 + sunucu Date başlığı spoof
+ koruması (max(current, server_date)).
+
+G7. Keygen (DÜZELTME — önemli)
+--------------------------------------------------------------------------------
+ Temel belge "DLL / .NET / PHP keygen" listeliyordu. Bu AĞAÇTA:
+ - GERÇEK keygen kodu: utils/ipn_sqlclr/keygen.cs (SQL CLR, .NET) —
+   chunk blokları + SHA-1 + PKCS#1 v1.5 + RSA + Base64; VmpLicenseKey SQL
+   UDF'leri. Taggant.cs + TaggantWebService.cs (anti-piracy sertifika web
+   servisi istemcisi, BouncyCastle).
+ - Dll/.NET/PHP keygen kurulumu YALNIZCA help dokümanlarında anlatılır
+   (help/en|ru/manager/keygen/*.htm); DLL/.NET/PHP keygen KAYNAK KODU ağaçta
+   YOKTUR. ipn_tool: watermark arama + aktivasyon kayıtları + Taggant
+   ssvtest doğrulama konsolu.
+
+G8. Code lock etkileşimi: bkz. B5.
+
+================================================================================
+ H. AKTİVASYON SİSTEMİ
+================================================================================
+
+H1. Akış
+--------------------------------------------------------------------------------
+ 1) kısa kod (alfabesi 0-9a-z-, max 32 karakter) →
+ 2) online istek: activation.php?code=..&hwid=<Base64 HWID>&hash=<Base64
+    SHA1(modulus)>; yanıt OK\n<serial> / BAD / BANNED / USED / EXPIRED →
+ 3) HWID'e bağlı uzun seri + offline aktivasyon/deaktivasyon stringleri
+    (offline: type=activation&code=.., tüm URL Base64 + percent-encode).
+ Transport: winhttp (IE proxy'li) / CFReadStream (mac) / libcurl (lin, SSL
+ verify kapalı) — Date başlığı server_date olarak saklanır.
+
+H2. API: VMProtectActivateLicense / DeactivateLicense /
+    GetOfflineActivationString / GetOfflineDeactivationString.
+
+H3. Sonuç kodları: OK, SMALL_BUFFER, NO_CONNECTION, BAD_REPLY, BANNED,
+    CORRUPTED, BAD_CODE, ALREADY_USED, SERIAL_UNKNOWN, EXPIRED, NOT_AVAILABLE.
+
+H4. Web License Manager: geliştirici sunucusuna kurulum [HELP]; aktivasyon
+    izleme/engelleme; ActivationRequest/DeactivationRequest.
+
+================================================================================
+ I. WATERMARK
+================================================================================
+ - Kullanıcıya özgü filigran (isim + hex değer; Watermark::Compile →
+   dump+mask); sızdırılan kopyada sahip tespiti; Search sekmesi dosya VE
+   süreç taraması (Windows'ta Debug Privilege ile).
+ - DB: %AppData%/VMProtect Software/VMProtect.dat (TEYİT: core/inifile.cc:127
+   os::CombineThisAppDataDirectory("VMProtect.dat")); [HELP] macOS
+   /Users/Shared/VMProtect Software/VMProtect.dat.
+ - Proje seçeneği (cpIncludeWatermark) + console -wm.
+
+================================================================================
+ J. SDK (native + DDK + .NET + Delphi/VB)
+================================================================================
+
+J1. Native SDK (sdk/VMProtectSDK.h — 23 fonksiyon)
+--------------------------------------------------------------------------------
+ Koruma (7): Begin, BeginVirtualization, BeginMutation, BeginUltra,
+ BeginVirtualizationLockByKey, BeginUltraLockByKey, End.
+ Yardımcı (7): IsProtected, IsDebuggerPresent(bool kernelMode),
+ IsVirtualMachinePresent, IsValidImageCRC, DecryptStringA/W, FreeString.
+ Lisans (4): SetSerialNumber, GetSerialNumberState, GetSerialNumberData,
+ GetCurrentHWID.
+ Aktivasyon (4): ActivateLicense, DeactivateLicense,
+ GetOfflineActivationString, GetOfflineDeactivationString.
+ Korunmamış modda davranış: stub (sdk.cc) — IsProtected=false,
+ DecryptString=identity, lisans INVALID döner.
+
+J2. DDK (sdk/VMProtectDDK.h) — VAR (temel belgede doğru)
+--------------------------------------------------------------------------------
+ Sürücü varyantı; aynı 23 fonksiyon; VMProtectDDK32/64.lib; IRQL notları.
+
+J3. .NET (runtime/VMProtect.Runtime — EK DETAY)
+--------------------------------------------------------------------------------
+ Loader.cs / Core.cs / Faces.cs / LicensingManager.cs / HardwareID.cs /
+ StringManager.cs / Crypto.cs / Win32.cs / LzmaDecoder.cs / Numerics
+ (BigInteger) + VirtualMachine.cs (4.284 satır MSIL VM yorumlayıcı!).
+ Hedefler: net20 / net40 / netcoreapp / netstandard (gömülü runtime'lar).
+ Test paketi: MsilToVmTestCompiler + RefVm (VmExecutor, VmInstrCodesDb,
+ StringDecryptor...) — VM talimat kümesinin dıştan doğrulanması.
+
+J4. Delphi (VMProtectSDK.pas), VB6 (VMProtectSDK.bas), .NET stub SDK
+    (VMProtect.SDK/Sdk.cs — korunmamış geliştirme saplaması).
+
+================================================================================
+ K. DOSYA FORMATI MOTORLARI
+================================================================================
+
+K1. PE (pefile.cc 6.124 satır): 16 data directory; export (yönlendirilmiş
+    dahil); import (+bound, delay); resource ağacı; BASERELOC fixup
+    (HIGH/LOW/HIGHLOW); x64 .pdata unwind; load config (CFG+SEH tablosu+
+    security cookie); TLS; debug (RSDS GUID→PDB); COFF string tablosu;
+    VS_VERSIONINFO; checksum düzeltme; sürücü/EXE/DLL ayrımı.
+K2. ELF (elffile.cc 5.513): PT_LOAD; .dynamic; PLT/GOT; Verneed/Verdef;
+    relocation (R_X86_64_*, ParseMinGW); .eh_frame + .eh_frame_hdr
+    (ULEB/SLEB çözümleme); RELRO; disable_options (resource/import/
+    virtual-files kapalı).
+K3. Mach-O (macfile.cc 6.714): fat/universal; LC_SYMTAB/DYSYMTAB;
+    LC_DYLD_INFO rebasing/bindings (RLE sıkıştırılmış); LC_MAIN/
+    LC_UNIXTHREAD; stubs/lazy symbol; chained fixups; export trie; objc.cc
+    (1.434) __objc_* taraması (metot/property/selector isimleri).
+K4. Objective-C: objc_module/class_ro_t/method_list_t/protocol_list_t.
+K5. .NET/IL (dotnetfile.cc 12.425 + il.cc 7.840): 45 metadata tablo sınıfı;
+    #~/#Strings/#US/#Blob/#GUID heap'leri; imza çözümleyici; P/Invoke +
+    delegate import; BAML (WPF) string taraması; ObfuscationAttribute;
+    framework tespiti (mscorlib→Framework, System.Runtime→Core,
+    netstandard→Standard); RenameSymbols/RenameToken sembol gizleme;
+    ILCommandType 239 üye (ECMA seti + VM iç yardımcıları icCallvm/
+    icCallvmvirt/icEntertry...).
+K6. DWARF/PDB: dwarf.cc (.eh_frame CIE/FDE + compact unwind üretimi);
+    pdb.h (2.407 satır MS PDB ayrıştırıcı, GUID eşleşmeli).
+K7. Açılış durumları (OpenStatus): osSuccess, osOpenError, osUnknownFormat,
+    osInvalidFormat, osUnsupportedCPU, osUnsupportedSubsystem; OpenMode:
+    foRead/foWrite/foHeaderOnly/foCopyToTemp.
+K8. MemoryTypeFlags: mtReadable/Executable/Writable/NotDiscardable/
+    Discardable/NotPaged/Shared/Solid (files.h:145-156).
+
+================================================================================
+ L. SCRIPT SİSTEMİ (Lua 5.4 + libffi FFI)
+================================================================================
+
+L1. Olay kancaları (sırayla — help/en/script_events.htm [HELP] + core/script.cc)
+--------------------------------------------------------------------------------
+ 1 OnBeforeCompilation (fonksiyon listesi düzenleme)
+ 2 OnBeforeSaveFile (resource/export/section isimleri)
+ 3 OnBeforePackFile (packing öncesi; yalnız cpPack açıkken)
+ 4 OnAfterSaveFile (çıktıya veri ekleme)
+ 5 OnAfterCompilation (imza ekleme vb.)
+
+L2. Script'e açık sınıflar (script_classes.htm + core/script.h ~150 Binder)
+--------------------------------------------------------------------------------
+ Core (projectFileName, saveProject, inputFileName, outputFileName,
+ watermarkName, options/setOptions [ProjectOption], vmSectionName,
+ licenses(), files(), watermarks()) → Watermarks/Watermark →
+ Licenses/License (keyLength, publicExp, privateExp, modulus, date,
+ customerName, customerEmail, orderRef, comments, serialNumber, blocked) →
+ Files/File/Folders/Folder → PEFile (Format/Architecture/Segments/Section/
+ Directories/Imports/Exports/Resources/Fixups) → MacFile (Commands/Symbols/
+ Imports/Exports/Fixups) → MapFunctions/MapFunction/References/Reference
+ [ObjectType enum] → IntelFunctions/IntelFunction (compilationType,
+ destroy, folder) → IntelSegment/IntelCommand/IntelOperand (OperandType) →
+ CommandLinks/LinkType → FFILibrary/FFIFunction (harici DLL çağrısı!) →
+ uint64 yardımcı sınıfı.
+ Not: .NET (dotnetfile) nesneleri Lua'ya AÇILMAMIŞTIR (script API
+ yalnız PE/Mach-O modelini kapsar) — genişletme noktası.
+
+L3. Standart Lua: string, table, math, bit32, io, os + extractFilePath/
+    Name/Ext, commandLine(), vmprotect.core(), openLib.
+
+L4. Örnek scriptler (examples/scripts — her biri Project1.exe+.vmp ile):
+    Random Section Names (OnAfterSaveFile segment isimlerini rastgele),
+    External DLL (FFI MessageBoxA), Environment Variables (%MYVAR% çıkış),
+    Delphi Resources (PACKAGEINFO/DVCLAL silme), Script Events (print).
+
+================================================================================
+ M. GUI (VMProtect/ — Qt 5.6)
+================================================================================
+
+M1. Ana yapı
+--------------------------------------------------------------------------------
+ - MainWindow (3.711 satır): boot/welcome ekranı (Recent Files + Quick
+   Start: Open/Examples/Help) ↔ proje ekranı; sol panel 3 sekme: Project /
+   Functions / Details; sağ panel node tipine göre widget; log paneli;
+   durum çubuğu (dosya + script satır/sütun/mod); drag&drop; harici
+   değişiklik izleme (QFileSystemWatcher); Ctrl+F artımlı arama.
+ - Help browser: AYRI SÜREÇ (--help <qhc>), QtHelpEngine; RemoteControl
+   stdin protokolü "navigatetokeyword#id" ile GUI'den konu açma.
+ - Settings (dil, otomatik kaydet, shell extension kaydı); About (satın
+   alma bağlantıları: vmpsoft.com/purchase, PayProGlobal 35518/35531).
+
+M2. Proje ağacı NodeType (41 — modellerden TAM liste)
+--------------------------------------------------------------------------------
+ ROOT, ARCHITECTURE, OPTIONS, SCRIPT, SCRIPT_BOOKMARK, LOAD_COMMANDS,
+ LOAD_COMMAND, SEGMENTS, SEGMENT, SECTION, IMPORTS, IMPORT, IMPORT_FOLDER,
+ IMPORT_FUNCTION, EXPORTS, EXPORT_FOLDER, EXPORT, MAP_FOLDER,
+ MAP_FUNCTION, FUNCTIONS, FOLDER, FUNCTION, RESOURCES, RESOURCE_FOLDER,
+ RESOURCE, LICENSES, LICENSE, FILES, FILE, FILE_FOLDER, COMMAND,
+ WATERMARK, PROPERTY, DUMP, CALC, MESSAGE, WARNING, ERROR, TEMPLATE,
+ ASSEMBLIES.
+ (Temel belgede MessageType DUMP/CALC/MESSAGE/WARNING/ERROR aynıydı — doğru.)
+
+M3. Diyaloglar (14)
+--------------------------------------------------------------------------------
+ Function (Add/GotoAddress; filtre), Folder, License (alan-11 içerik
+ seçimi), Import License, Export Key Pair, Watermark + Watermarks
+ (Setup/Search sekmeleri; süreç taraması), Template Save/Templates,
+ Settings, About, Message, Progress (+GUILog), Help Browser.
+
+M4. Bilgi sekmeleri: Directories (Mach-O load command'lar), Segments,
+    Imports, Exports, Resources, Dump (hex + disasm), Calculator
+    (RVA↔File offset↔VA).
+
+M5. Menüler (tam — mainwindow.cc:110-402)
+--------------------------------------------------------------------------------
+ File: Open, Save Project, Save As, [ULT] Save Licenses As, Close, son
+ dosyalar, Exit.
+ Edit: Undo/Redo/Cut/Copy/Paste/Delete, Search, Go To (Lite hariç).
+ Project: Add (Function/[ULT]License/File)/Folder, [ULT] Export Key Pair,
+ Import License(+From Project), Compile (F9), Execute (F5).
+ Tools: Watermarks, Settings.
+ Help: Contents (F1), Home Page, About.
+ Bağlam menüleri: Blocked, Excluded From Compilation, External Address,
+ End of Function, script bookmark.
+ Toolbar: Open/Save/Compile/Execute(+açılır: Execute Original/Protected/
+ Parameters)/Cut/Copy/Paste/Add Function/Go To/[ULT]Add License/Add File/
+ Templates/arama filtresi.
+
+M6. Remote control: remotecontrol.cc/h (stdin protokolü; help tarayıcı ile).
+
+M7. Editörler: ScriptEdit (Scintilla + LexLua; satır/sütun/INSERT-OVR),
+    BinEditor (hex; undo/redo; mask'lı kullanıcı verisi), property editor
+    ızgaraları (Enum/Bool/Date/StringList/FileName/CompilationType...).
+
+================================================================================
+ N. CONSOLE (VMProtectCon)
+================================================================================
+--------------------------------------------------------------------------------
+ VMProtect_Con  File  [Output File]
+   [-pf Project File]  [-sf Script File]  [-lf Licensing Parameters File]
+   [-bd Build Date yyyy-mm-dd]  [-wm Watermark Name]  [-we]
+--------------------------------------------------------------------------------
+ - File: yürütülebilir YA DA .vmp proje dosyası (girdi projeden alınır).
+ - -bd: (y<<16)+(m<<8)+d kodlanır; lisans "max build" kontrolünde.
+ - -we: uyarıları hata sayar (abort_error).
+ - Çıktı: "[Information|Warning|Error|Script] mesaj"; fonksiyon olayları
+   "type [V|M|U|-] 00401007 funcName" (V=Virtualization, M=Mutation,
+   U=Ultra); tty'de "arch> caption 42%" yüzdeli ilerleme (x86>/x64> öneki).
+ - Banner: "edition v X (build N) copyright" + kayıt durumu (kendini
+   VMProtectSetSerialNumber ile korur).
+ - DİKKAT: VMProtectCon.Tests, main.cc'de var olmayan CommandLineParser.h'ye
+   bağlı — ağaçta bu test projesi DERLENMEZ (asılı refactor izi).
+
+================================================================================
+ O. YARDIMCI ARAÇLAR
+================================================================================
+ - MinidumpFixer v2.0 (minidumpfixer/, 161 satır): dmp ModuleListStream
+   kayıtlarının SizeOfImage/CheckSum'ını EXE'den düzeltir.
+ - Taggant: kayıtlı sürümde AV false-positive azaltma; ipn_sqlclr +
+   ipn_tool içinde Taggant web servisi istemcisi (BouncyCastle, X509).
+ - Project templates (ProjectTemplateManager; SettingsFile ile).
+ - MAP/PDB/COFF sembol akışı (K1).
+ - Watermark search (dosya + süreç).
+ - Shell extension (shellext/, 859 satır): Explorer sağ-tık "Protect with
+   VMProtect"; COM DLL; VMProtect.exe'i seçili dosyayla başlatır.
+ - Lang generator (core/lang.bat → .inc zinciri).
+ - tools/: YALNIZCA önceden derlenmiş ikililer (as.exe, dlltool.exe,
+   implib.exe, mkexp.exe, reimp.exe, ppx2.exe, blat.exe, rep_txt.exe).
+ - utils/x86disasm: x86/x64 komut korpusu üreteci (test amaçlı) +
+   intel-x86.py / arm-32bit.py / arm-thumb.py IDA betikleri.
+
+================================================================================
+ P. GUI PROJE YÖNETİMİ
+================================================================================
+ - Çok-mimarili proje (x86+x64+NET aynı anda); fonksiyon/klasör ekleme,
+   sürükle-bırak; wildcard arama (* ?); klasör bazlı CompilationType;
+   dış adresler listesi; script bookmark; [ULT] lisans ekleme/içe aktarma;
+   sanal dosya ağacı; filigran seçimi; çıktı yolu; VM bölüm adı.
+ - Proje biçimi: XML (.vmp — tinyxml) + ini geçmişi; BeginCompileTransaction
+   ile geçici dosya + kilit + mutex (/tmp/VMProtect.dat.mutex).
+
+================================================================================
+ Q. GÜVENLİK / YÜZEY DETAYLARI (FACE_* — runtime/common.h:74-204)
+================================================================================
+ - FACE_MASK 0xFACE0000; 0xFACE0100 bloğu packer bilgileri (PACKER/FILE_CRC/
+   LOADER_CRC/SECTION/FIXUP/RELOCATION/IAT/IMPORT/INTERNAL_IMPORT/MEMORY_CRC/
+   DELAY_IMPORT/TLS_INDEX/GNU_RELRO/NON_PAGED_POOL_NX/DEFAULT_MDL...).
+ - FACE_VAR 0xFACE0200 + FACE_VAR_SALT 0xFACE0300: GlobalData XOR-tuzlu
+   değişken yüzeyi (v_[] dizisi; memory-scanner karşıtı).
+ - Anti-analiz isim yüzeyi: ntoskrnl, HAL, user32 MessageBox, kernel32
+   CreateFile/CloseHandle, WTSAPI32 WTSSendMessage, ntdll NtQuery/
+   SetInformation*, SoftICE ailesi (sice/siwvid/ntice/iceext/syser),
+   Sandboxie (sbiedll), syscall taban adresi, NtAllocate/FreeVirtualMemory,
+   section map/unmap, Wine GetVersion, GNU ptrace, macOS format değeri,
+   initialization/proc-not-found/ordinal-not-found mesajları...
+ - runtime.vmp (33,7 KB Lua proje): runtime DLL'lerinin KENDİNİ koruma
+   otomasyonu — OnAfterCompilation çıktıyı .inc XOR+rot blob'larına çevirir
+   (28 gömülü runtime blob'u bu scriptin ürünü). vmprotect.vmp: konsolun
+   kendi kendini koruması.
+
+================================================================================
+ R. .NET ÖZEL YETENEKLERİ
+================================================================================
+ - CIL virtualization (ILFunction::CompileToVM; generic metot hariç);
+   mixed-mode (C++/CLI) örneği; metadata-farkındalıklı koruma; BAML string;
+   sembol yeniden adlandırma; net20/40/core/standard runtime gömme;
+   MSIL→VM derleyici + RefVm doğrulama paketi.
+
+================================================================================
+ S. TEST / MÜHENDİSLİK ALTYAPISI
+================================================================================
+ - unit-tests (102 TEST): IntelTest 49 (disasm/SEH/switch/virtualization),
+   PEFileTest 12, MacFileTest 11, ELFFileTest 7, MapFunctionListTest 7,
+   MemoryManager 5, CoreTest 5 (OpenAndCompile, CryptRSA), Stream 4,
+   CryptoContainer 13, StringManager 3, LicensingManager 2,
+   RegistryManager 2, HWID 2, FileManager 1, IL 1, Demangle 1, Arm 2.
+ - win_runtime.Tests (runtime birim testleri; lin/mac eşdeğer mak'lar).
+ - VMProtectCon.Tests (asılı — bkz. N).
+ - .NET Tests: Loader/Licensing/UnitTestCombine + MsilToVm + RefVm.
+ - test-binaries/: 24 ikili (win32/64 app+dll, seh-x86/x64, exc-linux-osx,
+   macos/ios, delphi-map, msvc-map, gcc-map...).
+ - invariant/: üçüncü parti kod (Lua 5.4, FFI, LZMA, tinyxml, scintilla,
+   demangle) tek derlemeyle statik kütüphane (invariant_core).
+
+================================================================================
+ T. DOKÜMANTASYON (help/)
+================================================================================
+ help/en (41 htm) + help/ru: Introduction, Glossary (dictionary), Analysis/
+ cracking/protection, What is VMProtect, Recommendations, History;
+ Working (create project; MAP; markers; SDK functions), Main window (menu/
+ toolbar/project/functions/details [directories, segments, imports,
+ exports, resources, calc, dump]); Console; Script (classes/functions/
+ events); Watermarks (setup/search); FAQ; Contacts.
+ manager/: Licensing system (features, howitworks, licenses), usage 2 aşama
+ 15+10 adım (app, code, flags, name, exp, time, maxbuild, blacklist, hwid,
+ userdata, src, vmp, product, test, codelock), API, keygen (dll, .net, php,
+ serial_format, algorithms), activation (vmprotect, weblm, api).
+ Çeviri senkronu: help/sync.py + struct.json.
+
+================================================================================
+ U. BU AĞACA ÖZGÜ FARKLAR (fork bulguları — temel belgede YOK)
+================================================================================
+ 1. rand_seed = 0; srand(0) (core.cc:1702-1705) → üretim DETERMİNİSTİK;
+    üstünde OutputDebugStringA("rand_seed:%d") izi kalıyor.
+ 2. IntelObfuscation motoru if(false) ile kapatılmış (intel.cc:18148-18154).
+ 3. OpcodeCryptor::Init tipi ccXor'a sabit (processors.cc:777-779; rastgele
+    ccAdd/ccSub/ccXor seçeneği yorum satırında).
+ 4. cpCryptValues + cpEncryptRegs ÖLÜ bitler (hiçbir .cc kullanmıyor).
+ 5. Çince yorumlar: ctMutation "//bian yi", ctVirtualization "//xu ni hua",
+    ctUltra "//xu ni hua + bian yi" (intel.cc:18437-18443) + kökte
+    "New Text Document.txt": "_CxxThrowException dönüş adresi Nop ile
+    doldurulmalı" notu (Çince).
+ 6. version.h = 1.0.0.0 (standart 3.8.x değil); copyright 2003-2021.
+ 7. core/VMProtectLicense.ini: kalıcı test lisansı (AcceptedSerialNumber,
+    UserName=VMProtect Software, MyHWID=+L7reY1X2iCLr+TKSsVHtQ==) — kayıtlı
+    yol otomatik açılır (core.cc:1735).
+ 8. IntelVirtualMachineProcessor::AddObfuscation/AddObfuscationHandler
+    bildirilmiş ama tanımsız (ölü API).
+ 9. README'de build.sh/build.bat yok; derleme sln/mak ile.
+ 10. #ifdef CHECKED blokları: aşama aşama hash doğrulama print'leri.
+
+================================================================================
+ SONRAKİ DOKÜMANLAR
+================================================================================
+ 02_yapi_zinciri_blueprint.txt — Obsidian-tarzı yapı zinciri (MOC + wikilink
+   graf şeması + Blueprint notları)
+ 03_fonksiyon_haritasi.txt  — fonksiyon seviyesi envanter (modül modül)
+ 04_XProtect_port_analizi.txt — XProtect 0.8.4 fark/port oranı analizi
+ 05_bulgular_duzeltmeler.txt — temel belge düzeltme sicili (hata → doğruluk
+   → kanıt)
+================================================================================
+ [BELGE SONU — 01/05]

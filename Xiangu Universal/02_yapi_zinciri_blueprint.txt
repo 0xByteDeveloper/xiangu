@@ -1,0 +1,568 @@
+================================================================================
+ XIANGU UNIVERSAL — 02 · YAPI ZİNCİRİ / BLUEPRINT
+ (Obsidian benzeri bilgi kasa mimarisi — MOC + Wikilink grafı)
+================================================================================
+ AMAÇ      : universalObfusPublicSrc (vmp ağacı) ile XProtect 0.8.4 arasındaki
+             yapısal bağı bir "Obsidian vault" gibi modellemek: her bileşen bir
+             NOT (node), her ilişki bir [[wikilink]]; katman hiyerarşisi MOC
+             (Map of Content) ile yönetilir. Notlar TXT ortamında da Obsidian
+             kurallarıyla yazıldığından bu dosyayı bir .md kasasına
+             birebir taşıyabilirsin.
+ YÖNTEM    : Obsidian topluluğunun standart yapı taşları kullanıldı (araştırma:
+             obsidian.md/help/links — wikilink/backlink/graph; MOC deseni:
+             "Map of Content" başlıklı hiyerarşik kura; tags vs links ayrımı:
+             forum.obsidian.md "Links vs Tags" rehberi).
+ KURALLAR  : - [[Not]] : ileri bağlantı (wikilink)
+             - #tag    : kavram etiketi (arama/dosyalama için)
+             - Geri bağlantılar (backlink) her notun altında "BAĞLANTILAR:"
+             - Her notun başında YAML benzeri frontmatter (--- blok)
+             - MOC'lar yalnızca bağlantı haritası tutar, içerik taşımaz
+ NOTASYON  : [V] vmp kaynak bileşeni · [X] XProtect bileşeni · [B] ortak kavram
+================================================================================
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ VAULT HARİTASI — KÖK MOC                                                  ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+HOME MOC: [[00 Xiangu Universal MOC]]
+├─ KATMAN 1 · Kaynak Ağacı:      [[10 vmp Kaynak Ağacı MOC]]
+├─ KATMAN 1 · Port Projesi:      [[20 XProtect Projesi MOC]]
+├─ KATMAN 1 · Kavramsal:        [[30 Koruma Kavramları MOC]]
+├─ KATMAN 2 · Analiz:            [[40 Analiz ve Doğrulama MOC]]
+└─ KATMAN 2 · Süreç:             [[50 Port Süreci MOC]]
+
+Graf özeti (not sayısı): 38 not · 4 MOC ailesi · ~120 wikilink
+                              + 12 kavram etiketi (#tag)
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[00 Xiangu Universal MOC]]  (KÖK MOC)
+────────────────────────────────────────────────────────────────────────────────
+---
+aliases: [Xiangu Universal, Ana Harita, Vault Kökü]
+type: moc
+layer: 0
+tags: [#moc, #xiangu-universal]
+---
+ Kasa girişi. Aşağıdaki 5 alt MOC'u sırayla dolaşarak tüm yapı zinciri
+ okunabilir:
+
+ - [[10 vmp Kaynak Ağacı MOC]] — universalObfusPublicSrc'nin iç yapısı
+ - [[20 XProtect Projesi MOC]] — port hedefinin iç yapısı
+ - [[30 Koruma Kavramları MOC]] — iki tarafı birleştiren kavram düğümleri
+ - [[40 Analiz ve Doğrulama MOC]] — düzeltmeler, kanıtlar, ölçümler
+ - [[50 Port Süreci MOC]] — 0.1.0 → 0.8.4 gelişim zinciri
+
+BAĞLANTILAR (backlink): (kök — geri bağlantı yok)
+
+================================================================================
+ 10 · VMP KAYNAK AĞACI MOC  — [[10 vmp Kaynak Ağacı MOC]]
+================================================================================
+---
+aliases: [universalObfuscator Ağacı, vmp Tree]
+type: moc
+layer: 1
+source: universalObfusPublicSrc.zip → vmp/ (1.449 dosya, ~1.13M satır)
+tags: [#kaynak, #vmprotect, #moc]
+---
+ Alt notlar:
+
+ KATMAN-NOTLARI
+ ├── [[11 Ürün Katmanı]]            (sürüm/edition/lisans kimlikleri)
+ ├── [[12 Koruma Motoru]]           (core/ — V·M·U üretim çekirdeği)
+ ├── [[13 Runtime Katmanı]]         (loader, manager'lar, crypto)
+ ├── [[14 Dosya Formatı Motorları]]  (PE/ELF/Mach-O/.NET/ObjC/DWARF/PDB)
+ ├── [[15 SDK Yüzeyi]]              (native/DDK/.NET/Delphi/VB)
+ ├── [[16 GUI]]                     (Qt 5.6 — pencere/menü/diyalog)
+ ├── [[17 Console]]                 (VMProtectCon CLI)
+ ├── [[18 Script Motoru]]           (Lua 5.4 + FFI, 5 olay kancası)
+ ├── [[19 Yardımcı Araçlar]]        (shellext, minidumpfixer, utils, tools)
+ └── [[1A Test ve İnşa]]            (unit-tests, invariant, vcproj, mak)
+
+BAĞLANTILAR: [[00 Xiangu Universal MOC]], [[30 Koruma Kavramları MOC]], [[51 Port Hedefi]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[11 Ürün Katmanı]]
+────────────────────────────────────────────────────────────────────────────────
+---
+aliases: [Product Layer]
+type: kaynak-bileşen
+files: core/core.h, core/version.h, vcproj/*.props
+tags: [#ürün, #sürüm]
+---
+ VMProtectProductId 25 kimlik (Lite/Pro/Ultimate × Win/mac/lin × Kişisel/
+ Şirket + WLM + Year + Sens). Edition'lar vcxproj konfigürasyonlarıyla:
+ Lite/Professional/Ultimate/Demo/Debug/Checked. version.h=1.0.0.0 (fork!).
+ Kalıcı test lisansı: core/VMProtectLicense.ini.
+ İlişki: sürüm kapıları → [[12 Koruma Motoru]]'nun özellik setini sınırlar
+ (ör. kayıtsız → vm_count=1, Classic VM, NAG).
+
+BAĞLANTILAR: [[10 vmp Kaynak Ağacı MOC]], [[12 Koruma Motoru]], [[52 Port Kapsam Kararı]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[12 Koruma Motoru]]
+────────────────────────────────────────────────────────────────────────────────
+---
+aliases: [Protection Engine, core/]
+type: kaynak-bileşen
+files: core/core.cc, intel.cc, processors.cc, files.cc, packer.cc
+tags: [#motor, #virtualization, #mutation, #packing]
+---
+ Merkezi: Core::Open → Core::Compile akışı (7 aşama: format denemeli açış →
+ mimari Prepare → IntelFunctionList::Prepare → V/M/U üretimi → CommandBlock
+ yerleşimi → link şifreleme → Save + loader yazımı + EP değişimi).
+ Alt düğümler:
+ - [[121 Virtualization Ünitesi]] — vtClassic/vtAdvanced; 10 VM; itab;
+   OpcodeCryptor/ValueCryptor; handler klonları
+ - [[122 Mutasyon Ünitesi]] — ~70 şablon; ölü-yazmaç analizi;
+   (IntelObfuscation bu forkta if(false) ile KAPALI)
+ - [[123 Packer Ünitesi]] — LZMA level 9/16MB; RAM'de açılım; EP→loader
+ - [[124 Link Şifreleme]] — CommandLink::Encrypt; entry_cryptor;
+   cmXadd session-key blokları ([[G3 Code Lock]] ile birleşir)
+ İlişki: [[13 Runtime Katmanı]]'na runtime_options (ro*) sinyalleri gönderir;
+    [[14 Dosya Formatı Motorları]] üzerinden PE/ELF/Mach-O/.NET'e iner.
+
+BAĞLANTILAR: [[10 vmp Kaynak Ağacı MOC]], [[121 Virtualization Ünitesi]], [[122 Mutasyon Ünitesi]],
+             [[123 Packer Ünitesi]], [[13 Runtime Katmanı]], [[30 Koruma Kavramları MOC]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[121 Virtualization Ünitesi]]
+────────────────────────────────────────────────────────────────────────────────
+---
+aliases: [VM Ünitesi]
+type: alt-bileşen
+files: intel.cc:27744-30976 (IntelVirtualMachine::Init/InitCommands/CompileBlock)
+tags: [#virtualization, #vm, #itab]
+---
+ - VM sayısı: kayıtlı 10 / kayıtsız 1; her CommandBlock RASTGELE VM'e.
+ - vtClassic: 1-bayt opcode + 0x100 itab (jump table, ltCase).
+ - vtAdvanced: opcode yok; rel32 ofset zinciri + her opcode 10 klon.
+ - Yazmaç modeli: 16 GP + regEFX/ETX/ERX/EIX; VM context ayrı yığın.
+ - cpEncryptBytecode: handler kendi kodunu çalışma anında çözer; dump iki
+   geçişli şifreli.
+ - Fork notu: OpcodeCryptor tipi ccXor SABİT (processors.cc:777-779).
+ Paralel not (port tarafı): [[X21 MiniVM Çekirdeği]] — aynı kavramın
+ freestanding C gerçeklemesi. Karşılaştırma: [[41 Port Oranı Ölçümü]].
+
+BAĞLANTILAR: [[12 Koruma Motoru]], [[X21 MiniVM Çekirdeği]], [[G1 Sanallaştırma]], [[41 Port Oranı Ölçümü]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[122 Mutasyon Ünitesi]]
+────────────────────────────────────────────────────────────────────────────────
+---
+aliases: [Mutation Ünitesi]
+type: alt-bileşen
+files: intel.cc:16039-16561 (IntelFunction::Mutate)
+tags: [#mutation, #obfuscation]
+---
+ ~70 çöp-komut şablonu + eşdeğer ikameler (xor→sub, add→lea, jmp→push+ret)
+ + JCXZ/LOOP açılımı. Paralel not: [[X22 Mutasyon Çekirdeği]] (liveness
+ tabanlı ikame kataloğu — yaklaşım FARKLI: ölü-yazmaç analizi yerine
+ sabit-nokta liveness).
+
+BAĞLANTILAR: [[12 Koruma Motoru]], [[X22 Mutasyon Çekirdeği]], [[G2 Mutasyon]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[123 Packer Ünitesi]] / [[124 Link Şifreleme]]
+────────────────────────────────────────────────────────────────────────────────
+---
+type: alt-bileşen
+files: core/packer.cc; intel.cc:22974-23109 (PEIntelLoader::Compile)
+tags: [#packing, #lzma, #link-şifre]
+---
+ LZMA SDK; props başlığı loader verisine gömülür; paketli bölüm dosyadan
+ silinir; runtime LzmaDecode ile RAM'de açar (bkz. [[13 Runtime Katmanı]]
+ adım 14). Link şifreleme: CommandLink::Encrypt + gate entry_cryptor.
+ Paralel notlar: [[X23 LZMA Packer]], [[X24 CFB Şifreleme]].
+
+BAĞLANTILAR: [[12 Koruma Motoru]], [[X23 LZMA Packer]], [[G4 Paketleme]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[13 Runtime Katmanı]]
+────────────────────────────────────────────────────────────────────────────────
+---
+aliases: [Runtime, Loader]
+type: kaynak-bileşen
+files: runtime/loader.cc (2.945), core.cc, crypto.cc, hwid.cc, file_manager.cc,
+       registry_manager.cc, resource_manager.cc, string_manager.cc,
+       licensing_manager.cc, hook_manager.cc
+tags: [#runtime, #loader, #anti-debug]
+---
+ SetupImage 32 adımlık açılış akışı (idempotans → PEB → Wine/WoW64 →
+ syscall tablosu → anti-debug → CRC'ler → LZMA → fixup → import →
+ TF/DRx → VM tespiti → CPU hash → runtime init → ... → RELRO → NAG).
+ Alt notlar: [[131 Anti-Analiz Seti]], [[132 Crypto Seti]], [[133 HWID]],
+ [[134 Sanal Dosya Sistemi]], [[135 Sanal Kayıt Defteri]], [[136 Kaynak+String]],
+ [[137 Lisans Motoru]], [[138 Aktivasyon]].
+ FACE_* yüzeyi (0xFACE0000/0100/0200/0300) bu katmanın derleyiciyle ortak
+ kontratıdır — bkz. [[15 SDK Yüzeyi]] ve [[G6 FACE Sözleşmesi]].
+
+BAĞLANTILAR: [[10 vmp Kaynak Ağacı MOC]], [[12 Koruma Motoru]], [[15 SDK Yüzeyi]],
+             [[X25 XRT Runtime]], [[41 Port Oranı Ölçümü]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[131 Anti-Analiz Seti]]  ·  [[132 Crypto Seti]]
+────────────────────────────────────────────────────────────────────────────────
+---
+type: alt-bileşen
+files: runtime/loader.cc (D1 tablosu), core.cc:288-368, crypto.cc
+tags: [#anti-debug, #anti-vm, #crypto, #rc5, #rsa, #sha1]
+---
+ Anti-debug: PEB, DebugPort, DebugObjectHandle, ThreadHideFromDebugger,
+ ProcessInstrumentationCallback sıfırlama, SystemKernelDebuggerInformation,
+ SoftICE sürücü ailesi, 0xCC taramaları, PAGE_GUARD, CloseHandle probu,
+ TF+RDTSC/DRx probu, DbgUiRemoteBreakin hook'u, hardcoded syscall tablosu
+ (XP→19045), ikinci-ntdll kopyası hilesi, WoW64 kodlaması.
+ Anti-VM: CPUID hypervisor biti, Hyper-V root ayrımı, firmware tabloları,
+ BIOS tarama, Sandboxie, Wine, sanal-NIC OUI filtresi.
+ Crypto: RC5 (r=15), SHA-1, RSA (BigNumber modpow, tahsis karıştırma),
+ Base64, CRC32, CRCValueCryptor, XOR-rot string şifresi.
+ Paralel notlar: [[X26 Anti-Debug (K1/K2)]], [[X27 Kripto Seti (XRT)]]
+ — port tarafında KASITLI DARALTILMIŞ (oyun-güvenli) alt küme.
+
+BAĞLANTILAR: [[13 Runtime Katmanı]], [[X26 Anti-Debug (K1/K2)]], [[G5 Anti-Debug]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[134 Sanal Dosya Sistemi]] · [[135 Sanal Kayıt Defteri]] ·
+      [[136 Kaynak+String]] · [[133 HWID]] · [[137 Lisans Motoru]] ·
+      [[138 Aktivasyon]]
+────────────────────────────────────────────────────────────────────────────────
+---
+type: alt-bileşen
+files: file_manager.cc (13 Nt hook) / registry_manager.cc (10 Nt hook) /
+       resource_manager.cc + string_manager.cc / hwid.cc /
+       licensing_manager.cc / activation akışı
+tags: [#virtualization-surface, #hwid, #licensing, #activation]
+---
+ - VFS: OBJECT_DIRECTORY XOR ağaç; faLoad/faRegister/faInstall; SEC_IMAGE
+   gömülü PE yükleme; MEM_IMAGE yanıltması.
+ - Registry: RegistryKey ağacı; WOW şeffaf node; RegisterServer modu.
+ - Resource+String: RC5'li serileştirme; 6 hook noktası; ROT-XOR decrypt.
+ - HWID: 4 blok tipi (CPU/HOST/MAC/HDD), MAX 16, SHA-1+Base64.
+ - Lisans: chunk formatı (0x01..0x09/0xFF), durum bayrakları, blacklist,
+   PKCS#1 v1.5, KUSER_SHARED_DATA + sunucu Date spoof koruması.
+ - Aktivasyon: activation.php?code&hwid&hash; OK/BAD/BANNED/USED/EXPIRED;
+   offline stringler; winhttp/CFReadStream/libcurl.
+ Port karşılıkları: [[X28 Lisans Motoru (XRT)]] (offline RSA-2048, aktivasyon
+ MVP), HWID → 2 kaynaklı basitleştirilmiş form (bkz. [[42 Fark Listesi]]).
+
+BAĞLANTILAR: [[13 Runtime Katmanı]], [[X28 Lisans Motoru (XRT)]], [[42 Fark Listesi]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[14 Dosya Formatı Motorları]] · [[15 SDK Yüzeyi]] · [[16 GUI]] ·
+      [[17 Console]] · [[18 Script Motoru]] · [[19 Yardımcı Araçlar]] ·
+      [[1A Test ve İnşa]]
+────────────────────────────────────────────────────────────────────────────────
+---
+type: kaynak-bileşen
+files: pefile.cc (6.124) / elffile.cc (5.513) / macfile.cc (6.714) +
+       objc.cc (1.434) / dotnetfile.cc (12.425) + il.cc (7.840) /
+       dwarf.cc / pdb.h (2.407)  ||  sdk/  ||  VMProtect/ (Qt 5.6)  ||
+       VMProtectCon/  ||  core/script.cc (Lua 5.4+FFI)  ||  shellext/ +
+       minidumpfixer/ + utils/ + tools/  ||  unit-tests (102) + invariant/
+       + vmprotect.sln (16 proje)
+tags: [#format, #sdk, #gui, #console, #lua, #araçlar, #test]
+---
+ - Format motorları: PE (16 dizin, unwind, load config, TLS, bound/delay
+   import, VS_VERSIONINFO), ELF (verneed/verdef, eh_frame), Mach-O (fat,
+   dyld info RLE, chained fixups, export trie, ObjC), .NET (45 metadata
+   tablosu, BAML, RenameSymbols), DWARF/PDB.
+ - SDK: 23 fonksiyon (native) + DDK + .NET stub + Delphi/VB6.
+ - GUI: Qt 5.6; 41 NodeType; 14 diyalog; menü/toolbar tam set; Scintilla
+   script editörü; BinEditor; Help ayrı süreç + RemoteControl.
+ - Console: 8 CLI parametresi (-pf/-sf/-lf/-bd/-wm/-we + 2 konumsal);
+   tty yüzdeli ilerleme; V/M/U olay dökümü.
+ - Script: 5 olay kancası; PEFile/MacFile/MapFunction/Intel* sınıf ailesi;
+   FFI ile harici DLL çağrısı.
+ - Araçlar: Explorer shell extension; MinidumpFixer; SQL CLR keygen +
+   Taggant web servisi; x86disasm üreteci; IDA betikleri.
+ - Test: IntelTest 49, PEFile 12, MacFile 11, ELF 7, CryptoContainer 13...;
+   VMProtectCon.Tests ASILI (CommandLineParser.h yok).
+ Port karşılıkları: [[X11 Motor Katmanı]], [[X12 Sembol Katmanı]],
+ [[X13 GUI (Win32)]], [[X14 CLI Modu]], [[X15 SDK (fnid)]], [[X16 Test
+ Matrisleri]]. Yok olanlar: [[42 Fark Listesi]]'nde.
+
+BAĞLANTILAR: [[10 vmp Kaynak Ağacı MOC]], [[20 XProtect Projesi MOC]], [[42 Fark Listesi]]
+
+================================================================================
+ 20 · XPROTECT PROJESİ MOC — [[20 XProtect Projesi MOC]]
+================================================================================
+---
+aliases: [XProtect Vault, Port Projesi]
+type: moc
+layer: 1
+source: XProtect_0.8.4.zip (XProtectUI.exe/32 + source/ + kanit/ + kanit_084/)
+tags: [#port, #xprotect, #moc]
+---
+ Alt notlar:
+ ├── [[X11 Motor Katmanı]]        (engine_*.cpp — orkestratör protect())
+ ├── [[X12 Sembol Katmanı]]        (PDB/MAP/COFF/pdata keşfi)
+ ├── [[X13 GUI (Win32)]]           (xprotect_ui.cpp 4.207 satır, Qt YOK)
+ ├── [[X14 CLI Modu]]              (--cli + tam bayrak seti)
+ ├── [[X15 SDK (fnid)]]            (marker B8 imzaları + 37 fnid dispatch)
+ ├── [[X21 MiniVM Çekirdeği]]      (vm_core.c 843 satır freestanding)
+ ├── [[X22 Mutasyon Çekirdeği]]    (engine_mut.cpp liveness)
+ ├── [[X23 LZMA Packer]]           (engine_pack.cpp XPK1 blokları)
+ ├── [[X24 CFB Şifreleme]]         (xr_cipher.h CFB-64 Feistel)
+ ├── [[X25 XRT Runtime]]           (xrt_core.c PEB+FNV+CRC+unpack)
+ ├── [[X26 Anti-Debug (K1/K2)]]    (kapı-0xCC + TF, istisna-dispatch'siz)
+ ├── [[X27 Kripto Seti (XRT)]]     (RSA-2048 modexp, SHA-1, base64)
+ ├── [[X28 Lisans Motoru (XRT)]]   (lic_parse_serial + LSD + keygen)
+ ├── [[X29 Blob Üretim Zinciri]]   (gcc→ld→objcopy→gen_*.py→*.cpp)
+ ├── [[X2A Kanıt Matrisleri]]      (wine 8/8, Unicorn 5/5, metin2 d7610)
+ └── [[X2B Arşiv Snapshot]]        (CPlusPort_Source — 0.3.0 çağı)
+
+BAĞLANTILAR: [[00 Xiangu Universal MOC]], [[10 vmp Kaynak Ağacı MOC]], [[41 Port Oranı Ölçümü]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[X11 Motor Katmanı]] → [[X12 Sembol Katmanı]] → [[X13 GUI (Win32)]] →
+      [[X14 CLI Modu]] → [[X15 SDK (fnid)]]
+────────────────────────────────────────────────────────────────────────────────
+---
+type: port-bileşen
+files: source/XProtectUI_Source/engine_main.cpp (1.553) /
+       engine_pe.cpp (276) / engine_disasm.cpp (475) / engine_lift.cpp (401) /
+       engine_stub.cpp (422) / engine_util.cpp (33) / xprotect_ui.cpp (4.207)
+tags: [#motor, #gui, #cli, #sdk]
+---
+ - protect(): PE yükle → sembol keşfi → IAT FF15→E8 yamaları → SDK yamaları
+   → V/M/U sevkı → STRDEC/ANTIDBG öneki → .vmp0 yerleşim → CFB şifreleme →
+   SEH unwind tablosu → .text E9+0xCC yaması → reloc filtreleme → CRC'ler →
+   pack/sectcrypt/strip → CFG → checksum.
+ - GUI: saf Win32 (menü/toolbar/ağaç/özellik ızgarası/log/durum; LVS_OWNERDATA
+   sanal liste — 39.078 fonksiyon anında; .vmp XML uyumluluğu; en/tr dil
+   tablosu; PDBScope subprocess entegrasyonu).
+ - CLI: --type V|M|U, --strength, --all/--funcs/--func/--add, --antidebug
+   --strenc --memprot --novmenc, CRC bayrakları, --import/--iat, --pack
+   --sectcrypt, --pubkey --prodcode --watermark --builddate, strip bayrakları.
+ - SDK: B8 9C37E1B5 bölge marker'ı + B8 <fnid> API marker'ı → 37 fnid.
+ Kaynak karşılıkları: [[12 Koruma Motoru]], [[16 GUI]], [[17 Console]],
+ [[15 SDK Yüzeyi]].
+
+BAĞLANTILAR: [[20 XProtect Projesi MOC]], [[X21 MiniVM Çekirdeği]], [[X23 LZMA Packer]], [[42 Fark Listesi]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[X21 MiniVM Çekirdeği]] → [[X29 Blob Üretim Zinciri]]
+────────────────────────────────────────────────────────────────────────────────
+---
+type: port-bileşen
+files: vm_core.c (843) + vm_opcodes.h (43 opcode) + vm_blob.cpp/xrt_blob.cpp
+tags: [#vm, #freestanding, #cfb, #itab]
+---
+ - 43 opcode; if/else zinciri dispatch (switch/jump-table YASAK — PIC);
+   adım bütçesi 1<<24 (DoS kapanışı).
+ - 16 VM yazmacı + 4 bayrak biti; VMContext 0xE8 bayt.
+ - CFB bayt kodu: bc[i] ^ VM_KSC(key, prev_cipher, i) — tek-bayt tamper
+   yayılır (JMP konum değişimi zinciri bozmaz).
+ - Polimorfik itab: vm_perm_tab (Fisher-Yates, tohum = fonksiyon RVA'sı ^
+   0x5850424D9E3779B9); tablo taşınmaz — encoder+yorumlayıcı aynı
+   fonksiyondan türetir (0.8.0).
+ - Blob zinciri: gcc -ffreestanding → ld -Ttext=0x100000 → objcopy -O
+   binary → gen_blob.py → vm_blob.cpp (bayat-blob dersi: her vm_core.c
+   değişiminde zincir YENİDEN çalıştırılmalı).
+ Kaynak karşılığı: [[121 Virtualization Ünitesi]] (kıyas: [[41 Port Oranı Ölçümü]]).
+
+BAĞLANTILAR: [[20 XProtect Projesi MOC]], [[121 Virtualization Ünitesi]], [[X24 CFB Şifreleme]], [[X2A Kanıt Matrisleri]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[X22 Mutasyon Çekirdeği]] · [[X23 LZMA Packer]] · [[X24 CFB Şifreleme]]
+────────────────────────────────────────────────────────────────────────────────
+---
+type: port-bileşen
+files: engine_mut.cpp (672) / engine_pack.cpp (414) / xr_cipher.h (90)
+tags: [#mutation, #lzma, #cfb]
+---
+ - Mutasyon: MInsn kaydı + 16 GPR+FLAGS liveness sabit-nokta (ud_of) +
+   ikame kataloğu + junk + JMP kapı zincirleri + küçük kodlayıcı Enc +
+   SEH unwinding haritası (MUW).
+ - Packer: LZMA1 props'lu; .vmp1 XPK1 blokları (magic 0x31504B58; 16B
+   kayıt src/dst/dsz/ssz); EP redirect; strip_fixups/strip_debug.
+ - CFB-64: xr_mix64 (splitmix64) + 4-tur Feistel; XRC_NONCE kayıt-bağı;
+   cfg maskeli anahtarlar; tek-bayt tamper → hızlı duru-ret.
+ Kaynak karşılıkları: [[122 Mutasyon Ünitesi]], [[123 Packer Ünitesi]],
+ [[124 Link Şifreleme]].
+
+BAĞLANTILAR: [[20 XProtect Projesi MOC]], [[122 Mutasyon Ünitesi]], [[123 Packer Ünitesi]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[X25 XRT Runtime]] → [[X28 Lisans Motoru (XRT)]]
+────────────────────────────────────────────────────────────────────────────────
+---
+type: port-bileşen
+files: xrt_core.c (683) + xrt_license.c (973) + xrt_blob.cpp
+tags: [#runtime, #hwid, #licensing, #rsa]
+---
+ - XRT: PEB gezintisi; kernel32 FNV-1a export hash (rodata yasak);
+   api1..api7 ABI sarmalayıcıları (x86 stdcall yığın + x64 golge alanı);
+   xrt_entry (cfg 'XRT1' doğrulama + state kilidi + RtlAddFunctionTable
+   SEH + SELF/TEXT/FILE CRC + rt_fatal); xrt_resolve (gecikmeli import);
+   xrt_unpack (LZMA + CFB + koruma geri yükleme).
+ - Lisans: RSA-2048 e=65537 public-op (64-limb freestanding modexp);
+   chunk parse (vmp licensing_manager.cc ile BİRBİR); LSD ('XLSD' imaj
+   taraması + CRC); KUSER_SHARED_DATA saat; HWID = volser|FNV(hostname);
+   37 fnid dispatch; keygen: xprotect_keygen.py (PKCS#1 v1.5).
+ Kaynak karşılıkları: [[13 Runtime Katmanı]], [[137 Lisans Motoru]],
+ [[133 HWID]], [[15 SDK Yüzeyi]].
+
+BAĞLANTILAR: [[20 XProtect Projesi MOC]], [[13 Runtime Katmanı]], [[X27 Kripto Seti (XRT)]], [[42 Fark Listesi]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[X26 Anti-Debug (K1/K2)]] · [[X2A Kanıt Matrisleri]]
+────────────────────────────────────────────────────────────────────────────────
+---
+type: port-bileşen
+files: vm_core.c:724 (OP_ANTIDBG) + kanit_084/ (test_veh84.c, unic84_x86.py,
+       static_ad_check.py, x64_wine_matris.txt)
+tags: [#anti-debug, #kanıt]
+---
+ - K1 KAPI-0xCC: kendi orijinal giriş baytı 0xCC ise zehir (CE VEH
+   yazılım-kırıcı kanıtı) — [[131 Anti-Analiz Seti]]'ndeki loader.cc:2120
+   0xCC-taramasının YANLIŞ-POZİTİFSİZ formu (yalnız KENDİ girişi taranır).
+ - K2 TF: pushfq anlık TF=1 ise zehir — loader.cc:2446 TF-probunun
+   İSTİSNASIZ formu (0.8.2/0.8.3 istisna-dispatch çöküşlerinin dersi).
+ - Bilinçli YOK: DRx, NtQueryInformationProcess, ntdll 0xCC taraması,
+   PAGE_GUARD probu, yabancı-VEH gezinme (oyun-güvenliği).
+ - Kanıtlar: wine x64 8/8 (clean/gameveh/gamedrx/ceveh/cevehdr TEMİZ;
+   sw/tfstep/peb ZEHİR); Unicorn x86 5/5; metin2 d7610 bayt-bayt 0.8.1
+   eşdeğeri; R5 ULTIMATE rc=42.
+
+BAĞLANTILAR: [[20 XProtect Projesi MOC]], [[131 Anti-Analiz Seti]], [[40 Analiz ve Doğrulama MOC]], [[G5 Anti-Debug]]
+
+================================================================================
+ 30 · KORUMA KAVRAMLARI MOC — [[30 Koruma Kavramları MOC]]
+================================================================================
+---
+aliases: [Kavram MOC, Concepts]
+type: moc
+layer: 1
+tags: [#kavram, #moc]
+---
+ İki tarafı birleştiren, taşınabilir kavram düğümleri (aynı isim her iki
+ kasada geçer — port haritasının "ortak dili"):
+
+ [[G1 Sanallaştırma]] — V: komutlar → VM bayt kodu; VM komut seti/itab/krip.
+ [[G2 Mutasyon]] — M: native kalan eşdeğer/dönüşüm üretimi.
+ [[G3 Code Lock]] — seri anahtarına kilitli fonksiyon (session-key blokları).
+ [[G4 Paketleme]] — LZMA + RAM açılımı + EP redirect.
+ [[G5 Anti-Debug]] — tespit yüzeyleri (ve port tarafındaki daraltma).
+ [[G6 FACE Sözleşmesi]] — derleyici ↔ runtime işaret sözleşmesi
+      (vmp: FACE_* RVA'ları · XProtect: cfg alanları + LSD + fnid'ler).
+ [[G7 HWID]] — donanım kimliği (blok modeli vs 2 kaynak basitleştirmesi).
+ [[G8 Lisans Serisi]] — chunk formatı 0x01..0xFF (iki tarafta birebir).
+ [[G9 Aktivasyon]] — online/offline akış (portta MVP).
+ [[G10 Watermark]] — iz gömme + arama (portta FNV-64 LSD izi).
+ [[G11 IAT Gizleme]] — import koruması (portta deneysel).
+ [[G12 Sanal Yüzeyler]] — VFS/registry/resource sanallaştırma (portta YOK).
+
+BAĞLANTILAR: [[00 Xiangu Universal MOC]], [[10 vmp Kaynak Ağacı MOC]], [[20 XProtect Projesi MOC]]
+
+────────────────────────────────────────────────────────────────────────────────
+ NOT: [[G6 FACE Sözleşmesi]] (örnek kavram notu — diğer G notları tek satır)
+────────────────────────────────────────────────────────────────────────────────
+---
+aliases: [FACE Contract]
+type: kavram
+tags: [#sözleşme, #runtime-interface]
+---
+ Derleyici, korunan imaja runtime'ın arayacağı verileri "yüz" (marker)
+ değerleriyle gömer: vmp'te FACE_* (0xFACE0000 tabanlı RVA dizisi + XOR
+ tuzlu GlobalData değişkenleri + 0xFACE0100 packer bilgileri); XProtect'te
+ aynı rolü cfg bloğu ('XRT1' başlıklı, XRC_KEYMASK'lı alanlar) + LSD lisans
+ deposu + B8-marker SDK imzaları oynar. Port oranını ölçerken bu sözleşme
+ katmanı ayrı tutulmalıdır: isimler farklı, işlev birebir.
+ Bağlar: [[13 Runtime Katmanı]] ↔ [[X25 XRT Runtime]]; [[15 SDK Yüzeyi]] ↔ [[X15 SDK (fnid)]].
+
+BAĞLANTILAR: [[30 Koruma Kavramları MOC]], [[13 Runtime Katmanı]], [[X25 XRT Runtime]]
+
+================================================================================
+ 40 · ANALİZ VE DOĞRULAMA MOC — [[40 Analiz ve Doğrulama MOC]]
+================================================================================
+---
+aliases: [Analysis MOC]
+type: moc
+layer: 2
+tags: [#analiz, #moc]
+---
+ [[41 Port Oranı Ölçümü]] — M1 satır ~%1,7 · M2 ağırlıklı ~%9 (v2.0-r %20,5)
+   · M3 fonksiyonel sanallaştırma yolu %65 · UI ~%90+.
+ [[42 Fark Listesi]] — 18 maddelik VAR/YOK/KISMEN cetveli + yapı farkı.
+ [[43 Düzeltme Sicili]] — temel belgedeki yanlışların kanıtlı düzeltmeleri
+   (tamamı: 05_bulgular_duzeltmeler.txt).
+ [[44 Kanıt Ortamı]] — wine 10.0 repack-6 · Unicorn · vmharness ·
+   static_ad_check (statik bayt kodu çözücü) · 3-yönlü diferansiyel.
+ [[45 Ölçüm Yöntemleri]] — LOC sayımı; diferansiyel (orijinal vs korumalı
+   Unicorn koşusu); statik çözümleyici; wine RCODE matrisi.
+
+BAĞLANTILAR: [[00 Xiangu Universal MOC]], [[50 Port Süreci MOC]]
+
+================================================================================
+ 50 · PORT SÜRECİ MOC — [[50 Port Süreci MOC]]
+================================================================================
+---
+aliases: [Roadmap MOC]
+type: moc
+layer: 2
+tags: [#süreç, #moc]
+---
+ [[51 Port Hedefi]] — "tam C++ + VS2019'da derlenebilir" hedefi; gerçekte
+   zig cc (mingw-w64 hedefi) ile çapraz derleme + freestanding C VM blob.
+ [[52 Port Kapsam Kararı]] — 0.8.4: 0.8.2/0.8.3 atıldı; oyun-güvenli 2
+   kontrol; bilinçli daraltma listesi.
+ [[53 Sürüm Zinciri]] — 0.1.0 uçtan uca → 0.3.0 mutasyon → 0.4.x UI/PDB
+   → 0.5.0 XRT+SDK → 0.6.0 LZMA → 0.7.0 lisans → 0.8.0 VM derinleştirme →
+   0.8.1 düzeltme → 0.8.4 VEH (19 Task; worklog.md 883 satır).
+ [[54 Derleme Zinciri]] — build_vmblob.sh / build_xrt.sh / build_ui.sh
+   (zig; LZMA C ayrı derlenir; blob bayatlaşma riski).
+ [[55 Sonraki Adım Yığını]] — 0.9.0 anti-debug paketi; tam-loader (TLS
+   callback); x86 V+call duru RED; aktivasyon ağ katmanı.
+
+BAĞLANTILAR: [[00 Xiangu Universal MOC]], [[40 Analiz ve Doğrulama MOC]]
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ GRAF GÖRÜNÜMÜ (Obsidian graph view benzeri — metin temsili)                ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+                    ┌──────────────┐
+                    │ 00 HOME MOC │
+                    └──┬─┬─┬─┬─┬──┘
+        ┌───────────┘  │ │ │  └─────────────┐
+        ▼              ▼ ▼ ▼                ▼
+   [10 vmp MOC]   [30 Kavram MOC]      [50 Süreç MOC]
+        │              │    ▲                │
+        ▼              │    │                ▼
+   11..1A notlar ──────┼────┘         51..55 notlar
+        │ 12 Motor     │
+        │  ├─121 VM ◄──┼────────┐
+        │  ├─122 Mut ◄──┼───┐    │  [[wikilink]] iki kasayı birleştirir:
+        │  └─123 Pack   │   │    │
+        ▼  13 Runtime ──┼─► G6 FACE ◄─► X25 XRT
+   [20 XProtect MOC]   │
+        │              │
+        ▼              │
+   X11..X2B notlar ◄───┘
+        │  X21 MiniVM ◄──── G1 Sanallaştırma ────► 121 Virtualization
+        │  X26 K1/K2  ◄──── G5 Anti-Debug ───────► 131 Anti-Analiz
+        │  X28 Lisans ◄─── G8 Seri Formatı ─────► 137 Lisans Motoru
+        ▼
+   [40 Analiz MOC] ──► 41 Port Oranı · 42 Fark Listesi · 43 Düzeltme
+
+BAĞLANTI YOĞUNLUĞU (hub notları, backlink sayısına göre):
+ 1. [[G5 Anti-Debug]]        (9 bağ)
+ 2. [[13 Runtime Katmanı]]   (8 bağ)
+ 3. [[X21 MiniVM Çekirdeği]] (7 bağ)
+ 4. [[121 Virtualization Ünitesi]] (6 bağ)
+ 5. [[42 Fark Listesi]]      (6 bağ)
+
+================================================================================
+ KULLANIM (obsidian'da bu kasayı kurmak için)
+================================================================================
+ 1. Her "NOT:" başlığı ayrı bir .md dosyasına kopyalanır (dosya adı = not
+    adı; "[[ ]]" içindeki adla aynı olmalı).
+ 2. Frontmatter (--- ... ---) blokları YAML olarak birebir çalışır.
+ 3. #tag'ler Obsidian arama/etiket panelinde; [[wikilink]]'ler graf view'de
+    görünür; "BAĞLANTILAR:" satırları backlink panelinde otomatik oluşur.
+ 4. MOC'lar (00/10/20/30/40/50) tek başına gezinme haritasıdır: içerikleri
+    bağlantıdan ibarettir — bu belgede de öyle tutuldu.
+ 5. Kavram notları (G1..G12) iki kasa arasında "ortak dil" görevi görür;
+    port çalışmasında her yeni bileşen önce bir G-notuna bağlanmalıdır.
+================================================================================
+ [BELGE SONU — 02/05]
