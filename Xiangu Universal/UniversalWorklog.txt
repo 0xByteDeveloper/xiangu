@@ -121,3 +121,21 @@ Sonraki adım: XProtect 0.8.4 zig derlemesi → exe zip.
   - PAT: yalnızca clone/push URL'lerinde kullanıldı; repo config'e
     YAZILMADI (push'tan sonra origin temiz URL), hiçbir teslimat dosyasına
     kopyalanmadı.
+
+----------------------------------------------------------------
+[ADIM-070] GITHUB PUSH — TAMAMLANDI VE DOĞRULANDI
+  - Commit: c1e88ee → 0xByteDeveloper/xiangu :: main :: "Xiangu Universal/"
+  - 8 dosyanın tamamı raw.githubusercontent.com üzerinden HTTP 200 + bayt
+    boyutları yerel kopyalarla BİRBİR (54.469 / 36.529 / 24.420 / 17.904 /
+    9.247 / 183.485 / 1.103.539 / 9.734 bayt).
+  - PAT temizliği: teslimat dosyalarında ve .git/config'de token YOK
+    (rg ile tarandı). Push URL'i tek kullanımlık geçti.
+[ADIM-080] TESLİMAT ÖZETİ (download/XianguUniversal/)
+  01_ozellik_haritasi.txt (54 KB) · 02_yapi_zinciri_blueprint.txt (37 KB) ·
+  03_fonksiyon_haritasi.txt (24 KB) · 04_XProtect_port_analizi.txt (18 KB) ·
+  05_bulgular_duzeltmeler.txt (9 KB) · XianguUniversal_Viewer.html (183 KB) ·
+  XProtect_0.8.4_derleme.zip (1,1 MB: XProtectUI.exe + XProtectUI32.exe +
+  DERLEME_NOTU.txt) · UniversalWorklog.txt (bu kayıt).
+[OTURUM SONUCU] BAŞARILI — planın 11 maddesinin 10'u tamam; ek madde:
+  vmp kaynak ağacının MSVC/Qt derlemesi sandbox kısıtı nedeniyle yapılmadı
+  (gerekçe ADIM-051'de); XProtect derlemesi zig zinciriyle üretildi.
