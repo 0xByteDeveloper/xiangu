@@ -497,6 +497,8 @@ static u64 vm_natcall(u64 t, const u64* regs) {
 #define XA_K32   0xA3E6F6C3u   /* "kernel32.dll" (genis, kucuk-harf) */
 #define XA_NTD   0xA62A3B3Bu   /* "ntdll.dll"    (genis, kucuk-harf) */
 #define XA_GTC   0x85CCA27Eu   /* GetThreadContext */
+#define XA_NSIT  0xF19E1321u   /* 1.1.0: NtSetInformationThread */
+#define XA_NQSI  0x7A43974Au   /* 1.1.0: NtQuerySystemInformation */
 
 /* CONTEXT ofsetleri (winnt.h birebir) — yalniz DEBUG_REGISTERS alani.
    0.8.2 dersi: EFLAGS/RAX ofsetleri (TF-isleyicisi icin) yanlisti; K3
@@ -623,6 +625,14 @@ static u32 xa_call2_86(u32 t, u32 a1, u32 a2) {
     __asm__ volatile("pushl %2\n\tpushl %1\n\tcall *%3\n\t"
         : "=a"(ret) : "r"(a1), "r"(a2), "r"(t) : "memory", "cc");
     return ret;
+}
+/* 1.1.0: stdcall 4-arg (callee pop): NtSetInformationThread /
+   NtQuerySystemInformationBattery icin */
+static long xa_call4_86(u32 t, u32 a1, u32 a2, u32 a3, u32 a4) {
+    u32 ret;
+    __asm__ volatile("pushl %4\n\tpushl %3\n\tpushl %2\n\tpushl %1\n\tcall *%5\n\t"
+        : "=a"(ret) : "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(t) : "memory", "cc");
+    return (long)ret;
 }
 #endif
 
@@ -1086,6 +1096,105 @@ static void vm_run(VMContext* c) {
                         if (dr) c->done = 2;
                     }
 #endif
+                }
+            }
+
+            /* (K4) ThreadHideFromDebugger — UniversalObfuscator loader.cc
+               1:1 anti-aksiyon: bu thread debugger'dan gizlenir. */
+            if (!c->done) {
+                u64 nsit = xa_export(xa_module(XA_NTD), XA_NSIT);
+                if (nsit) {
+#if defined(VM_IS_X64)
+                    xa_call4(nsit, 0xFFFFFFFFFFFFFFFEull, 0x11 /*ThreadHideFromDebugger*/, 0, 0);
+#else
+                    xa_call4_86(nsit, 0xFFFFFFFEu, 0x11, 0, 0);
+#endif
+                }
+            }
+
+            /* (K5) KERNEL DEBUGGER — SystemKernelDebuggerInformation (0x23):
+               BYTE0=KdDebuggerEnabled, BYTE1=KdDebuggerNotPresent.
+               Enabled && !NotPresent -> cekirdek debugger acik -> zehir.
+               (UO loader.cc 1:1; ayni zamanda Check Kernel Debugger motoru.) */
+            if (!c->done) {
+                u64 nqsi = xa_export(xa_module(XA_NTD), XA_NQSI);
+                if (nqsi) {
+                    u8 ib[16];
+                    u32 rl = 0;
+#if defined(VM_IS_X64)
+                    i64 st = (i64)xa_call4(nqsi, 0x23, (u64)(unsigned long)(void*)ib, 2,
+                                           (u64)(unsigned long)(void*)&rl);
+#else
+                    i64 st = (i64)xa_call4_86((u32)nqsi, 0x23, (u32)(unsigned long)(void*)ib, 2,
+                                              (u32)(unsigned long)(void*)&rl);
+#endif
+                    if (st >= 0 && ib[0] != 0 && ib[1] == 0) c->done = 2;
+                }
+            }
+
+            /* (K6) SURUCU TARAMASI — SystemModuleInformation (0x0B): yuklu
+               cekirdek modulleri dosya adi: sice, siwvid, ntice, iceext,
+               syser (UO FACE_* 1:1). Heap YOK: 16KB yigin tamponu; tukeni
+               rpte tarama atlanir (yanlis-pozitif YOK). */
+            if (!c->done) {
+                u64 nqsi = xa_export(xa_module(XA_NTD), XA_NQSI);
+                if (nqsi) {
+                    /* 1.1.0 KURAL: rodata YOK (gen_blob yalniz .text tasir —
+                       drvn statik dizisi blob-disina dusrse wild-read).
+                       5 surucu adi 8-bayt LE u64 sabiti olarak karsilanir:
+                       sice, siwvid, ntice, iceext, syser (UO FACE_* 1:1). */
+#if defined(VM_IS_X64)
+                    u8 mbuf[0x4000 + 16];
+                    u64 mal = ((u64)(unsigned long)mbuf + 15ull) & ~15ull;
+#else
+                    u8 mbuf[0x4000 + 8];
+                    u32 mal = ((u32)(unsigned long)mbuf + 3u) & ~3u;
+#endif
+                    u32 rl = 0;
+#if defined(VM_IS_X64)
+                    i64 st = (i64)xa_call4(nqsi, 0x0B, mal, 0x4000,
+                                           (u64)(unsigned long)(void*)&rl);
+#else
+                    i64 st = (i64)xa_call4_86((u32)nqsi, 0x0B, (u32)mal, 0x4000,
+                                              (u32)(unsigned long)(void*)&rl);
+#endif
+                    if (st >= 0 && rl >= 4 && rl <= 0x4000) {
+                        u32 n = (u32)mrd(mal, 4);
+                        u32 ent = (n > (0x4000 - 4) / 0x124) ? (0x4000 - 4) / 0x124 : n;
+                        u32 mi;
+                        for (mi = 0; mi < ent && !c->done; mi++) {
+#if defined(VM_IS_X64)
+                            /* RTL_PROCESS_MODULE_INFORMATION x64: 0x22
+                               OffsetToFileName, 0x24 FullPathName[256],
+                               boyut 0x124 */
+                            u64 ebase = 4 + (u64)mi * 0x124 + 0x24;
+                            u64 foff = mrd(mal + ebase - 2, 2);
+#else
+                            /* x86: 0x14 OffsetToFileName, 0x16 FullPathName,
+                               boyut 0x116 */
+                            u32 ebase = 4 + mi * 0x116 + 0x16;
+                            u32 foff = (u32)mrd((u64)mal + ebase - 2, 2);
+#endif
+                            if (foff >= 250) continue;   /* bozuk girdi korumasi */
+                            /* 8 bayt oku + kucuk-harf katla */
+                            u64 w = mrd((u64)mal + (u64)ebase + (u64)foff, 8);
+                            {
+                                u64 t = 0; int kb;
+                                for (kb = 0; kb < 8; kb++) {
+                                    u8 ch = (u8)((w >> (8 * kb)) & 0xFF);
+                                    if (ch >= 'A' && ch <= 'Z') ch += 32;
+                                    t |= ((u64)ch) << (8 * kb);
+                                }
+                                w = t;
+                            }
+                            if (w == 0x0000000065636973ULL ||   /* sice   */
+                                w == 0x0000646976776973ULL ||   /* siwvid */
+                                w == 0x000000656369746EULL ||   /* ntice  */
+                                w == 0x0000747865656369ULL ||   /* iceext */
+                                w == 0x0000007265737973ULL)     /* syser  */
+                                c->done = 2;
+                        }
+                    }
                 }
             }
 #endif
