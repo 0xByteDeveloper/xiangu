@@ -79,7 +79,88 @@ enum XOp {
     XP_XADD,       // 0F C1 r/m,r (0F C0 8-bit): tmp=dst; dst+=src; src=tmp
     XP_STR,        // A4/A5 movs AA/AB stos AC/AD lods AE/AF scas A6/A7 cmps
                    //   ud: 0=movs 1=stos 2=lods 3=scas 4=cmps; rep alanina bak
-    XP_IMUL_RM     // 0F AF imul r1, [mem] (0.9.0: mem form RED'den cikarildi)
+    XP_IMUL_RM,    // 0F AF imul r1, [mem] (0.9.0: mem form RED'den cikarildi)
+    // --- 1.1.0-A4-FPU: UniversalObfuscator FPU paritesi (D8-DF uzayi) ---
+    // Mem-formlar (I.mem + I.sz: 2/4/8/10; 10=TBYTE), reg-formlar
+    // (I.r1 = st(i) 0..7), implicit-formlar (operand yok).
+    XP_FLD,        // D9 /0 m32, DD /0 m64, DB /5 m80, D9 C0+i fld st(i)
+    XP_FST,        // D9 /2 m32, DD /2 m64, DD D0+i fst st(i)
+    XP_FSTP,       // D9 /3 m32, DD /3 m64, DB /7 m80, DD D8+i, D9 D8+i
+    XP_FILD,       // DB /0 m32, DF /0 m16, DF /5 m64
+    XP_FIST,       // DB /2 m32, DF /2 m16
+    XP_FISTP,      // DB /3 m32, DF /3 m16, DF /7 m64
+    XP_FISTTP,     // DB /1 m32, DF /1 m16 (SSE3 truncasyon store)
+    XP_FADD,       // D8 /0 m32, DC /0 m64, D8 C0+i (ST0+=STi), DC C0+i (STi+=ST0)
+    XP_FMUL,       // D8 /1 m32, DC /1 m64 + reg-formlar
+    XP_FSUB,       // D8 /4 m32, DC /5 m64 (DC mem tablo TERS!) + reg
+    XP_FSUBR,      // D8 /5 m32, DC /4 m64 + reg
+    XP_FDIV,       // D8 /6 m32, DC /7 m64 + reg
+    XP_FDIVR,      // D8 /7 m32, DC /6 m64 + reg
+    XP_FIADD,      // DA /0 m32, DE /0 m16
+    XP_FIMUL,      // DA /1 m32, DE /1 m16
+    XP_FICOM,      // DA /2 m32, DE /2 m16
+    XP_FICOMP,     // DA /3 m32, DE /3 m16
+    XP_FISUB,      // DA /5 m32, DE /5 m16
+    XP_FISUBR,     // DA /4 m32, DE /4 m16
+    XP_FIDIV,      // DA /7 m32, DE /7 m16
+    XP_FIDIVR,     // DA /6 m32, DE /6 m16
+    XP_FCOM,       // D8 /2 m32, DC /2 m64, D8 D0+i, DC D0+i
+    XP_FCOMP,      // D8 /3 m32, DC /3 m64, D8 D8+i, DC D8+i
+    XP_FUCOM,      // DD E0+i
+    XP_FUCOMP,     // DD E8+i
+    XP_FBLD,       // DF /4 m80 (BCD yukle)
+    XP_FBSTP,      // DF /6 m80 (BCD store+pop)
+    XP_FSTSW,      // 9B DF E0 (AX) | DD /7 m16 (mem)
+    XP_FSTCW,      // 9B D9 /7 m16
+    XP_FLDCW,      // D9 /5 m16
+    XP_FNOP,       // D9 D0
+    XP_FWAIT,      // 9B
+    XP_FCLEX,      // 9B DB E2
+    XP_FINIT,      // 9B DB E3
+    XP_FDECSTP,    // D9 F6
+    XP_FINCSTP,    // D9 F7
+    XP_FCHS,       // D9 E0
+    XP_FABS,       // D9 E1
+    XP_FSQRT,      // D9 FA
+    XP_FTST,       // D9 E4
+    XP_FXAM,       // D9 E5
+    XP_FSIN,       // D9 FE
+    XP_FCOS,       // D9 FF
+    XP_FSINCOS,    // D9 FB
+    XP_FPTAN,      // D9 F2
+    XP_FPATAN,     // D9 F3
+    XP_FYL2X,      // D9 F1
+    XP_FYL2XP1,    // D9 F9
+    XP_F2XM1,      // D9 F0
+    XP_FPREM,      // D9 F8
+    XP_FPREM1,     // D9 F5
+    XP_FRNDINT,    // D9 FC
+    XP_FSCALE,     // D9 FD
+    XP_FXTRACT,    // D9 F4
+    XP_FLD1,       // D9 E8
+    XP_FLDZ,       // D9 EE
+    XP_FLDPI,      // D9 EB
+    XP_FLDL2T,     // D9 E9
+    XP_FLDL2E,     // D9 EA
+    XP_FLDLG2,     // D9 EC
+    XP_FLDLN2,     // D9 ED
+    XP_FXCH,       // D9 C8+i
+    XP_FFREE,      // DD C0+i
+    XP_FFREEP,     // DF C0+i
+    XP_FADDP,      // DE C0+i (STi+=ST0, pop)
+    XP_FMULP,      // DE C8+i
+    XP_FSUBP,      // DE E8+i (STi-=ST0, pop)
+    XP_FSUBRP,     // DE E0+i
+    XP_FDIVP,      // DE F8+i
+    XP_FDIVRP,     // DE F0+i
+    XP_FCOMPP,     // DE D9
+    XP_FUCOMPP,    // DA E9
+    XP_FCOMI,      // DB F0+i (EFLAGS)
+    XP_FCOMIP,     // DF F0+i
+    XP_FUCOMI,     // DB E8+i
+    XP_FUCOMIP,    // DF E8+i
+    XP_FCMOV       // DA C0/CE/D0/D8/E0/E8/F0/F8+i; cc alaninda (x86 cc sira)
+
 };
 
 struct MemOp {

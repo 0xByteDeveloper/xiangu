@@ -278,6 +278,38 @@ static void ud_of(MInsn& m) {
     case XP_NEG: d |= FFLAG; MEM(); if (!I.mem.present) RW(I.r1); break;
     case XP_NOT: MEM(); if (!I.mem.present) RW(I.r1); break;
     case XP_LEAVE: R(5); W(4); W(5); break;
+    /* ---- 1.1.0-A4-FPU: x87 islemleri ----
+       x87 yigini VM-reg degildir (gercek birim) — GPR maskesine dokunmaz.
+       Bellek-formlari adresleme registerlarini OKUR (MEM()); FSTSW AX
+       EAX yazar; FCOMI ailesi bayrak yazar; FCMOV bayrak okur. */
+    case XP_FLD: case XP_FST: case XP_FSTP:
+    case XP_FILD: case XP_FIST: case XP_FISTP: case XP_FISTTP:
+    case XP_FADD: case XP_FMUL: case XP_FSUB: case XP_FSUBR:
+    case XP_FDIV: case XP_FDIVR:
+    case XP_FIADD: case XP_FIMUL: case XP_FICOM: case XP_FICOMP:
+    case XP_FISUB: case XP_FISUBR: case XP_FIDIV: case XP_FIDIVR:
+    case XP_FCOM: case XP_FCOMP:
+    case XP_FBLD: case XP_FBSTP: case XP_FSTCW: case XP_FLDCW:
+        MEM(); break;
+    case XP_FSTSW:
+        MEM(); if (!I.mem.present) W(0);   /* fstsw ax -> EAX */
+        break;
+    case XP_FCOMI: case XP_FCOMIP: case XP_FUCOMI: case XP_FUCOMIP:
+        d |= FFLAG; break;                 /* CF/PF/ZF yazar */
+    case XP_FCMOV:
+        u |= FFLAG; break;                 /* kosul bayraklari okur */
+    case XP_FNOP: case XP_FWAIT: case XP_FCLEX: case XP_FINIT:
+    case XP_FDECSTP: case XP_FINCSTP:
+    case XP_FCHS: case XP_FABS: case XP_FSQRT: case XP_FTST: case XP_FXAM:
+    case XP_FSIN: case XP_FCOS: case XP_FSINCOS: case XP_FPTAN: case XP_FPATAN:
+    case XP_FYL2X: case XP_FYL2XP1: case XP_F2XM1: case XP_FPREM: case XP_FPREM1:
+    case XP_FRNDINT: case XP_FSCALE: case XP_FXTRACT:
+    case XP_FLD1: case XP_FLDZ: case XP_FLDPI:
+    case XP_FLDL2T: case XP_FLDL2E: case XP_FLDLG2: case XP_FLDLN2:
+    case XP_FXCH: case XP_FFREE: case XP_FFREEP:
+    case XP_FADDP: case XP_FMULP: case XP_FSUBP: case XP_FSUBRP:
+    case XP_FDIVP: case XP_FDIVRP: case XP_FCOMPP: case XP_FUCOMPP:
+        break;                             /* x87-dahili; GPR/bayrak etkisi yok */
     case XP_NOP: case XP_INT3: break;
     default: break;
     }

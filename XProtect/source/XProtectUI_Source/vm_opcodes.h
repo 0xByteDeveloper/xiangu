@@ -124,6 +124,157 @@
 #define OP_NAND_ST   0x3C   // sz : pop b, pop a, push ~(a&b)&mask
 #define OP_POP_RP    0x3D   // sz r1 : kismi-yazim pop (cmPop otRegistr size_ es-karsiligi)
 
+// --- 1.1.0-A4-FPU: UniversalObfuscator FPU paritesi (Phase A4) ---
+// UO intel.cc CompileToVM FPU kumesi (beyaz-liste) 1:1 port + UST-KUME:
+// UO'da ltNative-ada olarak KALAN FPU bellek-aritmetigi (fld/fst/fadd/fmul/
+// fdiv/fcomp/fild/fi*/f*p) XProtect'te TAM SANALLASTIRILIR (OP_FPU_MEM:
+// mem_addr ile cozulen gercek adrese gercek x87 talimati; x87 yigini
+// gercekte kalir — VMP/UO semantigi, VM aritmetigi x87'ye dokunmaz).
+// Calisma-mantigi (objdump ile dogrulanmis AT&T->Intel esleme):
+//   - AT&T fsub/fsubr ve fdiv/fdivr Intel'e gore TERS; pop-formlarinda da ayni.
+//   - FCOMI ailesi gercek EFLAGS yaziyor -> pushfq ile VM bayraklarina
+//     senkron (fl_ bitleri gercek EFLAGS bitleriyle ayni konumda).
+#define OP_FPU_ST    0x3E   // u8 subop u8 idx : yigin/kayit-formu x87 op
+#define OP_FPU_MEM   0x3F   // u8 subop mem    : adres-formu x87 op
+
+// OP_FPU_ST alt kodlari (implicit + reg-form; idx = st(i) 0..7)
+#define FPU_FSQRT     0
+#define FPU_FCHS      1
+#define FPU_FABS      2
+#define FPU_FSIN      3
+#define FPU_FCOS      4
+#define FPU_FSINCOS   5
+#define FPU_FPTAN     6
+#define FPU_FPATAN    7
+#define FPU_FYL2X     8
+#define FPU_FYL2XP1   9
+#define FPU_F2XM1    10
+#define FPU_FPREM    11
+#define FPU_FPREM1   12
+#define FPU_FRNDINT  13
+#define FPU_FSCALE   14
+#define FPU_FXTRACT  15
+#define FPU_FTST     16
+#define FPU_FXAM     17
+#define FPU_FDECSTP  18
+#define FPU_FINCSTP  19
+#define FPU_FINIT    20
+#define FPU_FCLEX    21
+#define FPU_FNOP     22
+#define FPU_FWAIT    23
+#define FPU_FLD1     24
+#define FPU_FLDZ     25
+#define FPU_FLDPI    26
+#define FPU_FLDL2T   27
+#define FPU_FLDL2E   28
+#define FPU_FLDLG2   29
+#define FPU_FLDLN2   30
+#define FPU_FCOMPP   31
+#define FPU_FUCOMPP  32
+// reg-form (idx=st(i))
+#define FPU_FLD_ST   33   // fld st(i)
+#define FPU_FXCH     34   // fxch st(i)
+#define FPU_FADD_STI 35   // DC C0+i : ST(i) += ST(0)
+#define FPU_FMUL_STI 36   // DC C8+i
+#define FPU_FSUB_STI 37   // DC E8+i : ST(i) -= ST(0)
+#define FPU_FSUBR_STI 38  // DC E0+i : ST(i) = ST(0)-ST(i)
+#define FPU_FDIV_STI 39   // DC F8+i : ST(i) /= ST(0)
+#define FPU_FDIVR_STI 40  // DC F0+i : ST(i) = ST(0)/ST(i)
+#define FPU_FADD_ST0 41   // D8 C0+i : ST(0) += ST(i)
+#define FPU_FMUL_ST0 42   // D8 C8+i
+#define FPU_FSUB_ST0 43   // D8 E0+i : ST(0) -= ST(i)
+#define FPU_FSUBR_ST0 44  // D8 E8+i : ST(0) = ST(i)-ST(0)
+#define FPU_FDIV_ST0 45   // D8 F0+i : ST(0) /= ST(i)
+#define FPU_FDIVR_ST0 46  // D8 F8+i : ST(0) = ST(i)/ST(0)
+#define FPU_FCOM_STI 47   // D8 D0+i
+#define FPU_FCOMP_STI 48  // D8 D8+i
+#define FPU_FUCOM_STI 49  // DD E0+i
+#define FPU_FUCOMP_STI 50 // DD E8+i
+#define FPU_FST_STI  51   // DD D0+i
+#define FPU_FSTP_STI 52   // DD D8+i
+#define FPU_FFREE    53   // DD C0+i
+#define FPU_FFREEP   54   // DF C0+i
+// pop-formlar
+#define FPU_FADDP    55   // DE C0+i
+#define FPU_FMULP    56   // DE C8+i
+#define FPU_FSUBP    57   // DE E8+i
+#define FPU_FSUBRP   58   // DE E0+i
+#define FPU_FDIVP    59   // DE F8+i
+#define FPU_FDIVRP   60   // DE F0+i
+// EFLAGS-formlari (gercek EFLAGS -> VM flags senkronu)
+#define FPU_FCOMI    61   // DB F0+i
+#define FPU_FCOMIP   62   // DF F0+i
+#define FPU_FUCOMI   63   // DB E8+i
+#define FPU_FUCOMIP  64   // DF E8+i
+// FCMOV (idx=st(i); cc bytecode subop'inda ayri)
+#define FPU_FCMOVB   65
+#define FPU_FCMOVE   66
+#define FPU_FCMOVBE  67
+#define FPU_FCMOVU   68
+#define FPU_FCMOVNB  69
+#define FPU_FCMOVNE  70
+#define FPU_FCMOVNBE 71
+#define FPU_FCMOVNU  72
+#define FPU_FSTSW_AX 73   // AX <- status word (VM reg yazimi)
+
+// OP_FPU_MEM alt kodlari (adres akistan; sz subop'a gomulu)
+#define FPU_M_FLD32   0
+#define FPU_M_FLD64   1
+#define FPU_M_FLD80   2
+#define FPU_M_FST32   3
+#define FPU_M_FST64   4
+#define FPU_M_FSTP32  5
+#define FPU_M_FSTP64  6
+#define FPU_M_FSTP80  7
+#define FPU_M_FILD16  8
+#define FPU_M_FILD32  9
+#define FPU_M_FILD64 10
+#define FPU_M_FIST16 11
+#define FPU_M_FIST32 12
+#define FPU_M_FISTP16 13
+#define FPU_M_FISTP32 14
+#define FPU_M_FISTP64 15
+#define FPU_M_FISTTP16 16
+#define FPU_M_FISTTP32 17
+#define FPU_M_FISTTP64 18
+#define FPU_M_FADD32 19
+#define FPU_M_FADD64 20
+#define FPU_M_FSUB32 21
+#define FPU_M_FSUB64 22
+#define FPU_M_FSUBR32 23
+#define FPU_M_FSUBR64 24
+#define FPU_M_FMUL32 25
+#define FPU_M_FMUL64 26
+#define FPU_M_FDIV32 27
+#define FPU_M_FDIV64 28
+#define FPU_M_FDIVR32 29
+#define FPU_M_FDIVR64 30
+#define FPU_M_FCOM32 31
+#define FPU_M_FCOM64 32
+#define FPU_M_FCOMP32 33
+#define FPU_M_FCOMP64 34
+#define FPU_M_FIADD16 35
+#define FPU_M_FIADD32 36
+#define FPU_M_FIMUL16 37
+#define FPU_M_FIMUL32 38
+#define FPU_M_FICOM16 39
+#define FPU_M_FICOM32 40
+#define FPU_M_FICOMP16 41
+#define FPU_M_FICOMP32 42
+#define FPU_M_FISUB16 43
+#define FPU_M_FISUB32 44
+#define FPU_M_FISUBR16 45
+#define FPU_M_FISUBR32 46
+#define FPU_M_FIDIV16 47
+#define FPU_M_FIDIV32 48
+#define FPU_M_FIDIVR16 49
+#define FPU_M_FIDIVR32 50
+#define FPU_M_FSTSW  51
+#define FPU_M_FSTCW  52
+#define FPU_M_FLDCW  53
+#define FPU_M_FBLD   54
+#define FPU_M_FBSTP  55
+
 // --- 0.8.0 polimorfik isleyiciler: opcode permütasyonu ---
 // π = anahtar-turetilmis (Fisher-Yates; tohum = fonksiyon RVA'si).
 // Encoder (engine_lift eop) gercel->raw yazar (vm_perm_enc); interpreter
@@ -131,7 +282,7 @@
 // fonksiyondan turer -> tablo tasimaya gerek yok (stub yalniz tohumu
 // ctx->scratch[3]'e yazar). Tohum 0 = kimlik degil, gecerli permütasyon
 // (determinizm iki tarafta da ayni fonksiyondan).
-#define VM_OPN 0x3E   // opcode uzayi (0x00..0x3D) — 1.0.0-UO: 0x3B -> 0x3E (3 yeni yigin kapi op'u)
+#define VM_OPN 0x40   // opcode uzayi (0x00..0x3F) — 1.1.0-A4: 0x3E -> 0x40 (OP_FPU_ST/OP_FPU_MEM)
 static void vm_perm_tab(unsigned int seed, unsigned char* t, int dec) {
     unsigned char p[VM_OPN]; int i, j;
     for (i = 0; i < VM_OPN; i++) p[i] = (unsigned char)i;

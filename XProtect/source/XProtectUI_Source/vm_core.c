@@ -676,7 +676,7 @@ static void vm_run(VMContext* c) {
                ile temiz doner (yanlis deger, cokme YOK). */
             if (s.ic >= c->bc_len) { c->done = 1; break; }
         u8 op = itab[sf8(&s)];
-        int alu, shi, cc, ud, sz, ssz, r1, r2, form, n;
+        int alu, shi, cc, ud, sz, ssz, r1, r2, form, n, idx;
         u32 v32;
         u64 a, b, r, addr, fl;
         i64 sv;
@@ -1395,6 +1395,314 @@ static void vm_run(VMContext* c) {
                 u32 i2;
                 for (i2 = 0; i2 < len; i2++) p[i2] ^= (u8)(k + i2 * 31);
                 *st = 1;
+            }
+
+        /* ---- 1.1.0-A4-FPU: UniversalObfuscator FPU paritesi ----
+           UO intel.cc beyaz-listesinde VM icinde yurutulen FPU kumesi
+           birebir + UST-KUME (UO'nun ltNative-ada biraktigi bellek-formlari
+           dahil tam sanallastirma). x87 yigini GERCEK birimde kalir; VM'nin
+           C kodu hicbir x87 kayit silmez (freestanding, float kod yok).
+           AT&T->Intel esleme kaniti: scripts/a4_fpu_mnem_test.c (objdump). */
+
+        } else if (op == OP_FPU_ST) {
+            ud = sf8(&s); idx = sf8(&s);
+            /* 8-yonlu reg-form makrolari (idx 0..7; gas st(i) derleme-zamani
+               sabiti ister -> switch-makro; -fno-jump-tables ile karsilastirma
+               zinciri, freestanding kurallara uygun). */
+#define FP8_A(m) do { switch (idx) { \
+    case 0: __asm__ volatile(m " %st(0), %st(0)"); break; \
+    case 1: __asm__ volatile(m " %st(1), %st(0)"); break; \
+    case 2: __asm__ volatile(m " %st(2), %st(0)"); break; \
+    case 3: __asm__ volatile(m " %st(3), %st(0)"); break; \
+    case 4: __asm__ volatile(m " %st(4), %st(0)"); break; \
+    case 5: __asm__ volatile(m " %st(5), %st(0)"); break; \
+    case 6: __asm__ volatile(m " %st(6), %st(0)"); break; \
+    default: __asm__ volatile(m " %st(7), %st(0)"); break; \
+} } while (0)
+#define FP8_B(m) do { switch (idx) { \
+    case 0: __asm__ volatile(m " %st(0), %st(0)"); break; \
+    case 1: __asm__ volatile(m " %st(0), %st(1)"); break; \
+    case 2: __asm__ volatile(m " %st(0), %st(2)"); break; \
+    case 3: __asm__ volatile(m " %st(0), %st(3)"); break; \
+    case 4: __asm__ volatile(m " %st(0), %st(4)"); break; \
+    case 5: __asm__ volatile(m " %st(0), %st(5)"); break; \
+    case 6: __asm__ volatile(m " %st(0), %st(6)"); break; \
+    default: __asm__ volatile(m " %st(0), %st(7)"); break; \
+} } while (0)
+#define FP8_S(m) do { switch (idx) { \
+    case 0: __asm__ volatile(m " %st(0)"); break; \
+    case 1: __asm__ volatile(m " %st(1)"); break; \
+    case 2: __asm__ volatile(m " %st(2)"); break; \
+    case 3: __asm__ volatile(m " %st(3)"); break; \
+    case 4: __asm__ volatile(m " %st(4)"); break; \
+    case 5: __asm__ volatile(m " %st(5)"); break; \
+    case 6: __asm__ volatile(m " %st(6)"); break; \
+    default: __asm__ volatile(m " %st(7)"); break; \
+} } while (0)
+            /* ---- EFLAGS-KRITIK AILELER: TEK asm blogu ----
+               FCOMI gercek EFLAGS yazar, FCMOV gercek EFLAGS okur;
+               bayrak-kurulum ile talimat ARASINA gcc kodu (switch dispatch
+               cmp/jcc) giremez — ayri asm ifadeleri arada bozar (T5-B kanit).
+               VM flags ic-bit: FCF=1 FZF=2 FSF=4 FPF=16;
+               gercek EFLAGS: CF=bit0 PF=bit2 ZF=bit6 (0x45 maskesi). */
+            if ((ud >= FPU_FCOMI && ud <= FPU_FUCOMIP) ||
+                (ud >= FPU_FCMOVB && ud <= FPU_FCMOVNU)) {
+#if defined(VM_IS_X64)
+                if (ud >= FPU_FCOMI && ud <= FPU_FUCOMIP) {
+                    u64 f;
+#define FP8_FC(m) do { switch (idx) { \
+    case 0: __asm__ volatile(m " %%st(0)\n\tpushfq\n\tpopq %0" : "=r"(f) :: "cc","memory"); break; \
+    case 1: __asm__ volatile(m " %%st(1)\n\tpushfq\n\tpopq %0" : "=r"(f) :: "cc","memory"); break; \
+    case 2: __asm__ volatile(m " %%st(2)\n\tpushfq\n\tpopq %0" : "=r"(f) :: "cc","memory"); break; \
+    case 3: __asm__ volatile(m " %%st(3)\n\tpushfq\n\tpopq %0" : "=r"(f) :: "cc","memory"); break; \
+    case 4: __asm__ volatile(m " %%st(4)\n\tpushfq\n\tpopq %0" : "=r"(f) :: "cc","memory"); break; \
+    case 5: __asm__ volatile(m " %%st(5)\n\tpushfq\n\tpopq %0" : "=r"(f) :: "cc","memory"); break; \
+    case 6: __asm__ volatile(m " %%st(6)\n\tpushfq\n\tpopq %0" : "=r"(f) :: "cc","memory"); break; \
+    default: __asm__ volatile(m " %%st(7)\n\tpushfq\n\tpopq %0" : "=r"(f) :: "cc","memory"); break; \
+} } while (0)
+                    if (ud == FPU_FCOMI)       { FP8_FC("fcomi"); }
+                    else if (ud == FPU_FCOMIP) { FP8_FC("fcomip"); }
+                    else if (ud == FPU_FUCOMI) { FP8_FC("fucomi"); }
+                    else                       { FP8_FC("fucomip"); }
+#undef FP8_FC
+                    if (f & 0x001ULL) c->flags |= FCF;
+                    if (f & 0x004ULL) c->flags |= FPF;
+                    if (f & 0x040ULL) c->flags |= FZF;
+                } else {
+                    u64 fb = 0;
+                    if (c->flags & FCF) fb |= 0x001ULL;
+                    if (c->flags & FPF) fb |= 0x004ULL;
+                    if (c->flags & FZF) fb |= 0x040ULL;
+#define FP8_FCM(m) do { switch (idx) { \
+    case 0: __asm__ volatile("pushfq\n\tpopq %%rcx\n\tandq $-0x46,%%rcx\n\torq %1,%%rcx\n\tpushq %%rcx\n\tpopfq\n\t" m " %%st(0), %%st(0)" :: "r"(0), "r"(fb) : "rcx","cc","memory"); break; \
+    case 1: __asm__ volatile("pushfq\n\tpopq %%rcx\n\tandq $-0x46,%%rcx\n\torq %1,%%rcx\n\tpushq %%rcx\n\tpopfq\n\t" m " %%st(1), %%st(0)" :: "r"(0), "r"(fb) : "rcx","cc","memory"); break; \
+    case 2: __asm__ volatile("pushfq\n\tpopq %%rcx\n\tandq $-0x46,%%rcx\n\torq %1,%%rcx\n\tpushq %%rcx\n\tpopfq\n\t" m " %%st(2), %%st(0)" :: "r"(0), "r"(fb) : "rcx","cc","memory"); break; \
+    case 3: __asm__ volatile("pushfq\n\tpopq %%rcx\n\tandq $-0x46,%%rcx\n\torq %1,%%rcx\n\tpushq %%rcx\n\tpopfq\n\t" m " %%st(3), %%st(0)" :: "r"(0), "r"(fb) : "rcx","cc","memory"); break; \
+    case 4: __asm__ volatile("pushfq\n\tpopq %%rcx\n\tandq $-0x46,%%rcx\n\torq %1,%%rcx\n\tpushq %%rcx\n\tpopfq\n\t" m " %%st(4), %%st(0)" :: "r"(0), "r"(fb) : "rcx","cc","memory"); break; \
+    case 5: __asm__ volatile("pushfq\n\tpopq %%rcx\n\tandq $-0x46,%%rcx\n\torq %1,%%rcx\n\tpushq %%rcx\n\tpopfq\n\t" m " %%st(5), %%st(0)" :: "r"(0), "r"(fb) : "rcx","cc","memory"); break; \
+    case 6: __asm__ volatile("pushfq\n\tpopq %%rcx\n\tandq $-0x46,%%rcx\n\torq %1,%%rcx\n\tpushq %%rcx\n\tpopfq\n\t" m " %%st(6), %%st(0)" :: "r"(0), "r"(fb) : "rcx","cc","memory"); break; \
+    default: __asm__ volatile("pushfq\n\tpopq %%rcx\n\tandq $-0x46,%%rcx\n\torq %1,%%rcx\n\tpushq %%rcx\n\tpopfq\n\t" m " %%st(7), %%st(0)" :: "r"(0), "r"(fb) : "rcx","cc","memory"); break; \
+} } while (0)
+                    if (ud == FPU_FCMOVB)       { FP8_FCM("fcmovb"); }
+                    else if (ud == FPU_FCMOVE)   { FP8_FCM("fcmove"); }
+                    else if (ud == FPU_FCMOVBE)  { FP8_FCM("fcmovbe"); }
+                    else if (ud == FPU_FCMOVU)   { FP8_FCM("fcmovu"); }
+                    else if (ud == FPU_FCMOVNB)  { FP8_FCM("fcmovnb"); }
+                    else if (ud == FPU_FCMOVNE)  { FP8_FCM("fcmovne"); }
+                    else if (ud == FPU_FCMOVNBE) { FP8_FCM("fcmovnbe"); }
+                    else                         { FP8_FCM("fcmovnu"); }
+#undef FP8_FCM
+                }
+#else
+                if (ud >= FPU_FCOMI && ud <= FPU_FUCOMIP) {
+                    u32 f;
+#define FP8_FC(m) do { switch (idx) { \
+    case 0: __asm__ volatile(m " %%st(0)\n\tpushfl\n\tpopl %0" : "=r"(f) :: "cc","memory"); break; \
+    case 1: __asm__ volatile(m " %%st(1)\n\tpushfl\n\tpopl %0" : "=r"(f) :: "cc","memory"); break; \
+    case 2: __asm__ volatile(m " %%st(2)\n\tpushfl\n\tpopl %0" : "=r"(f) :: "cc","memory"); break; \
+    case 3: __asm__ volatile(m " %%st(3)\n\tpushfl\n\tpopl %0" : "=r"(f) :: "cc","memory"); break; \
+    case 4: __asm__ volatile(m " %%st(4)\n\tpushfl\n\tpopl %0" : "=r"(f) :: "cc","memory"); break; \
+    case 5: __asm__ volatile(m " %%st(5)\n\tpushfl\n\tpopl %0" : "=r"(f) :: "cc","memory"); break; \
+    case 6: __asm__ volatile(m " %%st(6)\n\tpushfl\n\tpopl %0" : "=r"(f) :: "cc","memory"); break; \
+    default: __asm__ volatile(m " %%st(7)\n\tpushfl\n\tpopl %0" : "=r"(f) :: "cc","memory"); break; \
+} } while (0)
+                    if (ud == FPU_FCOMI)       { FP8_FC("fcomi"); }
+                    else if (ud == FPU_FCOMIP) { FP8_FC("fcomip"); }
+                    else if (ud == FPU_FUCOMI) { FP8_FC("fucomi"); }
+                    else                       { FP8_FC("fucomip"); }
+#undef FP8_FC
+                    if (f & 0x001u) c->flags |= FCF;
+                    if (f & 0x004u) c->flags |= FPF;
+                    if (f & 0x040u) c->flags |= FZF;
+                } else {
+                    u32 fb = 0;
+                    if (c->flags & FCF) fb |= 0x001u;
+                    if (c->flags & FPF) fb |= 0x004u;
+                    if (c->flags & FZF) fb |= 0x040u;
+#define FP8_FCM(m) do { switch (idx) { \
+    case 0: __asm__ volatile("pushfl\n\tpopl %%ecx\n\tandl $-0x46,%%ecx\n\torl %1,%%ecx\n\tpushl %%ecx\n\tpopfl\n\t" m " %%st(0), %%st(0)" :: "r"(0), "r"(fb) : "ecx","cc","memory"); break; \
+    case 1: __asm__ volatile("pushfl\n\tpopl %%ecx\n\tandl $-0x46,%%ecx\n\torl %1,%%ecx\n\tpushl %%ecx\n\tpopfl\n\t" m " %%st(1), %%st(0)" :: "r"(0), "r"(fb) : "ecx","cc","memory"); break; \
+    case 2: __asm__ volatile("pushfl\n\tpopl %%ecx\n\tandl $-0x46,%%ecx\n\torl %1,%%ecx\n\tpushl %%ecx\n\tpopfl\n\t" m " %%st(2), %%st(0)" :: "r"(0), "r"(fb) : "ecx","cc","memory"); break; \
+    case 3: __asm__ volatile("pushfl\n\tpopl %%ecx\n\tandl $-0x46,%%ecx\n\torl %1,%%ecx\n\tpushl %%ecx\n\tpopfl\n\t" m " %%st(3), %%st(0)" :: "r"(0), "r"(fb) : "ecx","cc","memory"); break; \
+    case 4: __asm__ volatile("pushfl\n\tpopl %%ecx\n\tandl $-0x46,%%ecx\n\torl %1,%%ecx\n\tpushl %%ecx\n\tpopfl\n\t" m " %%st(4), %%st(0)" :: "r"(0), "r"(fb) : "ecx","cc","memory"); break; \
+    case 5: __asm__ volatile("pushfl\n\tpopl %%ecx\n\tandl $-0x46,%%ecx\n\torl %1,%%ecx\n\tpushl %%ecx\n\tpopfl\n\t" m " %%st(5), %%st(0)" :: "r"(0), "r"(fb) : "ecx","cc","memory"); break; \
+    case 6: __asm__ volatile("pushfl\n\tpopl %%ecx\n\tandl $-0x46,%%ecx\n\torl %1,%%ecx\n\tpushl %%ecx\n\tpopfl\n\t" m " %%st(6), %%st(0)" :: "r"(0), "r"(fb) : "ecx","cc","memory"); break; \
+    default: __asm__ volatile("pushfl\n\tpopl %%ecx\n\tandl $-0x46,%%ecx\n\torl %1,%%ecx\n\tpushl %%ecx\n\tpopfl\n\t" m " %%st(7), %%st(0)" :: "r"(0), "r"(fb) : "ecx","cc","memory"); break; \
+} } while (0)
+                    if (ud == FPU_FCMOVB)       { FP8_FCM("fcmovb"); }
+                    else if (ud == FPU_FCMOVE)   { FP8_FCM("fcmove"); }
+                    else if (ud == FPU_FCMOVBE)  { FP8_FCM("fcmovbe"); }
+                    else if (ud == FPU_FCMOVU)   { FP8_FCM("fcmovu"); }
+                    else if (ud == FPU_FCMOVNB)  { FP8_FCM("fcmovnb"); }
+                    else if (ud == FPU_FCMOVNE)  { FP8_FCM("fcmovne"); }
+                    else if (ud == FPU_FCMOVNBE) { FP8_FCM("fcmovnbe"); }
+                    else                         { FP8_FCM("fcmovnu"); }
+#undef FP8_FCM
+                }
+#endif
+            } else
+            switch (ud) {
+            /* --- implicit (operand yok) --- */
+            case FPU_FSQRT:   __asm__ volatile("fsqrt"); break;
+            case FPU_FCHS:    __asm__ volatile("fchs"); break;
+            case FPU_FABS:    __asm__ volatile("fabs"); break;
+            case FPU_FSIN:    __asm__ volatile("fsin"); break;
+            case FPU_FCOS:    __asm__ volatile("fcos"); break;
+            case FPU_FSINCOS: __asm__ volatile("fsincos"); break;
+            case FPU_FPTAN:   __asm__ volatile("fptan"); break;
+            case FPU_FPATAN:  __asm__ volatile("fpatan"); break;
+            case FPU_FYL2X:   __asm__ volatile("fyl2x"); break;
+            case FPU_FYL2XP1: __asm__ volatile("fyl2xp1"); break;
+            case FPU_F2XM1:   __asm__ volatile("f2xm1"); break;
+            case FPU_FPREM:   __asm__ volatile("fprem"); break;
+            case FPU_FPREM1:  __asm__ volatile("fprem1"); break;
+            case FPU_FRNDINT: __asm__ volatile("frndint"); break;
+            case FPU_FSCALE:  __asm__ volatile("fscale"); break;
+            case FPU_FXTRACT: __asm__ volatile("fxtract"); break;
+            case FPU_FTST:    __asm__ volatile("ftst"); break;
+            case FPU_FXAM:    __asm__ volatile("fxam"); break;
+            case FPU_FDECSTP: __asm__ volatile("fdecstp"); break;
+            case FPU_FINCSTP: __asm__ volatile("fincstp"); break;
+            case FPU_FINIT:   __asm__ volatile("finit"); break;   /* 9b db e3 */
+            case FPU_FCLEX:   __asm__ volatile("fclex"); break;   /* 9b db e2 */
+            case FPU_FNOP:    __asm__ volatile("fnop"); break;
+            case FPU_FWAIT:   __asm__ volatile("fwait"); break;
+            case FPU_FLD1:    __asm__ volatile("fld1"); break;
+            case FPU_FLDZ:    __asm__ volatile("fldz"); break;
+            case FPU_FLDPI:   __asm__ volatile("fldpi"); break;
+            case FPU_FLDL2T:  __asm__ volatile("fldl2t"); break;
+            case FPU_FLDL2E:  __asm__ volatile("fldl2e"); break;
+            case FPU_FLDLG2:  __asm__ volatile("fldlg2"); break;
+            case FPU_FLDLN2:  __asm__ volatile("fldln2"); break;
+            case FPU_FCOMPP:  __asm__ volatile("fcompp"); break;  /* de d9 */
+            case FPU_FUCOMPP: __asm__ volatile("fucompp"); break; /* da e9 */
+            /* --- reg-form: Intel manasi yorumda; AT&T esleme makroda ---
+               FP8_A: AT&T "m %st(i), %st(0)"  -> Intel m ST(0), ST(i)
+               FP8_B: AT&T "m %st(0), %st(i)"  -> Intel m ST(i), ST(0)
+                 (fsub/fsubr/fdiv/fdivr AT&T'de zaten ters -> Intel
+                  SUB ST(i),ST(0) = AT&T fsubr; Intel SUBR = AT&T fsub)
+               FP8_S: tek-operand st(i) */
+            case FPU_FLD_ST:    FP8_S("fld"); break;
+            case FPU_FXCH:      FP8_S("fxch"); break;
+            case FPU_FADD_STI:  FP8_B("fadd"); break;   /* DC C0+i */
+            case FPU_FMUL_STI:  FP8_B("fmul"); break;   /* DC C8+i */
+            case FPU_FSUB_STI:  FP8_B("fsubr"); break;  /* DC E8+i: STi-=ST0 */
+            case FPU_FSUBR_STI: FP8_B("fsub"); break;   /* DC E0+i: STi=ST0-STi */
+            case FPU_FDIV_STI:  FP8_B("fdivr"); break;  /* DC F8+i: STi/=ST0 */
+            case FPU_FDIVR_STI: FP8_B("fdiv"); break;   /* DC F0+i: STi=ST0/STi */
+            case FPU_FADD_ST0:  FP8_A("fadd"); break;   /* D8 C0+i */
+            case FPU_FMUL_ST0:  FP8_A("fmul"); break;   /* D8 C8+i */
+            case FPU_FSUB_ST0:  FP8_A("fsub"); break;   /* D8 E0+i: ST0-=STi */
+            case FPU_FSUBR_ST0: FP8_A("fsubr"); break;  /* D8 E8+i: ST0=STi-ST0 */
+            case FPU_FDIV_ST0:  FP8_A("fdiv"); break;   /* D8 F0+i: ST0/=STi */
+            case FPU_FDIVR_ST0: FP8_A("fdivr"); break;  /* D8 F8+i: ST0=STi/ST0 */
+            case FPU_FCOM_STI:  FP8_S("fcom"); break;   /* D8 D0+i */
+            case FPU_FCOMP_STI: FP8_S("fcomp"); break;  /* D8 D8+i */
+            case FPU_FUCOM_STI: FP8_S("fucom"); break;  /* DD E0+i */
+            case FPU_FUCOMP_STI: FP8_S("fucomp"); break;/* DD E8+i */
+            case FPU_FST_STI:   FP8_S("fst"); break;    /* DD D0+i */
+            case FPU_FSTP_STI:  FP8_S("fstp"); break;   /* DD D8+i */
+            case FPU_FFREE:     FP8_S("ffree"); break;  /* DD C0+i */
+            case FPU_FFREEP:    FP8_S("ffreep"); break; /* DF C0+i */
+            case FPU_FADDP:     FP8_B("faddp"); break;  /* DE C0+i */
+            case FPU_FMULP:     FP8_B("fmulp"); break;  /* DE C8+i */
+            case FPU_FSUBP:     FP8_B("fsubrp"); break; /* DE E8+i (ters) */
+            case FPU_FSUBRP:    FP8_B("fsubp"); break;  /* DE E0+i (ters) */
+            case FPU_FDIVP:     FP8_B("fdivp"); break;  /* DE F8+i (ters) */
+            case FPU_FDIVRP:    FP8_B("fdivrp"); break; /* DE F0+i (ters) */
+            case FPU_FSTSW_AX: {
+                /* FSTSW AX (9b df e0) = fwait + fnstsw; AX = VM regs[0].low16 */
+                u16 sw;
+                __asm__ volatile("fwait");
+                __asm__ volatile("fnstsw %0" : "=m"(sw));
+                rset(c, 0, 2, sw);
+                break;
+            }
+            default: break; /* bilinmeyen subop -> etki yok (duru akis) */
+            }
+#undef FP8_A
+#undef FP8_B
+#undef FP8_S
+
+        } else if (op == OP_FPU_MEM) {
+            /* adres-formu: mem_addr ile cozulen GERCEK adrese gercek x87
+               talimati (x86'da "r" 32-bit reg; x64'te 64-bit — u2p ayni). */
+            ud = sf8(&s);
+            addr = mem_addr(&s, c);
+            {
+                void* A = u2p(addr);
+                switch (ud) {
+                case FPU_M_FLD32:  __asm__ volatile("flds (%0)"  :: "r"(A) : "memory"); break;
+                case FPU_M_FLD64:  __asm__ volatile("fldl (%0)"  :: "r"(A) : "memory"); break;
+                case FPU_M_FLD80:  __asm__ volatile("fldt (%0)"  :: "r"(A) : "memory"); break;
+                case FPU_M_FST32:  __asm__ volatile("fsts (%0)"  :: "r"(A) : "memory"); break;
+                case FPU_M_FST64:  __asm__ volatile("fstl (%0)"  :: "r"(A) : "memory"); break;
+                case FPU_M_FSTP32: __asm__ volatile("fstps (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FSTP64: __asm__ volatile("fstpl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FSTP80: __asm__ volatile("fstpt (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FILD16: __asm__ volatile("filds (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FILD32: __asm__ volatile("fildl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FILD64: __asm__ volatile("fildll (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FIST16: __asm__ volatile("fists (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FIST32: __asm__ volatile("fistl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FISTP16: __asm__ volatile("fistps (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FISTP32: __asm__ volatile("fistpl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FISTP64: __asm__ volatile("fistpq (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FISTTP16: __asm__ volatile("fisttps (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FISTTP32: __asm__ volatile("fisttpl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FISTTP64: __asm__ volatile("fisttpq (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FADD32: __asm__ volatile("fadds (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FADD64: __asm__ volatile("faddl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FSUB32: __asm__ volatile("fsubs (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FSUB64: __asm__ volatile("fsubl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FSUBR32: __asm__ volatile("fsubrs (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FSUBR64: __asm__ volatile("fsubrl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FMUL32: __asm__ volatile("fmuls (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FMUL64: __asm__ volatile("fmull (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FDIV32: __asm__ volatile("fdivs (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FDIV64: __asm__ volatile("fdivl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FDIVR32: __asm__ volatile("fdivrs (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FDIVR64: __asm__ volatile("fdivrl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FCOM32: __asm__ volatile("fcoms (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FCOM64: __asm__ volatile("fcoml (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FCOMP32: __asm__ volatile("fcomps (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FCOMP64: __asm__ volatile("fcompl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FIADD16: __asm__ volatile("fiadds (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FIADD32: __asm__ volatile("fiaddl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FIMUL16: __asm__ volatile("fimuls (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FIMUL32: __asm__ volatile("fimull (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FICOM16: __asm__ volatile("ficoms (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FICOM32: __asm__ volatile("ficoml (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FICOMP16: __asm__ volatile("ficomps (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FICOMP32: __asm__ volatile("ficompl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FISUB16: __asm__ volatile("fisubs (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FISUB32: __asm__ volatile("fisubl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FISUBR16: __asm__ volatile("fisubrs (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FISUBR32: __asm__ volatile("fisubrl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FIDIV16: __asm__ volatile("fidivs (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FIDIV32: __asm__ volatile("fidivl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FIDIVR16: __asm__ volatile("fidivrs (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FIDIVR32: __asm__ volatile("fidivrl (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FSTSW: {
+                    /* FSTSW m16 (9b dd /7 es-anlam): fwait + fnstsw */
+                    u16 v;
+                    __asm__ volatile("fwait");
+                    __asm__ volatile("fnstsw %0" : "=m"(v));
+                    mwr(addr, 2, v);
+                    break;
+                }
+                case FPU_M_FSTCW: {
+                    u16 v;
+                    __asm__ volatile("fwait");
+                    __asm__ volatile("fnstcw %0" : "=m"(v));
+                    mwr(addr, 2, v);
+                    break;
+                }
+                case FPU_M_FLDCW: __asm__ volatile("fldcw (%0)" :: "r"(A) : "memory"); break;
+                case FPU_M_FBLD:  __asm__ volatile("fbld (%0)"  :: "r"(A) : "memory"); break;
+                case FPU_M_FBSTP: __asm__ volatile("fbstp (%0)" :: "r"(A) : "memory"); break;
+                default: break;
+                }
             }
 
         } else {

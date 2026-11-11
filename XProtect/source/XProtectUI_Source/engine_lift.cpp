@@ -182,6 +182,7 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
     bool saw_ret = false;
     bool last_ret = false;      // 1.0.0: akisin son op'u RET mi (kok-fix)
     bool body_ended = false;    // ret sonrasi dolgu gorundu mu (govde bitti isareti)
+    bool jcc_to_end = false;    // 1.1.0: jcc bolge-sonuna (end) atiyor
     u32 retimm = 0xFFFFFFFF;
     u32 end = rva + size;
 
@@ -399,7 +400,10 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
             snprintf(buf, sizeof buf, "jmp 0x%x", I.target); break;
         }
         case XP_JCC: {
-            if (I.target < rva || I.target >= end) { F.why = "disari jcc"; return F; }
+            /* 1.1.0: jcc -> bolge-SONU (SDK bolge siniri) artik GECERLI:
+               son OP_RET'e yonlendirilir (asinan bozuk atama). */
+            if (I.target == end) jcc_to_end = true;
+            else if (I.target < rva || I.target >= end) { F.why = "disari jcc"; return F; }
             L.eop(OP_JCC); L.e((u8)I.cc); u32 site = (u32)L.bc.size(); L.e32(0);
             F.fix.push_back({ site, I.target });
             snprintf(buf, sizeof buf, "jcc%d 0x%x", I.cc, I.target); break;
@@ -515,6 +519,130 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                      I.ud == 0 ? "movs" : I.ud == 1 ? "stos" : I.ud == 2 ? "lods"
                      : I.ud == 3 ? "scas" : "cmps", I.sz); break;
         }
+        /* ---- 1.1.0-A4-FPU: UO FPU paritesi lifter tarafı ----
+           Bellek-formlari OP_FPU_MEM (adres mem_addr ile); reg/implicit
+           formlar OP_FPU_ST. ud: D8(ST0-form)=0 / DC(STi-form)=1. */
+        case XP_FLD: case XP_FST: case XP_FSTP:
+        case XP_FILD: case XP_FIST: case XP_FISTP: case XP_FISTTP:
+        case XP_FADD: case XP_FMUL: case XP_FSUB: case XP_FSUBR:
+        case XP_FDIV: case XP_FDIVR:
+        case XP_FIADD: case XP_FIMUL: case XP_FICOM: case XP_FICOMP:
+        case XP_FISUB: case XP_FISUBR: case XP_FIDIV: case XP_FIDIVR:
+        case XP_FCOM: case XP_FCOMP:
+        case XP_FBLD: case XP_FBSTP:
+        case XP_FSTSW: case XP_FSTCW: case XP_FLDCW: {
+            int sub = -1;
+            bool memf = I.mem.present;
+            if (I.op == XP_FLD)   sub = !memf ? FPU_FLD_ST   : (I.sz == 4 ? FPU_M_FLD32 : I.sz == 8 ? FPU_M_FLD64 : FPU_M_FLD80);
+            else if (I.op == XP_FST)   sub = !memf ? FPU_FST_STI : (I.sz == 4 ? FPU_M_FST32 : FPU_M_FST64);
+            else if (I.op == XP_FSTP)  sub = !memf ? FPU_FSTP_STI : (I.sz == 4 ? FPU_M_FSTP32 : I.sz == 8 ? FPU_M_FSTP64 : FPU_M_FSTP80);
+            else if (I.op == XP_FILD)  sub = (I.sz == 2 ? FPU_M_FILD16 : I.sz == 4 ? FPU_M_FILD32 : FPU_M_FILD64);
+            else if (I.op == XP_FIST)  sub = (I.sz == 2 ? FPU_M_FIST16 : FPU_M_FIST32);
+            else if (I.op == XP_FISTP) sub = (I.sz == 2 ? FPU_M_FISTP16 : I.sz == 4 ? FPU_M_FISTP32 : FPU_M_FISTP64);
+            else if (I.op == XP_FISTTP) sub = (I.sz == 2 ? FPU_M_FISTTP16 : I.sz == 4 ? FPU_M_FISTTP32 : FPU_M_FISTTP64);
+            else if (I.op == XP_FADD)  sub = !memf ? (I.ud ? FPU_FADD_STI : FPU_FADD_ST0) : (I.sz == 4 ? FPU_M_FADD32 : FPU_M_FADD64);
+            else if (I.op == XP_FMUL)  sub = !memf ? (I.ud ? FPU_FMUL_STI : FPU_FMUL_ST0) : (I.sz == 4 ? FPU_M_FMUL32 : FPU_M_FMUL64);
+            else if (I.op == XP_FSUB)  sub = !memf ? (I.ud ? FPU_FSUB_STI : FPU_FSUB_ST0) : (I.sz == 4 ? FPU_M_FSUB32 : FPU_M_FSUB64);
+            else if (I.op == XP_FSUBR) sub = !memf ? (I.ud ? FPU_FSUBR_STI : FPU_FSUBR_ST0) : (I.sz == 4 ? FPU_M_FSUBR32 : FPU_M_FSUBR64);
+            else if (I.op == XP_FDIV)  sub = !memf ? (I.ud ? FPU_FDIV_STI : FPU_FDIV_ST0) : (I.sz == 4 ? FPU_M_FDIV32 : FPU_M_FDIV64);
+            else if (I.op == XP_FDIVR) sub = !memf ? (I.ud ? FPU_FDIVR_STI : FPU_FDIVR_ST0) : (I.sz == 4 ? FPU_M_FDIVR32 : FPU_M_FDIVR64);
+            else if (I.op == XP_FIADD) sub = (I.sz == 2 ? FPU_M_FIADD16 : FPU_M_FIADD32);
+            else if (I.op == XP_FIMUL) sub = (I.sz == 2 ? FPU_M_FIMUL16 : FPU_M_FIMUL32);
+            else if (I.op == XP_FICOM) sub = (I.sz == 2 ? FPU_M_FICOM16 : FPU_M_FICOM32);
+            else if (I.op == XP_FICOMP) sub = (I.sz == 2 ? FPU_M_FICOMP16 : FPU_M_FICOMP32);
+            else if (I.op == XP_FISUB) sub = (I.sz == 2 ? FPU_M_FISUB16 : FPU_M_FISUB32);
+            else if (I.op == XP_FISUBR) sub = (I.sz == 2 ? FPU_M_FISUBR16 : FPU_M_FISUBR32);
+            else if (I.op == XP_FIDIV) sub = (I.sz == 2 ? FPU_M_FIDIV16 : FPU_M_FIDIV32);
+            else if (I.op == XP_FIDIVR) sub = (I.sz == 2 ? FPU_M_FIDIVR16 : FPU_M_FIDIVR32);
+            else if (I.op == XP_FCOM)  sub = !memf ? FPU_FCOM_STI  : (I.sz == 4 ? FPU_M_FCOM32 : FPU_M_FCOM64);
+            else if (I.op == XP_FCOMP) sub = !memf ? FPU_FCOMP_STI : (I.sz == 4 ? FPU_M_FCOMP32 : FPU_M_FCOMP64);
+            else if (I.op == XP_FBLD)  sub = FPU_M_FBLD;
+            else if (I.op == XP_FBSTP) sub = FPU_M_FBSTP;
+            else if (I.op == XP_FSTSW) sub = memf ? FPU_M_FSTSW : FPU_FSTSW_AX;
+            else if (I.op == XP_FSTCW) sub = FPU_M_FSTCW;
+            else if (I.op == XP_FLDCW) sub = FPU_M_FLDCW;
+            if (sub < 0) { F.why = "lifter: fpu sub cozulemedi"; return F; }
+            if (memf) { L.eop(OP_FPU_MEM); L.e((u8)sub); L.emem(I.mem, I); }
+            else      { L.eop(OP_FPU_ST);  L.e((u8)sub); L.e((u8)(I.r1 & 7)); }
+            snprintf(buf, sizeof buf, "%s%s", "fpu-", I.text.c_str());
+            break;
+        }
+        case XP_FXCH: case XP_FFREE: case XP_FFREEP:
+        case XP_FADDP: case XP_FMULP: case XP_FSUBP: case XP_FSUBRP:
+        case XP_FDIVP: case XP_FDIVRP:
+        case XP_FCOMPP: case XP_FUCOMPP:
+        case XP_FCOMI: case XP_FCOMIP: case XP_FUCOMI: case XP_FUCOMIP: {
+            int sub;
+            switch (I.op) {
+            case XP_FXCH:   sub = FPU_FXCH; break;
+            case XP_FFREE:  sub = FPU_FFREE; break;
+            case XP_FFREEP: sub = FPU_FFREEP; break;
+            case XP_FADDP:  sub = FPU_FADDP; break;
+            case XP_FMULP:  sub = FPU_FMULP; break;
+            case XP_FSUBP:  sub = FPU_FSUBP; break;
+            case XP_FSUBRP: sub = FPU_FSUBRP; break;
+            case XP_FDIVP:  sub = FPU_FDIVP; break;
+            case XP_FDIVRP: sub = FPU_FDIVRP; break;
+            case XP_FCOMPP: sub = FPU_FCOMPP; break;
+            case XP_FUCOMPP: sub = FPU_FUCOMPP; break;
+            case XP_FCOMI:  sub = FPU_FCOMI; break;
+            case XP_FCOMIP: sub = FPU_FCOMIP; break;
+            case XP_FUCOMI: sub = FPU_FUCOMI; break;
+            default:        sub = FPU_FUCOMIP; break;
+            }
+            L.eop(OP_FPU_ST); L.e((u8)sub); L.e((u8)(I.r1 < 0 ? 0 : (I.r1 & 7)));
+            snprintf(buf, sizeof buf, "fpu-st%d", sub);
+            break;
+        }
+        case XP_FNOP: L.eop(OP_FPU_ST); L.e((u8)FPU_FNOP); L.e((u8)0); snprintf(buf, sizeof buf, "fnop"); break;
+        case XP_FWAIT: L.eop(OP_FPU_ST); L.e((u8)FPU_FWAIT); L.e((u8)0); snprintf(buf, sizeof buf, "fwait"); break;
+        case XP_FCLEX: L.eop(OP_FPU_ST); L.e((u8)FPU_FCLEX); L.e((u8)0); snprintf(buf, sizeof buf, "fclex"); break;
+        case XP_FINIT: L.eop(OP_FPU_ST); L.e((u8)FPU_FINIT); L.e((u8)0); snprintf(buf, sizeof buf, "finit"); break;
+        case XP_FDECSTP: L.eop(OP_FPU_ST); L.e((u8)FPU_FDECSTP); L.e((u8)0); snprintf(buf, sizeof buf, "fdecstp"); break;
+        case XP_FINCSTP: L.eop(OP_FPU_ST); L.e((u8)FPU_FINCSTP); L.e((u8)0); snprintf(buf, sizeof buf, "fincstp"); break;
+        case XP_FCHS: L.eop(OP_FPU_ST); L.e((u8)FPU_FCHS); L.e((u8)0); snprintf(buf, sizeof buf, "fchs"); break;
+        case XP_FABS: L.eop(OP_FPU_ST); L.e((u8)FPU_FABS); L.e((u8)0); snprintf(buf, sizeof buf, "fabs"); break;
+        case XP_FSQRT: L.eop(OP_FPU_ST); L.e((u8)FPU_FSQRT); L.e((u8)0); snprintf(buf, sizeof buf, "fsqrt"); break;
+        case XP_FTST: L.eop(OP_FPU_ST); L.e((u8)FPU_FTST); L.e((u8)0); snprintf(buf, sizeof buf, "ftst"); break;
+        case XP_FXAM: L.eop(OP_FPU_ST); L.e((u8)FPU_FXAM); L.e((u8)0); snprintf(buf, sizeof buf, "fxam"); break;
+        case XP_FSIN: L.eop(OP_FPU_ST); L.e((u8)FPU_FSIN); L.e((u8)0); snprintf(buf, sizeof buf, "fsin"); break;
+        case XP_FCOS: L.eop(OP_FPU_ST); L.e((u8)FPU_FCOS); L.e((u8)0); snprintf(buf, sizeof buf, "fcos"); break;
+        case XP_FSINCOS: L.eop(OP_FPU_ST); L.e((u8)FPU_FSINCOS); L.e((u8)0); snprintf(buf, sizeof buf, "fsincos"); break;
+        case XP_FPTAN: L.eop(OP_FPU_ST); L.e((u8)FPU_FPTAN); L.e((u8)0); snprintf(buf, sizeof buf, "fptan"); break;
+        case XP_FPATAN: L.eop(OP_FPU_ST); L.e((u8)FPU_FPATAN); L.e((u8)0); snprintf(buf, sizeof buf, "fpatan"); break;
+        case XP_FYL2X: L.eop(OP_FPU_ST); L.e((u8)FPU_FYL2X); L.e((u8)0); snprintf(buf, sizeof buf, "fyl2x"); break;
+        case XP_FYL2XP1: L.eop(OP_FPU_ST); L.e((u8)FPU_FYL2XP1); L.e((u8)0); snprintf(buf, sizeof buf, "fyl2xp1"); break;
+        case XP_F2XM1: L.eop(OP_FPU_ST); L.e((u8)FPU_F2XM1); L.e((u8)0); snprintf(buf, sizeof buf, "f2xm1"); break;
+        case XP_FPREM: L.eop(OP_FPU_ST); L.e((u8)FPU_FPREM); L.e((u8)0); snprintf(buf, sizeof buf, "fprem"); break;
+        case XP_FPREM1: L.eop(OP_FPU_ST); L.e((u8)FPU_FPREM1); L.e((u8)0); snprintf(buf, sizeof buf, "fprem1"); break;
+        case XP_FRNDINT: L.eop(OP_FPU_ST); L.e((u8)FPU_FRNDINT); L.e((u8)0); snprintf(buf, sizeof buf, "frndint"); break;
+        case XP_FSCALE: L.eop(OP_FPU_ST); L.e((u8)FPU_FSCALE); L.e((u8)0); snprintf(buf, sizeof buf, "fscale"); break;
+        case XP_FXTRACT: L.eop(OP_FPU_ST); L.e((u8)FPU_FXTRACT); L.e((u8)0); snprintf(buf, sizeof buf, "fxtract"); break;
+        case XP_FLD1: L.eop(OP_FPU_ST); L.e((u8)FPU_FLD1); L.e((u8)0); snprintf(buf, sizeof buf, "fld1"); break;
+        case XP_FLDZ: L.eop(OP_FPU_ST); L.e((u8)FPU_FLDZ); L.e((u8)0); snprintf(buf, sizeof buf, "fldz"); break;
+        case XP_FLDPI: L.eop(OP_FPU_ST); L.e((u8)FPU_FLDPI); L.e((u8)0); snprintf(buf, sizeof buf, "fldpi"); break;
+        case XP_FLDL2T: L.eop(OP_FPU_ST); L.e((u8)FPU_FLDL2T); L.e((u8)0); snprintf(buf, sizeof buf, "fldl2t"); break;
+        case XP_FLDL2E: L.eop(OP_FPU_ST); L.e((u8)FPU_FLDL2E); L.e((u8)0); snprintf(buf, sizeof buf, "fldl2e"); break;
+        case XP_FLDLG2: L.eop(OP_FPU_ST); L.e((u8)FPU_FLDLG2); L.e((u8)0); snprintf(buf, sizeof buf, "fldlg2"); break;
+        case XP_FLDLN2: L.eop(OP_FPU_ST); L.e((u8)FPU_FLDLN2); L.e((u8)0); snprintf(buf, sizeof buf, "fldln2"); break;
+        case XP_FCMOV: {
+            /* cc (x86 JCC sirasi) -> FPU_FCMOV* subop */
+            int sub;
+            switch (I.cc) {
+            case CC_B:  sub = FPU_FCMOVB; break;
+            case CC_E:  sub = FPU_FCMOVE; break;
+            case CC_BE: sub = FPU_FCMOVBE; break;
+            case CC_P:  sub = FPU_FCMOVU; break;   /* unordered = PF=1 */
+            case CC_AE: sub = FPU_FCMOVNB; break;
+            case CC_NE: sub = FPU_FCMOVNE; break;
+            case CC_A:  sub = FPU_FCMOVNBE; break;
+            case CC_NP: sub = FPU_FCMOVNU; break;
+            default: F.why = "lifter: fcmov cc yok"; return F;
+            }
+            L.eop(OP_FPU_ST); L.e((u8)sub); L.e((u8)(I.r1 & 7));
+            snprintf(buf, sizeof buf, "fcmov st,st(%d) cc%d", I.r1 & 7, I.cc);
+            break;
+        }
         default:
             F.why = "lifter: bilinmeyen islem";
             return F;
@@ -543,6 +671,17 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
         L.eop(OP_RET);
         F.notes.push_back("  [1.0.0-FIX] bolge-siniri kesigi: govde RET ile bitmiyordu — "
                           "yapay OP_RET eklendi (OOB akis-tasma kok-nedeni kapandi)");
+    }
+    /* 1.1.0: jcc->end hedefi — uc RET garantisini jcc hedefiyle birlestir.
+       !last_ret: kok-fix RET az once Y=size-1'de emit edildi -> hedef Y.
+       last_ret:  govde RET'i akista; jcc icin sona EK RET (dogrusal akis
+       ulasmaz). Iki durumda da OP_RET bc-ofseti pc2ic[end]'e yazilir. */
+    if (jcc_to_end) {
+        u32 end_ret_bc;
+        if (!last_ret) end_ret_bc = (u32)F.plain.size() - 1;   // kok-fix RET
+        else         { end_ret_bc = (u32)F.plain.size(); L.eop(OP_RET); }
+        pc2ic[end] = end_ret_bc;
+        F.notes.push_back("  [1.1.0-FIX] jcc->bolge-sonu: son OP_RET'e yonlendirildi");
     }
 
     // 0.4.1 DÜZELTME (0.3.0 gizli bug): yerel retimm hicbir zaman F.retimm'e

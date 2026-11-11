@@ -34,6 +34,12 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
         if (b == 0x64 || b == 0x65) { I.seg = b - 0x60; i++; continue; }  /* 4=FS 5=GS */
         if (b == 0xF2) { I.rep = 3; i++; continue; }   /* repne */
         if (b == 0xF3) { I.rep = I.rep ? I.rep : 2; i++; continue; }  /* rep(e); pause F3 90 */
+        /* 1.1.0-A4: 0x9B (FWAIT) — FPU op'u oncesinde bekleme-oneki
+           (9B DF E0 fstsw ax, 9B D9 /7 fstcw); tek basina FWAIT talimati. */
+        if (b == 0x9B) {
+            if (i + 1 < maxlen && p[i + 1] >= 0xD8 && p[i + 1] <= 0xDF) { i++; continue; }
+            I.op = XP_FWAIT; I.len = (u32)(i + 1); I.text = "fwait"; return I;
+        }
         if (is64 && b >= 0x40 && b <= 0x4F) {
             rex = true; rexw = (b >> 3) & 1; rexr = (b >> 2) & 1;
             rexx = (b >> 1) & 1; rexb = b & 1; i++; continue;
@@ -575,6 +581,243 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
                  if (!read_modrm(sz, rg, m, true)) return I;
                  if (m.present) { I.mem = m; I.r1 = rg; } else { I.r1 = rg; I.r2 = m.base; }
                  break; }
+    /* ---- 1.1.0-A4-FPU: x87 uzayi (D8-DF) — UniversalObfuscator paritesi.
+       FPU bellek-form boyutlari aileden gelir (0x66 oneki etkisiz);
+       mod=3 formlarda r1 = st(i) (0..7). RED'ler (FLDENV/FSTENV/FSAVE/
+       FRSTOR/ftu yok-formlari) XP_UNKNOWN doner -> lifter duru RED. */
+    case 0xD8: case 0xD9: case 0xDA: case 0xDB:
+    case 0xDC: case 0xDD: case 0xDE: case 0xDF: {
+        int rg; MemOp m;
+        if (!read_modrm(4, rg, m, true)) return I;
+        bool rform = !m.present;
+        int si = rform ? (m.base & 7) : 0;    /* st(i) indeksi (REX.B FPU'da yok) */
+#ifdef A4DBG
+        fprintf(stderr, "[A4DBG] op=%02x modrm-in rg=%d rform=%d si=%d\n", (int)op, (int)rg, (int)rform, (int)si);
+#endif
+        switch (op) {
+        case 0xD8:
+            if (rform) {
+                switch (rg) {
+                case 0: I.op = XP_FADD;  I.ud = 0; I.r1 = si; break;   /* D8 C0+i ST0+=STi */
+                case 1: I.op = XP_FMUL;  I.ud = 0; I.r1 = si; break;   /* D8 C8+i ST0*=STi */
+                case 2: I.op = XP_FCOM;  I.ud = 0; I.r1 = si; break;   /* D8 D0+i */
+                case 3: I.op = XP_FCOMP; I.ud = 0; I.r1 = si; break;   /* D8 D8+i */
+                case 4: I.op = XP_FSUB;  I.ud = 0; I.r1 = si; break;   /* D8 E0+i ST0-=STi */
+                case 5: I.op = XP_FSUBR; I.ud = 0; I.r1 = si; break;   /* D8 E8+i ST0=STi-ST0 */
+                case 6: I.op = XP_FDIV;  I.ud = 0; I.r1 = si; break;   /* D8 F0+i */
+                case 7: I.op = XP_FDIVR; I.ud = 0; I.r1 = si; break;   /* D8 F8+i */
+                }
+            } else {
+                switch (rg) {
+                case 0: I.op = XP_FADD;  I.sz = 4; I.mem = m; break;
+                case 1: I.op = XP_FMUL;  I.sz = 4; I.mem = m; break;
+                case 2: I.op = XP_FCOM;  I.sz = 4; I.mem = m; break;
+                case 3: I.op = XP_FCOMP; I.sz = 4; I.mem = m; break;
+                case 4: I.op = XP_FSUB;  I.sz = 4; I.mem = m; break;
+                case 5: I.op = XP_FSUBR; I.sz = 4; I.mem = m; break;
+                case 6: I.op = XP_FDIV;  I.sz = 4; I.mem = m; break;
+                case 7: I.op = XP_FDIVR; I.sz = 4; I.mem = m; break;
+                }
+            }
+            break;
+        case 0xD9:
+            if (rform) {
+                if (rg == 0)      { I.op = XP_FLD;    I.r1 = si; break; }
+                if (rg == 1)      { I.op = XP_FXCH;   I.r1 = si; break; }
+                if (rg == 2 && si == 0) { I.op = XP_FNOP; break; }         /* D9 D0 */
+                if (rg == 3)      { I.op = XP_FSTP;   I.r1 = si; break; }  /* D9 D8+i */
+                if (rg == 4) {
+                    if (si == 0) I.op = XP_FCHS;
+                    else if (si == 1) I.op = XP_FABS;
+                    else if (si == 4) I.op = XP_FTST;
+                    else if (si == 5) I.op = XP_FXAM;
+                    break;
+                }
+                if (rg == 5) {
+                    if (si == 0) I.op = XP_FLD1;
+                    else if (si == 1) I.op = XP_FLDL2T;
+                    else if (si == 2) I.op = XP_FLDL2E;
+                    else if (si == 3) I.op = XP_FLDPI;
+                    else if (si == 4) I.op = XP_FLDLG2;
+                    else if (si == 5) I.op = XP_FLDLN2;
+                    else if (si == 6) I.op = XP_FLDZ;
+                    break;
+                }
+                if (rg == 6) {
+                    if (si == 0) I.op = XP_F2XM1;
+                    else if (si == 1) I.op = XP_FYL2X;
+                    else if (si == 2) I.op = XP_FPTAN;
+                    else if (si == 3) I.op = XP_FPATAN;
+                    else if (si == 4) I.op = XP_FXTRACT;
+                    else if (si == 5) I.op = XP_FPREM1;
+                    else if (si == 6) I.op = XP_FDECSTP;
+                    else if (si == 7) I.op = XP_FINCSTP;
+                    break;
+                }
+                if (rg == 7) {
+                    if (si == 0) I.op = XP_FPREM;
+                    else if (si == 1) I.op = XP_FYL2XP1;
+                    else if (si == 2) I.op = XP_FSQRT;
+                    else if (si == 3) I.op = XP_FSINCOS;
+                    else if (si == 4) I.op = XP_FRNDINT;
+                    else if (si == 5) I.op = XP_FSCALE;
+                    else if (si == 6) I.op = XP_FSIN;
+                    else if (si == 7) I.op = XP_FCOS;
+                    break;
+                }
+            } else {
+                switch (rg) {
+                case 0: I.op = XP_FLD;   I.sz = 4; I.mem = m; break;
+                case 2: I.op = XP_FST;   I.sz = 4; I.mem = m; break;
+                case 3: I.op = XP_FSTP;  I.sz = 4; I.mem = m; break;
+                case 5: I.op = XP_FLDCW; I.sz = 2; I.mem = m; break;
+                case 7: I.op = XP_FSTCW; I.sz = 2; I.mem = m; break;
+                default: return I;   /* FLDENV/FSTENV/yer. -> RED */
+                }
+            }
+            break;
+        case 0xDA:
+            if (rform) {
+                if (rg == 5 && si == 1) { I.op = XP_FUCOMPP; break; }  /* DA E9 */
+                switch (rg) {
+                case 0: I.op = XP_FCMOV; I.cc = 2; I.r1 = si; break;  /* FCMOVB */
+                case 1: I.op = XP_FCMOV; I.cc = 4; I.r1 = si; break;  /* FCMOVE */
+                case 2: I.op = XP_FCMOV; I.cc = 6; I.r1 = si; break;  /* FCMOVBE */
+                case 3: I.op = XP_FCMOV; I.cc = 10; I.r1 = si; break; /* FCMOVU (PF) */
+                case 4: I.op = XP_FCMOV; I.cc = 3; I.r1 = si; break;  /* FCMOVNB */
+                case 5: I.op = XP_FCMOV; I.cc = 5; I.r1 = si; break;  /* FCMOVNE */
+                case 6: I.op = XP_FCMOV; I.cc = 7; I.r1 = si; break;  /* FCMOVNBE */
+                case 7: I.op = XP_FCMOV; I.cc = 11; I.r1 = si; break; /* FCMOVNU (NP) */
+                }
+            } else {
+                switch (rg) {
+                case 0: I.op = XP_FIADD;  I.sz = 4; I.mem = m; break;
+                case 1: I.op = XP_FIMUL;  I.sz = 4; I.mem = m; break;
+                case 2: I.op = XP_FICOM;  I.sz = 4; I.mem = m; break;
+                case 3: I.op = XP_FICOMP; I.sz = 4; I.mem = m; break;
+                case 4: I.op = XP_FISUBR; I.sz = 4; I.mem = m; break;
+                case 5: I.op = XP_FISUB;  I.sz = 4; I.mem = m; break;
+                case 6: I.op = XP_FIDIVR; I.sz = 4; I.mem = m; break;
+                case 7: I.op = XP_FIDIV;  I.sz = 4; I.mem = m; break;
+                }
+            }
+            break;
+        case 0xDB:
+            if (rform) {
+                if (rg == 4) {
+                    if (si == 2) I.op = XP_FCLEX;      /* DB E2 (9B DB E2) */
+                    else if (si == 3) I.op = XP_FINIT; /* DB E3 (9B DB E3) */
+                    break;
+                }
+                if (rg == 5) { I.op = XP_FUCOMI; I.r1 = si; break; }
+                if (rg == 6) { I.op = XP_FCOMI;  I.r1 = si; break; }
+            } else {
+                switch (rg) {
+                case 0: I.op = XP_FILD;   I.sz = 4; I.mem = m; break;
+                case 1: I.op = XP_FISTTP; I.sz = 4; I.mem = m; break;
+                case 2: I.op = XP_FIST;   I.sz = 4; I.mem = m; break;
+                case 3: I.op = XP_FISTP;  I.sz = 4; I.mem = m; break;
+                case 5: I.op = XP_FLD;    I.sz = 10; I.mem = m; break;
+                case 7: I.op = XP_FSTP;   I.sz = 10; I.mem = m; break;
+                default: return I;
+                }
+            }
+            break;
+        case 0xDC:
+            if (rform) {
+                switch (rg) {
+                case 0: I.op = XP_FADD;  I.ud = 1; I.r1 = si; break;   /* DC C0+i STi+=ST0 */
+                case 1: I.op = XP_FMUL;  I.ud = 1; I.r1 = si; break;   /* DC C8+i STi*=ST0 */
+                case 2: I.op = XP_FCOM;  I.ud = 1; I.r1 = si; break;
+                case 3: I.op = XP_FCOMP; I.ud = 1; I.r1 = si; break;
+                case 4: I.op = XP_FSUBR; I.ud = 1; I.r1 = si; break;   /* DC E0+i STi=ST0-STi */
+                case 5: I.op = XP_FSUB;  I.ud = 1; I.r1 = si; break;   /* DC E8+i STi-=ST0 */
+                case 6: I.op = XP_FDIVR; I.ud = 1; I.r1 = si; break;   /* DC F0+i */
+                case 7: I.op = XP_FDIV;  I.ud = 1; I.r1 = si; break;   /* DC F8+i */
+                }
+            } else {
+                switch (rg) {
+                case 0: I.op = XP_FADD;  I.sz = 8; I.mem = m; break;
+                case 1: I.op = XP_FMUL;  I.sz = 8; I.mem = m; break;
+                case 2: I.op = XP_FCOM;  I.sz = 8; I.mem = m; break;
+                case 3: I.op = XP_FCOMP; I.sz = 8; I.mem = m; break;
+                case 4: I.op = XP_FSUB;  I.sz = 8; I.mem = m; break; /* DC 20 = fsub m64 (empirik: mem tablo TERS DEGIL) */
+                case 5: I.op = XP_FSUBR; I.sz = 8; I.mem = m; break; /* DC 28 = fsubr m64 */
+                case 6: I.op = XP_FDIV;  I.sz = 8; I.mem = m; break; /* DC 30 = fdiv m64 */
+                case 7: I.op = XP_FDIVR; I.sz = 8; I.mem = m; break; /* DC 38 = fdivr m64 */
+                }
+            }
+            break;
+        case 0xDD:
+            if (rform) {
+                switch (rg) {
+                case 0: I.op = XP_FFREE;   I.r1 = si; break;
+                case 2: I.op = XP_FST;     I.r1 = si; break;   /* DD D0+i = FST ST(i) (reg=2) */
+                case 3: I.op = XP_FSTP;    I.r1 = si; break;   /* DD D8+i = FSTP ST(i) (reg=3) */
+                case 4: I.op = XP_FUCOM;   I.r1 = si; break;   /* DD E0+i */
+                case 5: I.op = XP_FUCOMP;  I.r1 = si; break;   /* DD E8+i */
+                default: return I;
+                }
+            } else {
+                switch (rg) {
+                case 0: I.op = XP_FLD;    I.sz = 8; I.mem = m; break;
+                case 2: I.op = XP_FST;    I.sz = 8; I.mem = m; break;
+                case 3: I.op = XP_FSTP;   I.sz = 8; I.mem = m; break;
+                case 7: I.op = XP_FSTSW;  I.sz = 2; I.mem = m; break; /* DD /7 (fnstsw m16) */
+                default: return I;   /* FRSTOR/FNSAVE -> RED */
+                }
+            }
+            break;
+        case 0xDE:
+            if (rform) {
+                if (rg == 2 && si == 1) { I.op = XP_FCOMPP; break; }  /* DE D9 */
+                switch (rg) {
+                case 0: I.op = XP_FADDP;  I.r1 = si; break;
+                case 1: I.op = XP_FMULP;  I.r1 = si; break;
+                case 3: I.op = XP_FSUBRP; I.r1 = si; break;   /* DE E0+i */
+                case 4: I.op = XP_FSUBP;  I.r1 = si; break;   /* DE E8+i */
+                case 5: I.op = XP_FDIVRP; I.r1 = si; break;   /* DE F0+i */
+                case 6: I.op = XP_FDIVP;  I.r1 = si; break;   /* DE F8+i */
+                default: return I;
+                }
+            } else {
+                switch (rg) {
+                case 0: I.op = XP_FIADD;  I.sz = 2; I.mem = m; break;
+                case 1: I.op = XP_FIMUL;  I.sz = 2; I.mem = m; break;
+                case 2: I.op = XP_FICOM;  I.sz = 2; I.mem = m; break;
+                case 3: I.op = XP_FICOMP; I.sz = 2; I.mem = m; break;
+                case 4: I.op = XP_FISUBR; I.sz = 2; I.mem = m; break;
+                case 5: I.op = XP_FISUB;  I.sz = 2; I.mem = m; break;
+                case 6: I.op = XP_FIDIVR; I.sz = 2; I.mem = m; break;
+                case 7: I.op = XP_FIDIV;  I.sz = 2; I.mem = m; break;
+                }
+            }
+            break;
+        case 0xDF:
+            if (rform) {
+                /* DF E0 = fstsw ax: mod=3, reg=4, rm=0 (empirik: nasm/gcc)
+                   DF E8+i = fucomip (reg=5), DF F0+i = fcomip (reg=6) */
+                if (rg == 4 && si == 0) { I.op = XP_FSTSW; break; }  /* DF E0 = fstsw ax */
+                if (rg == 5) { I.op = XP_FUCOMIP; I.r1 = si; break; } /* DF E8+i */
+                if (rg == 6) { I.op = XP_FCOMIP;  I.r1 = si; break; } /* DF F0+i */
+                return I;
+            } else {
+                switch (rg) {
+                case 0: I.op = XP_FILD;   I.sz = 2; I.mem = m; break;
+                case 1: I.op = XP_FISTTP; I.sz = 2; I.mem = m; break;
+                case 2: I.op = XP_FIST;   I.sz = 2; I.mem = m; break;
+                case 3: I.op = XP_FISTP;  I.sz = 2; I.mem = m; break;
+                case 4: I.op = XP_FBLD;   I.sz = 10; I.mem = m; break;
+                case 5: I.op = XP_FILD;   I.sz = 8; I.mem = m; break;
+                case 6: I.op = XP_FBSTP;  I.sz = 10; I.mem = m; break;
+                case 7: I.op = XP_FISTP;  I.sz = 8; I.mem = m; break;
+                }
+            }
+            break;
+        }
+        I.text = "fpu";
+        break;
+    }
     default:
         I.text = "opcode desteklenmiyor";
         return I;
