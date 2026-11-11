@@ -242,6 +242,39 @@ static void ud_of(MInsn& m) {
     case XP_CWDE: RW(0); break;
     case XP_CDQ: R(0); W(2); break;
     case XP_IDIV: d |= FFLAG; R(0); R(2); RW(0); RW(2); R(I.r1); break;
+    /* ---- 0.9.0-DeepVM: yeni komutlarin uses/defs (muhafazakar) ---- */
+    case XP_MUL:   /* RDX:RAX = RAX * r/m (sz1: AX = AL*r8) */
+        d |= FFLAG; MEM(); R(0); R(I.r1); RW(0); RW(2); break;
+    case XP_DIV:   /* RDX:RAX / r/m — bayraklar tanimsiz */
+        d |= FFLAG; MEM(); R(0); R(2); R(I.r1); RW(0); RW(2); break;
+    case XP_BT:    /* CF <- test bit; BTS/BTR/BTC r/m yazar */
+        d |= FFLAG; MEM(); if (!I.mem.present) R(I.r1);
+        if (I.immsz > 0) { /* imm bit */ }
+        else R(I.r2);
+        if (I.ud != 0) { if (!I.mem.present) RW(I.r1); }
+        break;
+    case XP_SHLD: case XP_SHRD:
+        d |= FFLAG; RW(I.r1); R(I.r2); if (I.immsz == -1) R(1); break;
+    case XP_XADD:  /* dst += src; src <- eski dst — ikisi de RW */
+        d |= FFLAG; MEM(); if (!I.mem.present) RW(I.r1); RW(I.r2); break;
+    case XP_IMUL_RM:
+        d |= FFLAG; MEM(); RW(I.r1); break;
+    case XP_STR:   /* ESI/EDI (+ECX rep, +EAX lods/stos/scas) + DF yonu */
+        d |= FFLAG; R(6); R(7);
+        if (I.rep) R(1);
+        if (I.ud == 1 || I.ud == 2 || I.ud == 3) R(0);   /* stos/lods/scas: rax */
+        if (I.ud == 2) RW(0);                            /* lods: rax <- [rsi] */
+        RW(6); if (I.ud == 0 || I.ud == 4) RW(7);
+        if (I.rep) RW(1);
+        break;
+    case XP_LOOP:  /* --rcx; loope/loopne ZF okur */
+        R(1); RW(1); if (I.cc != 0) u |= FFLAG; break;
+    case XP_JECXZ: R(1); break;
+    case XP_SETFLAG: d |= FFLAG; break;
+    case XP_PUSHF: u |= FFLAG; W(4); break;
+    case XP_POPF:  d |= FFLAG; R(4); break;
+    case XP_SAHF:  d |= FFLAG; R(0); break;   /* AH kaynak */
+    case XP_LAHF:  RW(0); break;              /* AH <- flags */
     case XP_NEG: d |= FFLAG; MEM(); if (!I.mem.present) RW(I.r1); break;
     case XP_NOT: MEM(); if (!I.mem.present) RW(I.r1); break;
     case XP_LEAVE: R(5); W(4); W(5); break;

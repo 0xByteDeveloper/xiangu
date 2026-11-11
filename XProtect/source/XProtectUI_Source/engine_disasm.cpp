@@ -19,21 +19,21 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
     bool op66 = false;
 
     // --- on ekler ---
-    /* 0.8.0: coklu legacy onek guvenle yutulur (gcc hizalama dolgusu
-       "66 66 2e 0f 1f ..." cok-onekli NOP uretir). Segment/addrsize/
-       rep onekleri anlamsizlastirici degilse AKISI DEGISTIRMEZ:
-       - 0x2E/0x36/0x3E/0x26/0x64/0x65: segment ust-on-ek (nop dolgusunda
-         anlamsiz; gercek bellek isleminde default segment'ten sapma
-         VM'de zaten modellenmez) -> yut.
-       - 0x67 addrsize: 64-bit kodda 32-bit adresleme dolgusu -> yut.
-       - 0xF2/0xF3 rep: yalniz string islemlerinde anlamli (desteklenmez
-         zaten) -> yut. 0x66: operand boyutu (mevcut davranis). */
+    /* 0.9.0-DeepVM: segment ve rep onekleri ARTIK YUTULMAZ — yakalanir:
+       - 0x64/0x65 (FS/GS): bellek isleminde gercek taban gerekir (metin2
+         fs:[0x18] TEB erisimi). Insn.seg'e yazilir; belleksiz talimatta
+         onek dekorektir -> yutulmus gibi davranilir.
+       - 0xF2/0xF3 (repne/rep): string islemlerinde Insn.rep'e yazilir;
+         diger talimatlarda anlamsiz (F3 90 = pause -> NOP zaten).
+       - 0x2E/0x36/0x3E/0x26 (CS/SS/DS/ES) ve 0x67: duzlem segmentlerde
+         taban 0 oldugu icin anlamsiz -> yut (eski davranis). */
     while (i < maxlen) {
         u8 b = p[i];
         if (b == 0x66) { op66 = true; i++; continue; }
-        if (b == 0x67 || b == 0xF2 || b == 0xF3 ||
-            b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 ||
-            b == 0x64 || b == 0x65) { i++; continue; }
+        if (b == 0x67 || b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26) { i++; continue; }
+        if (b == 0x64 || b == 0x65) { I.seg = b - 0x60; i++; continue; }  /* 4=FS 5=GS */
+        if (b == 0xF2) { I.rep = 3; i++; continue; }   /* repne */
+        if (b == 0xF3) { I.rep = I.rep ? I.rep : 2; i++; continue; }  /* rep(e); pause F3 90 */
         if (is64 && b >= 0x40 && b <= 0x4F) {
             rex = true; rexw = (b >> 3) & 1; rexr = (b >> 2) & 1;
             rexx = (b >> 1) & 1; rexb = b & 1; i++; continue;
@@ -50,6 +50,8 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
         if (i >= maxlen) return false;
         u8 mrm = p[i++];
         int mod = mrm >> 6, rg = (mrm >> 3) & 7, rm = mrm & 7;
+        /* NOT: reg alanı GRP3/GRP4/GRP5/C0-C1'de alt-opcode'dur — remap YOK.
+           Byte-op reg alanı yüksek-bayt kayıt çözümü yalniz 0x88-0x8B'de yapılır. */
         regf = rg + (rexr ? 8 : 0);
         if (mod == 3) {
             m.present = false;
@@ -139,6 +141,42 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
     }
     case 0x9B: I.op = XP_NOP; break;
     case 0xCC: I.op = XP_INT3; break;
+    /* 0.9.0-DeepVM: bayrak/segme/dongu talimatlari */
+    case 0x9C: if (op66) { I.text = "pushfw desteklenmiyor"; return I; }
+               I.op = XP_PUSHF; break;
+    case 0x9D: if (op66) { I.text = "popfw desteklenmiyor"; return I; }
+               I.op = XP_POPF; break;
+    case 0x9E: I.op = XP_SAHF; break;
+    case 0x9F: I.op = XP_LAHF; break;
+    case 0xF5: I.op = XP_SETFLAG; I.ud = 2; break;  /* CMC */
+    case 0xF8: I.op = XP_SETFLAG; I.ud = 0; break;  /* CLC */
+    case 0xF9: I.op = XP_SETFLAG; I.ud = 1; break;  /* STC */
+    case 0xFC: I.op = XP_SETFLAG; I.ud = 3; break;  /* CLD */
+    case 0xFD: I.op = XP_SETFLAG; I.ud = 4; break;  /* STD */
+    case 0xE0: I.op = XP_LOOP; I.cc = 2;  /* loopne */
+               I.imm = read_imm(1); I.immsz = 1;
+               I.target = pc + i + (u64)(long long)(signed char)(u8)I.imm; break;
+    case 0xE1: I.op = XP_LOOP; I.cc = 1;  /* loope */
+               I.imm = read_imm(1); I.immsz = 1;
+               I.target = pc + i + (u64)(long long)(signed char)(u8)I.imm; break;
+    case 0xE2: I.op = XP_LOOP; I.cc = 0;  /* loop */
+               I.imm = read_imm(1); I.immsz = 1;
+               /* 67 onekli bicimde i=2 (hedef pc+3), icsiz i=1 (pc+2) */
+               I.target = pc + i + (u64)(long long)(signed char)(u8)I.imm; break;
+    case 0xE3: I.op = XP_JECXZ;
+               I.imm = read_imm(1); I.immsz = 1;
+               I.target = pc + i + (u64)(long long)(signed char)(u8)I.imm; break;
+    /* 0.9.0-DeepVM: string islemleri (A4-A7/AA-AF) + rep onekleri */
+    case 0xA4: case 0xA5: I.op = XP_STR; I.ud = 0;   /* movs */
+        I.sz = (op == 0xA4) ? 1 : (op66 ? 2 : (is64 && rexw ? 8 : 4)); break;
+    case 0xAA: case 0xAB: I.op = XP_STR; I.ud = 1;   /* stos */
+        I.sz = (op == 0xAA) ? 1 : (op66 ? 2 : (is64 && rexw ? 8 : 4)); break;
+    case 0xAC: case 0xAD: I.op = XP_STR; I.ud = 2;   /* lods */
+        I.sz = (op == 0xAC) ? 1 : (op66 ? 2 : (is64 && rexw ? 8 : 4)); break;
+    case 0xAE: case 0xAF: I.op = XP_STR; I.ud = 3;   /* scas */
+        I.sz = (op == 0xAE) ? 1 : (op66 ? 2 : (is64 && rexw ? 8 : 4)); break;
+    case 0xA6: case 0xA7: I.op = XP_STR; I.ud = 4;   /* cmps */
+        I.sz = (op == 0xA6) ? 1 : (op66 ? 2 : (is64 && rexw ? 8 : 4)); break;
     case 0x0F: {
         if (i >= maxlen) return I;
         u8 op2 = p[i++];
@@ -172,8 +210,61 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
             MemOp m;
             if (!read_modrm(sz, regf, m, true)) return I;
             I.r1 = regf;
-            if (m.present) { I.text = "imul r,r/m destegi yok"; return I; }
-            I.r2 = m.base;
+            /* 0.9.0: bellek formu artk destekli (OP_IMUL_RM) */
+            if (m.present) { I.mem = m; }
+            else I.r2 = m.base;
+        }
+        else if (op2 == 0xA3 || op2 == 0xAB || op2 == 0xB3 || op2 == 0xBB) {
+            /* 0.9.0: BT/BTS/BTR/BTC r/m(hedef), r(bit-kaynagi).
+               KURAL: I.r1 = hedef reg | -1(mem) ; I.r2 = kaynak reg | -1 */
+            I.op = XP_BT; I.ud = (op2 == 0xA3) ? 0 : (op2 == 0xAB) ? 1 : (op2 == 0xB3) ? 2 : 3;
+            I.sz = sz;
+            MemOp m;
+            if (!read_modrm(sz, regf, m, true)) return I;
+            if (m.present) { I.mem = m; I.r1 = -1; }
+            else           { I.r1 = m.base; }
+            I.r2 = regf;
+            I.immsz = 0;
+        }
+        else if (op2 == 0xBA) {
+            /* 0.9.0: BT ailesi r/m, imm8 (grp8). I.r1 = hedef reg | -1(mem). */
+            if (i >= maxlen) return I;
+            u8 mrm = p[i++];
+            int sub = (mrm >> 3) & 7;
+            if (sub < 4) { I.text = "grp8 bt degil"; return I; }
+            I.op = XP_BT; I.ud = sub - 4;   /* 4=BT 5=BTS 6=BTR 7=BTC */
+            I.sz = sz;
+            int mod = mrm >> 6, rm = mrm & 7;
+            if (mod == 3) {
+                I.r1 = rm + (rexb ? 8 : 0); I.r2 = -1;
+            } else {
+                i -= 1;                 /* modrm'i read_modrm'e birak */
+                MemOp m; int rg2;
+                if (!read_modrm(sz, rg2, m, true)) return I;
+                I.mem = m; I.r1 = -1; I.r2 = -1;
+            }
+            I.imm = read_imm(1); I.immsz = 1;
+        }
+        else if (op2 == 0xA4 || op2 == 0xA5 || op2 == 0xAC || op2 == 0xAD) {
+            /* 0.9.0: SHLD/SHRD r/m, r, imm8|CL */
+            I.op = (op2 == 0xA4 || op2 == 0xA5) ? XP_SHLD : XP_SHRD;
+            I.sz = (is64 && rexw) ? 8 : sz;
+            MemOp m;
+            if (!read_modrm(I.sz, regf, m, true)) return I;
+            if (m.present) { I.text = "shld/shrd bellek hedef"; return I; }
+            I.r1 = m.base;      /* hedef reg */
+            I.r2 = regf;        /* kaynak reg */
+            if (op2 == 0xA4 || op2 == 0xAC) { I.imm = read_imm(1); I.immsz = 1; }
+            else I.immsz = -1;  /* CL */
+        }
+        else if (op2 == 0xC0 || op2 == 0xC1) {
+            /* 0.9.0: XADD r/m, r */
+            I.op = XP_XADD;
+            I.sz = (op2 == 0xC0) ? 1 : sz;
+            MemOp m;
+            if (!read_modrm(I.sz, regf, m, true, I.sz == 1)) return I;
+            if (!m.present) { I.r1 = m.base; I.r2 = regf; }  /* hedef reg, kaynak reg */
+            else { I.mem = m; I.r1 = -1; I.r2 = regf; }
         }
         else if (op2 == 0xB6 || op2 == 0xB7 || op2 == 0xBE || op2 == 0xBF) {
             I.op = (op2 == 0xB6 || op2 == 0xB7) ? XP_MOVZX : XP_MOVSX;
@@ -216,7 +307,11 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
         I.op = (op == 0x88 || op == 0x89) ? XP_MOV_MR : XP_MOV_RM;
         I.sz = (op == 0x88 || op == 0x8A) ? 1 : sz;
         int rg; MemOp m;
-        if (!read_modrm(I.sz, rg, m, true)) return I;
+        /* 0.9.0 KOK-FIX: 88/8A byte formu is8=true ALMALI — yoksa AH/BH/CH/DH
+           (rm kod 4-7) RSP/RBP/RSI/RDI diye cozulur (mov %sil,%%ah AH yerine
+           RSP'nin dusuk baytina yazar -> sahf/pushf zinciri corba). */
+        if (!read_modrm(I.sz, rg, m, true, I.sz == 1)) return I;
+        if (I.sz == 1) rg = reg8enc(is64, rexr, rg);   /* reg alani: AH..BH */
         if (m.present) {
             if (op == 0x88 || op == 0x89) { I.mem = m; I.r1 = rg; }
             else { I.mem = m; I.r1 = rg; }
@@ -247,17 +342,20 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
         I.mem = m; I.imm = read_imm(1); I.immsz = 1;
         break;
     }
-    case 0xC7: { // MOV r/m, imm32
+    case 0xC7: { // MOV r/m, imm32 (op66: r/m16, imm16 — 0.9.0 KOK-FIX)
         I.op = XP_MOV_MI; I.sz = sz;
         int rg; MemOp m;
         if (!read_modrm(sz, rg, m, true)) return I;
         if (!m.present) {
-            // mov r32, imm32
+            // mov r32, imm32 (op66: mov r16, imm16)
             I.op = XP_MOV_RI; I.r1 = m.base; I.r2 = -1;
-            I.imm = read_imm(4); I.immsz = 4;
+            if (op66) { I.imm = read_imm(2); I.immsz = 2; }
+            else { I.imm = read_imm(4); I.immsz = 4; }
             break;
         }
-        I.mem = m; I.imm = read_imm(4); I.immsz = 4;
+        I.mem = m;
+        if (op66) { I.imm = read_imm(2); I.immsz = 2; }
+        else { I.imm = read_imm(4); I.immsz = 4; }
         break;
     }
     case 0xB0: case 0xB1: case 0xB2: case 0xB3:
@@ -270,18 +368,24 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
     case 0xBC: case 0xBD: case 0xBE: case 0xBF:
         I.r1 = op - 0xB8 + (rexb ? 8 : 0);
         if (is64 && rexw) { I.op = XP_MOV_RI64; I.imm = read_imm(8); I.immsz = 8; }
-        else { I.op = XP_MOV_RI; I.sz = op66 ? 2 : 4; I.imm = read_imm(4); I.immsz = 4; }
+        else if (op66) {
+            /* 0.9.0 KOK-FIX: 66 B8 = mov r16, imm16 — imm 2 BAYT (eski kod
+               hep 4 okuyordu -> akis desync, sonraki talimatlar cop). */
+            I.op = XP_MOV_RI; I.sz = 2; I.imm = read_imm(2); I.immsz = 2;
+        }
+        else { I.op = XP_MOV_RI; I.sz = 4; I.imm = read_imm(4); I.immsz = 4; }
         break;
     case 0x00: case 0x01: case 0x02: case 0x03:
     case 0x08: case 0x09: case 0x0A: case 0x0B:
+    case 0x10: case 0x11: case 0x12: case 0x13:   /* 0.9.0: ADC */
+    case 0x18: case 0x19: case 0x1A: case 0x1B:   /* 0.9.0: SBB */
     case 0x20: case 0x21: case 0x22: case 0x23:
     case 0x28: case 0x29: case 0x2A: case 0x2B:
     case 0x30: case 0x31: case 0x32: case 0x33:
     case 0x38: case 0x39: case 0x3A: case 0x3B: {
         int lo = op & 7;
-        int alu = op >> 3; // 0=ADD 1=OR 4=AND 5=SUB 6=XOR 7=CMP
-        static const int amap[8] = { ALU_ADD, -1, -1, -1, ALU_AND, ALU_SUB, ALU_XOR, ALU_CMP };
-        // OR (1) ayri: asagida
+        int alu = op >> 3; // 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
+        static const int amap[8] = { ALU_ADD, -1, ALU_ADC, ALU_SBB, ALU_AND, ALU_SUB, ALU_XOR, ALU_CMP };
         I.alu = (alu == 1) ? ALU_OR : amap[alu];
         if (I.alu < 0) { I.text = "alu destegi yok"; return I; }
         I.op = XP_ALU;
@@ -298,13 +402,13 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
         break;
     }
     case 0x80: case 0x81: case 0x83: {
-        static const int amap[8] = { ALU_ADD, ALU_OR, -1, -1, ALU_AND, ALU_SUB, ALU_XOR, ALU_CMP };
+        static const int amap[8] = { ALU_ADD, ALU_OR, ALU_ADC, ALU_SBB, ALU_AND, ALU_SUB, ALU_XOR, ALU_CMP };
         int alu2 = -1;
         I.op = XP_ALU; I.sz = (op == 0x80) ? 1 : sz;
         int rg; MemOp m;
         if (!read_modrm(I.sz, rg, m, true, op == 0x80)) return I;
         alu2 = amap[rg & 7];
-        if (alu2 < 0) { I.text = "grp1 adc/sbb"; return I; }
+        if (alu2 < 0) { I.text = "grp1 alu"; return I; }
         I.alu = alu2;
         if (m.present) { I.mem = m; I.r1 = -1; }
         else { I.r1 = m.base; }
@@ -315,13 +419,14 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
         break;
     }
     case 0x04: case 0x05: case 0x0C: case 0x0D:
+    case 0x14: case 0x15: case 0x1C: case 0x1D:   /* 0.9.0: ADC/SBB acc */
     case 0x24: case 0x25: case 0x2C: case 0x2D:
     case 0x34: case 0x35: case 0x3C: case 0x3D: {
-        // ALU acc-form: op AL,imm8 | op eAX,imm32 (ADC/SBB yok: 0x14/15/1C/1D)
+        // ALU acc-form: op AL,imm8 | op eAX,imm32
         int hi = op >> 3;
-        static const int amap2[8] = { ALU_ADD, ALU_OR, -1, -1, ALU_AND, ALU_SUB, ALU_XOR, ALU_CMP };
+        static const int amap2[8] = { ALU_ADD, ALU_OR, ALU_ADC, ALU_SBB, ALU_AND, ALU_SUB, ALU_XOR, ALU_CMP };
         int alu2 = amap2[hi & 7];
-        if (alu2 < 0) { I.text = "acc adc/sbb"; return I; }
+        if (alu2 < 0) { I.text = "acc alu"; return I; }
         I.op = XP_ALU; I.alu = alu2;
         // x86 acc-form: AL-form op&7==4 (imm8), eAX-form op&7==5 (imm32).
         // ESKI TEST "op & 4" YANLISTI: 0x05 (add eax,imm32) de op&4=4 oldugu
@@ -396,7 +501,13 @@ Insn disasm(const u8* p, int maxlen, bool is64, u32 pc, u64 imagebase, u32 image
         } else if (sub == 3) { // NEG r/m (CF=x!=0, ZF/SF/OF)
             I.op = XP_NEG; I.r1 = -1; I.mem = m;
             if (!m.present) I.r1 = m.base;
-        } else { I.text = "grp3 mul/div"; return I; }
+        } else if (sub == 4) { // 0.9.0: MUL r/m (RDX:RAX = RAX * r/m)
+            I.op = XP_MUL; I.r1 = -1; I.mem = m;
+            if (!m.present) I.r1 = m.base;
+        } else if (sub == 6) { // 0.9.0: DIV r/m (RDX:RAX / r/m)
+            I.op = XP_DIV; I.r1 = -1; I.mem = m;
+            if (!m.present) I.r1 = m.base;
+        } else { I.text = "grp3 imul kalmadi"; return I; }
         break;
     }
     case 0xFE: { // GRP4: INC/DEC r/m8

@@ -93,6 +93,26 @@
 #define OP_XCHG_RR   0x2B   // sz r1 r2        (bayrak etkisi yok)
 // ROL/ROR: OP_SHI_RI/CL'nin shi=3/4 degeriyle (yeni op gerekmez)
 
+// --- 0.9.0-DeepVM: UniversalObfuscator (VMProtect pub1 intel.cc) es-karsilik
+//     kapsam genisletmesi. Tam EFLAGS (CF/PF/AF/ZF/SF/OF + DF) + 0F uzanti
+//     + string ops + donguler. Akis formati encoder (engine_lift) ile
+//     BIREBIR ayna — degisiklikler iki tarafta ayni commit'te.
+#define OP_PUSHF     0x2C   // push EFLAGS imaji (CF PF AF ZF SF TF IF DF OF; bit1=1)
+#define OP_POPF      0x2D   // pop -> VM flags (yalniz modelenen bitler)
+#define OP_SAHF      0x2E   // flags <- AH (CF/PF/AF/ZF/SF)
+#define OP_LAHF      0x2F   // AH <- SF:ZF:0:AF:0:PF:1:CF
+#define OP_SETFLAG   0x30   // ud: 0=CLC 1=STC 2=CMC 3=CLD 4=STD
+#define OP_MUL_R     0x31   // sz form [r1|mem]: RDX:RAX = RAX*r/m (sz1: AX=AL*r8)
+#define OP_DIV_R     0x32   // sz form [r1|mem]: RDX:RAX / r/m (sz1: AL=AL/r8 AH=rem)
+#define OP_BT_X      0x33   // ud sz form [r1|mem] srcform [r2|imm8]: 0=BT 1=BTS 2=BTR 3=BTC
+#define OP_SHLD      0x34   // sz r1 r2 nmode [n]   (nmode 1 = CL)
+#define OP_SHRD      0x35   // sz r1 r2 nmode [n]   (nmode 1 = CL)
+#define OP_LOOP      0x36   // cc rel32 : --RCX; cc 0=loop 1=loope 2=loopne
+#define OP_JECXZ     0x37   // rel32 : RCX==0
+#define OP_XADD      0x38   // sz form [r1|mem] r2 : tmp=dst; dst+=src; src=tmp (ADD bayraklari)
+#define OP_STR       0x39   // ud sz rep : 0=movs 1=stos 2=lods 3=scas 4=cmps; rep 0/1(repe)/2(repne)
+#define OP_IMUL_RM   0x3A   // sz r1 mem : imul r1, [mem] (0F AF bellek formu)
+
 // --- 0.8.0 polimorfik isleyiciler: opcode permütasyonu ---
 // π = anahtar-turetilmis (Fisher-Yates; tohum = fonksiyon RVA'si).
 // Encoder (engine_lift eop) gercel->raw yazar (vm_perm_enc); interpreter
@@ -100,7 +120,7 @@
 // fonksiyondan turer -> tablo tasimaya gerek yok (stub yalniz tohumu
 // ctx->scratch[3]'e yazar). Tohum 0 = kimlik degil, gecerli permütasyon
 // (determinizm iki tarafta da ayni fonksiyondan).
-#define VM_OPN 0x2C   // opcode uzayi (0x00..0x2B)
+#define VM_OPN 0x3B   // opcode uzayi (0x00..0x3A) — 0.9.0-DeepVM: 0x2C -> 0x3B
 static void vm_perm_tab(unsigned int seed, unsigned char* t, int dec) {
     unsigned char p[VM_OPN]; int i, j;
     for (i = 0; i < VM_OPN; i++) p[i] = (unsigned char)i;
@@ -126,6 +146,8 @@ static void vm_perm_tab(unsigned int seed, unsigned char* t, int dec) {
 #define ALU_XOR 4
 #define ALU_CMP 5
 #define ALU_TEST 6
+#define ALU_ADC 7   // 0.9.0: add + CF girdi (do_alu c->flags'tan okur)
+#define ALU_SBB 8   // 0.9.0: sub - CF girdi
 
 // --- shift alt kodlari ---
 #define SHI_SHL 0
@@ -153,10 +175,15 @@ static void vm_perm_tab(unsigned int seed, unsigned char* t, int dec) {
 #define CC_G  15
 
 // --- bayrak bitleri (VMContext.flags) ---
+// 0.9.0-DeepVM: TAM EFLAGS — CF/PF/AF/ZF/SF/OF + DF (string ops).
+// VM dahili bitler; PUSHF/POPF x86 EFLAGS imajina cevirir (vm_core.c).
 #define FCF 1u
 #define FZF 2u
 #define FSF 4u
 #define FOF 8u
+#define FPF 16u   // 0.9.0: parity (LSB 8-bit cift birlik)
+#define FAF 32u   // 0.9.0: auxiliary carry (bit-3 tasiyici)
+#define FDF 64u   // 0.9.0: direction (string ops yonu)
 
 // --- register enc: 0..15 = x64 GPR sirasi ---
 // rax rcx rdx rbx rsp rbp rsi rdi r8..r15
@@ -177,6 +204,10 @@ static void vm_perm_tab(unsigned int seed, unsigned char* t, int dec) {
 #define MEMF_SIB_IMG 2  // MEMF_SIB gibi; disp32 IMAGE-RVA'dir -> c->base eklenir
                         // (x86 mutlak adresleme: [reg + VA] -> [reg + (VA-IB)])
 #define SIB_NOBASE 0xFF
+#define MEMF_SEG   3   // 0.9.0: seg(1) + alt-form. seg: 4=FS 5=GS (Intel sirasi)
+                       // FS: x86=TEB, x64=0 | GS: x64=TEB, x86=0 (gercek Win semantics)
+#define MEMF_DISP_SEG 4 // 0.9.0: addr = segbase + HAM disp32 (rva cevirimi YOK —
+                        // TEB-relative erisim: gs:[0x30] = TEB + 0x30)
 
 // --- VMContext offsetleri (engine stub'i ile BIREBIR ayni olmali) ---
 #define VMOFF_BC        0x00
@@ -210,7 +241,7 @@ static void vm_perm_tab(unsigned int seed, unsigned char* t, int dec) {
 // DELTA ile tasinir -> kesisme imkansiz.
 #define VM_STUB_SUB64 0x330
 #define VM_STUB_SUB86 0x268
-#define VM_DELTA64  0x1400  /* 0.8.3: batarya CONTEXT tamponu 0x4D0 — emu-yigin penceresi C-derinliginin ustune cikarildi */
-#define VM_DELTA86  0x1400  /* 0.8.3: x86 CONTEXT 0x2CC + guvenlik payi */
+#define VM_DELTA64  0x600   /* 0x78+0x330+8(ret)+0x240(C-frame) -> align16 */
+#define VM_DELTA86  0x420   /* 0x20+0x268+4+4(ret)+0x180(C-frame) -> align16 */
 
 #endif

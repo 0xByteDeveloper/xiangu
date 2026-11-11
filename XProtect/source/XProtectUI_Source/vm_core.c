@@ -148,18 +148,38 @@ static u64 szmask(int sz) {
 // Encoder sirasi: form:1 -> DISP: disp32 | SIB: base,idx,scale,disp32
 static u64 mem_addr(STRM* s, VMContext* c) {
     int form = sf8(s);
+    /* 0.9.0: segment ustu-on-eki — FS/GS taban. Win gercek semantigi:
+       x86: FS=TEB (fs:[0x18] self-ptr), GS=0 | x64: GS=TEB (gs:[0x30]), FS=0.
+       TEB vm_entry'de scratch[4]'e yakalanir (gercek seg okumasi).
+       segmode'da disp HAM'dir (image-rva cevirimi yok — TEB-relative). */
+    u64 segbase = 0;
+    int segmode = 0;
+    if (form == MEMF_SEG) {
+        int seg = sf8(s);
+        form = sf8(s);
+        segmode = 1;
+#if defined(VM_IS_X64)
+        segbase = (seg == 5) ? c->scratch[4] : 0;   /* GS=TEB, FS=0 */
+#else
+        segbase = (seg == 4) ? c->scratch[4] : 0;   /* FS=TEB, GS=0 */
+#endif
+    }
+    if (form == MEMF_DISP_SEG) {
+        return segbase + (u64)(i64)(int)sf32(s);
+    }
     if (form == MEMF_DISP) {
-        return c->base + (u64)(u32)sf32(s);
+        return segbase + c->base + (u64)(u32)sf32(s);
     } else {
         int b = sf8(s), ix = sf8(s), sc = sf8(s);
         u32 d = sf32(s);
         /* MEMF_SIB_IMG: disp image-RVA'dir (x86 mutlak adresleme) ->
-           c->base eklenir. MEMF_SIB (eski): x64 yigin SIB'i -> disp ham. */
-        u64 img = (form == MEMF_SIB_IMG) ? c->base : 0;
+           c->base eklenir. MEMF_SIB (eski): x64 yigin SIB'i -> disp ham.
+           segmode: img YOK (seg tabani zaten segbase'te). */
+        u64 img = (!segmode && form == MEMF_SIB_IMG) ? c->base : 0;
         u64 a;
-        if (b == SIB_NOBASE)      a = img + (u64)(i64)(int)d;
-        else if (b == REG_RSP)    a = c->regs[REG_RSP] - (u64)VM_DELTA + (u64)(i64)(int)d;
-        else                      a = img + c->regs[b] + (u64)(i64)(int)d;
+        if (b == SIB_NOBASE)      a = segbase + img + (u64)(i64)(int)d;
+        else if (b == REG_RSP)    a = segbase + c->regs[REG_RSP] - (u64)VM_DELTA + (u64)(i64)(int)d;
+        else                      a = segbase + img + c->regs[b] + (u64)(i64)(int)d;
         if (ix != SIB_NOBASE) a += c->regs[ix] << sc;
 #ifdef VM_TRACE
         if (vm_trace_on) tputn("[mem] a=", a, ((u64)(b & 0xFF) << 8) | (ix & 0xFF));
@@ -171,22 +191,37 @@ static u64 mem_addr(STRM* s, VMContext* c) {
 static int sext32(i64* out, u32 v) { *out = (i64)(int)v; return 0; }
 
 // --- ALU + bayraklar ---
-static u64 do_alu(int alu, u64 a, u64 b, int sz, u64* fl) {
+// 0.9.0-DeepVM TAM EFLAGS: CF/PF/AF/ZF/SF/OF (VMProtect intel.cc fl_ sabitleri
+// ile ayni baglam — CF=0x0001 PF=0x0004 AF=0x0010 ZF=0x0040 SF=0x0080 OF=0x0800,
+// VM dahili bicimde). PF = sonucun DUSUK 8 bitindeki 1-parite (cift -> 1).
+// AF = bit-3'ten bit-4'e tasiyici: ((a ^ b ^ r) >> 4) & 1 (add/sub ikisinde de).
+static u8 parity8(u64 r) {
+    u8 p = (u8)(r & 0xFF);
+    p ^= p >> 4; p ^= p >> 2; p ^= p >> 1;
+    return (u8)((~p) & 1);   /* cift sayida 1 -> PF=1 */
+}
+static u64 do_alu_c(int alu, u64 a, u64 b, int sz, int cin, u64* fl);
+static u64 do_alu(int alu, u64 a, u64 b, int sz, u64* fl) { return do_alu_c(alu, a, b, sz, 0, fl); }
+static u64 do_alu_c(int alu, u64 a, u64 b, int sz, int cin, u64* fl) {
     u64 m = szmask(sz);
     int sb = sz * 8 - 1;
     u64 r = 0, f = 0;
-    if (alu == ALU_ADD) {
-        u64 s = a + b;
+    if (alu == ALU_ADD || alu == ALU_ADC) {
+        u64 s = a + b + (u64)cin;
         r = s & m;
         if (sz == 8) { if (s < a) f |= FCF; }
         else         { if (s & ~m) f |= FCF; }
         if (((a ^ r) & (b ^ r)) >> sb & 1) f |= FOF;
-    } else if (alu == ALU_SUB || alu == ALU_CMP) {
-        r = (a - b) & m;
-        if (a < b) f |= FCF;
+        /* AF kesin: bit-3 tasiyici (cin dahil) */
+        if (((a & 0xF) + (b & 0xF) + cin) > 0xF) f |= FAF;
+    } else if (alu == ALU_SUB || alu == ALU_CMP || alu == ALU_SBB) {
+        r = (a - b - (u64)cin) & m;
+        if (a < b + (u64)cin) f |= FCF;
         if (((a ^ b) & (a ^ r)) >> sb & 1) f |= FOF;
+        if ((int)(a & 0xF) - (int)(b & 0xF) - cin < 0) f |= FAF;
     } else if (alu == ALU_AND || alu == ALU_TEST) {
         r = a & b;
+        /* CF=OF=0 (x86 mantiksal islemler) */
     } else if (alu == ALU_OR) {
         r = a | b;
     } else {
@@ -194,6 +229,7 @@ static u64 do_alu(int alu, u64 a, u64 b, int sz, u64* fl) {
     }
     if (r == 0) f |= FZF;
     if ((r >> sb) & 1) f |= FSF;
+    if (parity8(r)) f |= FPF;
     *fl = f;
     return r;
 }
@@ -201,6 +237,7 @@ static u64 do_alu(int alu, u64 a, u64 b, int sz, u64* fl) {
 static int cond_eval(VMContext* c, int cc) {
     u64 f = c->flags;
     int C = (f & FCF) != 0, Z = (f & FZF) != 0, S = (f & FSF) != 0, O = (f & FOF) != 0;
+    int P = (f & FPF) != 0;   /* 0.9.0: gercek parite (eski: hep 0) */
     if (cc == CC_O)  return O;
     if (cc == CC_NO) return !O;
     if (cc == CC_B)  return C;
@@ -211,8 +248,8 @@ static int cond_eval(VMContext* c, int cc) {
     if (cc == CC_A)  return !(C | Z);
     if (cc == CC_S)  return S;
     if (cc == CC_NS) return !S;
-    if (cc == CC_P)  return 0;    /* PF izlenmiyor (float sonrasi kullanilmaz) */
-    if (cc == CC_NP) return 1;
+    if (cc == CC_P)  return P;    /* 0.9.0-DeepVM: PF artik gercek */
+    if (cc == CC_NP) return !P;
     if (cc == CC_L)  return (S != O);
     if (cc == CC_GE) return (S == O);
     if (cc == CC_LE) return (Z | (S != O));
@@ -220,7 +257,7 @@ static int cond_eval(VMContext* c, int cc) {
     return 0;
 }
 
-static u64 do_shift(int shi, u64 a, int n, int sz, u64* fl) {
+static u64 do_shift(int shi, u64 a, int n, int sz, u64 curf, u64* fl) {
     int sbits = sz * 8;
     u64 r = a, f = 0;
     /* x86: sayac 8/16/32-bitte &31, 64-bitte &63 ile maskelenir */
@@ -228,32 +265,88 @@ static u64 do_shift(int shi, u64 a, int n, int sz, u64* fl) {
     if (n) {
         if (shi == SHI_ROL) {
             r = ((a << n) | (a >> ((sbits - n) & (sbits - 1)))) & szmask(sz);
-            f |= r & 1;                      /* ROL: yalniz CF (x86) */
+            /* 0.9.0: ROL/ROR yalniz CF degistirir — diger bayraklar KORUNUR
+               (eski kod hepsini sifirliyordu — jcc-rol dizilerinde yanlis). */
+            f = (curf & ~FCF) | (r & 1);
             *fl = f;
             return r;
         }
         if (shi == SHI_ROR) {
             r = ((a >> n) | (a << ((sbits - n) & (sbits - 1)))) & szmask(sz);
-            f |= (r >> (sbits - 1)) & 1;     /* ROR: yalniz CF */
+            f = (curf & ~FCF) | ((r >> (sbits - 1)) & 1);
             *fl = f;
             return r;
         }
         if (shi == SHI_SHL) {
             if (n <= sbits) { if ((a >> (sbits - n)) & 1) f |= FCF; }
             r = (a << n) & szmask(sz);
+            /* OF (yalniz n==1 tanimli): MSB(r) ^ CF */
+            if (n == 1) { if ((((r >> (sbits-1)) & 1) ^ ((f & FCF) ? 1u : 0u))) f |= FOF; }
         } else if (shi == SHI_SHR) {
             if (n <= sbits) { if ((a >> (n - 1)) & 1) f |= FCF; }
             r = (a >> n) & szmask(sz);
+            if (n == 1) { if (((a >> (sbits-1)) & 1)) f |= FOF; }
         } else {
             i64 sv = (i64)(a << (64 - sbits)) >> (64 - sbits);
             if (n <= sbits) { if (((u64)sv >> (n-1)) & 1) f |= FCF; }
             r = ((u64)(sv >> n)) & szmask(sz);
+            if (n == 1) { if (((a >> (sbits-1)) & 1)) f |= FOF; }
         }
         if (r == 0) f |= FZF;
         if ((r >> (sbits-1)) & 1) f |= FSF;
+        if (parity8(r)) f |= FPF;
+        /* AF: shiftlerde tanimsiz -> 0 */
     }
     *fl = f;
     return r;
+}
+
+/* --- 0.9.0-DeepVM: 64x64->128 carpim + 128/64 bolem (freestanding, u128 YOK) --- */
+static void mulu64(u64 a, u64 b, u64* lo, u64* hi) {
+    u64 alo = a & 0xFFFFFFFFULL, ahi = a >> 32;
+    u64 blo = b & 0xFFFFFFFFULL, bhi = b >> 32;
+    u64 ll = alo * blo, lh = alo * bhi, hl = ahi * blo, hh = ahi * bhi;
+    u64 mid = (ll >> 32) + (lh & 0xFFFFFFFFULL) + (hl & 0xFFFFFFFFULL);
+    *lo = (ll & 0xFFFFFFFFULL) | (mid << 32);
+    *hi = hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
+}
+static void div128_64(u64 hi, u64 lo, u64 d, u64* qo, u64* ro) {
+    u64 q = 0, r = 0; int i;
+    for (i = 127; i >= 0; i--) {
+        u64 bit = (i >= 64) ? ((hi >> (i - 64)) & 1) : ((lo >> i) & 1);
+        r = (r << 1) | bit;
+        q <<= 1;
+        if (r >= d) { r -= d; q |= 1; }
+    }
+    *qo = q; *ro = r;
+}
+/* 64-bit / 32-bit — i386 freestanding __udivmoddi4 YASAK (blob linki kopar);
+   bit-dongusuyle tasinabilir (0.9.0 DIV/IDIV x86 yolu). */
+static u64 div64_32(u64 n, u32 d, u32* rem) {
+    u64 q = 0, r = 0; int i;
+    for (i = 63; i >= 0; i--) {
+        r = (r << 1) | ((n >> i) & 1);
+        q <<= 1;
+        if (r >= (u64)d) { r -= (u64)d; q |= 1; }
+    }
+    *rem = (u32)r;
+    return q;
+}
+/* isaretli 128/64 -> q (64-bit), r. Boleme #DE (d=0 veya q tasma) -> q=r=0
+   (0.8.5 idiv-guvenlik gelenegi). */
+static void idiv128(i64 hi, i64 lo, i64 dv, i64* qo, i64* ro) {
+    u64 uhi, ulo, udv, q, r;
+    int nq = 0, nr = 0;
+    if (hi < 0) {
+        ulo = (u64)(0 - lo); uhi = (u64)(~(u64)hi + ((lo == 0) ? 1u : 0u));
+        nq = 1; nr = 1;
+    } else { uhi = (u64)hi; ulo = (u64)lo; }
+    if (dv < 0) { udv = (u64)(0 - dv); nq = !nq; } else udv = (u64)dv;
+    if (udv == 0) { *qo = 0; *ro = 0; return; }
+    div128_64(uhi, ulo, udv, &q, &r);
+    if (q >> 63) { *qo = 0; *ro = 0; return; }   /* tasma -> #DE */
+    *qo = nq ? (i64)(0 - (i64)q) : (i64)q;
+    *ro = nr ? -(i64)r : (i64)r;
 }
 
 #if defined(VM_IS_X86)
@@ -633,7 +726,8 @@ static void vm_run(VMContext* c) {
 
         } else if (op == OP_ALU_RR) {
             alu = sf8(&s); sz = sf8(&s); r1 = sf8(&s); r2 = sf8(&s);
-            r = do_alu(alu, rget(c, r1, sz), rget(c, r2, sz), sz, &fl);
+            int cin = (alu == ALU_ADC || alu == ALU_SBB) ? ((c->flags & FCF) ? 1 : 0) : 0;
+            r = do_alu_c(alu, rget(c, r1, sz), rget(c, r2, sz), sz, cin, &fl);
             c->flags = fl;
             if (alu != ALU_CMP && alu != ALU_TEST) rset(c, r1, sz, r);
 
@@ -643,14 +737,16 @@ static void vm_run(VMContext* c) {
             if (sz == 4) b &= 0xFFFFFFFFULL;
             if (sz == 2) b &= 0xFFFFULL;
             if (sz == 1) b &= 0xFFULL;
-            r = do_alu(alu, rget(c, r1, sz), b, sz, &fl);
+            int cin = (alu == ALU_ADC || alu == ALU_SBB) ? ((c->flags & FCF) ? 1 : 0) : 0;
+            r = do_alu_c(alu, rget(c, r1, sz), b, sz, cin, &fl);
             c->flags = fl;
             if (alu != ALU_CMP && alu != ALU_TEST) rset(c, r1, sz, r);
 
         } else if (op == OP_ALU_RM) {
             alu = sf8(&s); sz = sf8(&s); r1 = sf8(&s);
             addr = mem_addr(&s, c);
-            r = do_alu(alu, rget(c, r1, sz), mrd(addr, sz), sz, &fl);
+            int cin = (alu == ALU_ADC || alu == ALU_SBB) ? ((c->flags & FCF) ? 1 : 0) : 0;
+            r = do_alu_c(alu, rget(c, r1, sz), mrd(addr, sz), sz, cin, &fl);
             c->flags = fl;
             if (alu != ALU_CMP && alu != ALU_TEST) rset(c, r1, sz, r);
 
@@ -658,7 +754,8 @@ static void vm_run(VMContext* c) {
             alu = sf8(&s); sz = sf8(&s);
             addr = mem_addr(&s, c);
             r2 = sf8(&s);
-            r = do_alu(alu, mrd(addr, sz), rget(c, r2, sz), sz, &fl);
+            int cin = (alu == ALU_ADC || alu == ALU_SBB) ? ((c->flags & FCF) ? 1 : 0) : 0;
+            r = do_alu_c(alu, mrd(addr, sz), rget(c, r2, sz), sz, cin, &fl);
             c->flags = fl;
             if (alu != ALU_CMP && alu != ALU_TEST) mwr(addr, sz, r);
 
@@ -670,20 +767,21 @@ static void vm_run(VMContext* c) {
             if (sz == 4) b &= 0xFFFFFFFFULL;
             if (sz == 2) b &= 0xFFFFULL;
             if (sz == 1) b &= 0xFFULL;
-            r = do_alu(alu, mrd(addr, sz), b, sz, &fl);
+            int cin = (alu == ALU_ADC || alu == ALU_SBB) ? ((c->flags & FCF) ? 1 : 0) : 0;
+            r = do_alu_c(alu, mrd(addr, sz), b, sz, cin, &fl);
             c->flags = fl;
             if (alu != ALU_CMP && alu != ALU_TEST) mwr(addr, sz, r);
 
         } else if (op == OP_SHI_RI) {
             shi = sf8(&s); sz = sf8(&s); r1 = sf8(&s); n = sf8(&s);
-            r = do_shift(shi, rget(c, r1, sz), n, sz, &fl);
+            r = do_shift(shi, rget(c, r1, sz), n, sz, c->flags, &fl);
             c->flags = fl;
             rset(c, r1, sz, r);
 
         } else if (op == OP_SHI_CL) {
             shi = sf8(&s); sz = sf8(&s); r1 = sf8(&s);
             n = (int)(c->regs[REG_RCX] & 0x3F);
-            r = do_shift(shi, rget(c, r1, sz), n, sz, &fl);
+            r = do_shift(shi, rget(c, r1, sz), n, sz, c->flags, &fl);
             c->flags = fl;
             rset(c, r1, sz, r);
 
@@ -692,7 +790,7 @@ static void vm_run(VMContext* c) {
             addr = mem_addr(&s, c);
             if (op == OP_SHI_RM_RI) n = sf8(&s);
             else                    n = (int)(c->regs[REG_RCX] & 0x3F);
-            r = do_shift(shi, mrd(addr, sz), n, sz, &fl);
+            r = do_shift(shi, mrd(addr, sz), n, sz, c->flags, &fl);
             c->flags = fl;
             mwr(addr, sz, r);
 
@@ -701,7 +799,13 @@ static void vm_run(VMContext* c) {
             a = (u64)(i64)rget(c, r2, sz);
             if (sz == 4) a = (u64)(i64)(int)(a & 0xFFFFFFFF);
             r = (u64)(sv * (i64)a);
-            c->flags = 0;
+            /* 0.9.0: IMUL CF=OF = sonuc alt-yarida isaret-uzatmiyor (x86 tanimli).
+               SF/ZF/PF/AF tanimsiz -> 0. */
+            {
+                i64 pr = sv * (i64)a;
+                i64 tr = (sz == 8) ? pr : (i64)(int)(u32)((u64)pr & 0xFFFFFFFFULL);
+                c->flags = (pr != tr) ? (FCF | FOF) : 0;
+            }
             rset(c, r1, sz, r);
 
         } else if (op == OP_IMUL_RMRI) {
@@ -715,8 +819,10 @@ static void vm_run(VMContext* c) {
                 u64 mv = mrd(addr, sz);
                 i64 mvx = (sz == 8) ? (i64)mv : (i64)(int)(mv & 0xFFFFFFFF);
                 r = (u64)(sv * mvx);
+                i64 pr = sv * mvx;
+                i64 tr = (sz == 8) ? pr : (i64)(int)(u32)((u64)pr & 0xFFFFFFFFULL);
+                c->flags = (pr != tr) ? (FCF | FOF) : 0;
             }
-            c->flags = 0;
             rset(c, r1, sz, r);
 
         } else if (op == OP_IMUL_RR) {
@@ -728,7 +834,11 @@ static void vm_run(VMContext* c) {
                 b = (u64)(i64)(int)(b & 0xFFFFFFFF);
             }
             r = (u64)((i64)a * (i64)b);
-            c->flags = 0;
+            {
+                i64 pr = (i64)a * (i64)b;
+                i64 tr = (sz == 8) ? pr : (i64)(int)(u32)((u64)pr & 0xFFFFFFFFULL);
+                c->flags = (pr != tr) ? (FCF | FOF) : 0;
+            }
             rset(c, r1, sz, r);
 
         } else if (op == OP_INCDEC_R) {
@@ -854,19 +964,32 @@ static void vm_run(VMContext* c) {
                 if (dv == 0) { c->regs[0] = 0; c->regs[REG_RDX] = 0; }
                 else { c->regs[0] = (u64)(int)(dd / dv); c->regs[REG_RDX] = (u64)(int)(dd % dv); }
             } else {
-                i64 dd = (i64)c->regs[REG_RDX];
-                i64 dv = (i64)c->regs[r1];
-                if (dv == 0) { c->regs[0] = 0; c->regs[REG_RDX] = 0; }
-                else { c->regs[0] = (u64)(dd / dv); c->regs[REG_RDX] = (u64)(dd % dv); }
+                /* 0.9.0 KOK-FIX: 0.8.5'te dd = RDX YALNIZ (RAX yok sayiliyor)
+                   — cqo sonrasi RDX = RAX isareti oldugu icin bolum hepsi
+                   0/copluk cikiyordu. Dogrusu RDX:RAX 128-bit / r64. */
+                i64 q, rm;
+                idiv128((i64)c->regs[REG_RDX], (i64)c->regs[0], (i64)c->regs[r1], &q, &rm);
+                c->regs[0] = (u64)q; c->regs[REG_RDX] = (u64)rm;
             }
 #else
             if (sz == 4) {
-                int dv = (int)(c->regs[r1] & 0xFFFFFFFF);
-                if (dv == 0) { c->regs[0] = 0; c->regs[REG_RDX] = 0; }
+                /* 0.9.0 KOK-FIX: 0.8.5'te EDX yok sayiliyor (yalniz eax/dv).
+                   Dogrusu EDX:EAX 64-bit / r32. */
+                u64 dd = ((c->regs[REG_RDX] & 0xFFFFFFFFULL) << 32)
+                       |  (c->regs[0] & 0xFFFFFFFFULL);
+                int sdv = (int)(c->regs[r1] & 0xFFFFFFFF);
+                if (sdv == 0) { c->regs[0] = 0; c->regs[REG_RDX] = 0; }
                 else {
-                    int q = (int)(c->regs[0] & 0xFFFFFFFF) / dv;
-                    int rm = (int)(c->regs[0] & 0xFFFFFFFF) % dv;
-                    c->regs[0] = (u32)q; c->regs[REG_RDX] = (u32)rm;
+                    int neg = ((i64)dd < 0) != (sdv < 0);
+                    u64 un = ((i64)dd < 0) ? (u64)(0 - (i64)dd) : dd;
+                    u32 ud = (sdv < 0) ? (u32)(0 - sdv) : (u32)sdv;
+                    u32 rm2;
+                    u64 q = div64_32(un, ud, &rm2);   /* i386 guvenli */
+                    if (q > 0x7FFFFFFFULL) { c->regs[0] = 0; c->regs[REG_RDX] = 0; }
+                    else {
+                        c->regs[0] = (u64)(u32)(neg ? (u32)(0 - (u32)q) : (u32)q);
+                        c->regs[REG_RDX] = (u64)(u32)(neg ? (u32)(0 - rm2) : rm2);
+                    }
                 }
             } else { c->done = 1; }
 #endif
@@ -948,6 +1071,284 @@ static void vm_run(VMContext* c) {
             rset(c, r1, sz, vb);
             rset(c, r2, sz, va);
 
+        /* ================= 0.9.0-DeepVM handler'lari =================
+           UniversalObfuscator (VMProtect pub1 intel.cc CompileToVM)
+           semantiğiyle ayni davranis: PUSHF/POPF/SAHF/LAHF/SETFLAG,
+           MUL/DIV (unsigned, RDX:RAX), BT ailesi (yalniz CF),
+           SHLD/SHRD, LOOP/JECXZ, XADD, string ops (rep + DF). */
+
+        } else if (op == OP_PUSHF) {
+            u64 f = c->flags;
+            u64 img = 2ull                      /* bit1 rezerve = 1 (x86) */
+                    | 0x200ull                  /* IF=1 (kesinti acik)   */
+                    | ((f & FCF) ? 0x001ull : 0)
+                    | ((f & FPF) ? 0x004ull : 0)
+                    | ((f & FAF) ? 0x010ull : 0)
+                    | ((f & FZF) ? 0x040ull : 0)
+                    | ((f & FSF) ? 0x080ull : 0)
+                    | ((f & FDF) ? 0x400ull : 0)
+                    | ((f & FOF) ? 0x800ull : 0);
+            c->regs[REG_RSP] -= PUSHSZ;
+            mwr(c->regs[REG_RSP] - (u64)VM_DELTA, PUSHSZ, img);
+
+        } else if (op == OP_POPF) {
+            u64 img = mrd(c->regs[REG_RSP] - (u64)VM_DELTA, PUSHSZ);
+            c->regs[REG_RSP] += PUSHSZ;
+            c->flags = ((img & 0x001ull) ? FCF : 0)
+                     | ((img & 0x004ull) ? FPF : 0)
+                     | ((img & 0x010ull) ? FAF : 0)
+                     | ((img & 0x040ull) ? FZF : 0)
+                     | ((img & 0x080ull) ? FSF : 0)
+                     | ((img & 0x400ull) ? FDF : 0)
+                     | ((img & 0x800ull) ? FOF : 0);
+
+        } else if (op == OP_SAHF) {
+            u64 ah = (c->regs[REG_RAX] >> 8) & 0xFF;
+            c->flags = ((ah & 0x01) ? FCF : 0)
+                     | ((ah & 0x04) ? FPF : 0)
+                     | ((ah & 0x10) ? FAF : 0)
+                     | ((ah & 0x40) ? FZF : 0)
+                     | ((ah & 0x80) ? FSF : 0);
+
+        } else if (op == OP_LAHF) {
+            u64 f = c->flags;
+            u64 ah = 2ull                       /* bit1 = 1 (x86) */
+                   | ((f & FCF) ? 0x01 : 0)
+                   | ((f & FPF) ? 0x04 : 0)
+                   | ((f & FAF) ? 0x10 : 0)
+                   | ((f & FZF) ? 0x40 : 0)
+                   | ((f & FSF) ? 0x80 : 0);
+            c->regs[REG_RAX] = (c->regs[REG_RAX] & ~0xFF00ULL) | (ah << 8);
+
+        } else if (op == OP_SETFLAG) {
+            ud = sf8(&s);
+            if (ud == 0)      c->flags &= ~(u64)FCF;          /* CLC */
+            else if (ud == 1) c->flags |= FCF;                /* STC */
+            else if (ud == 2) c->flags ^= FCF;                /* CMC */
+            else if (ud == 3) c->flags &= ~(u64)FDF;          /* CLD */
+            else if (ud == 4) c->flags |= FDF;                /* STD */
+
+        } else if (op == OP_MUL_R) {
+            sz = sf8(&s); form = sf8(&s);
+            if (form == 0) b = rget(c, sf8(&s), sz);
+            else           b = mrd(mem_addr(&s, c), sz);
+            a = rget(c, REG_RAX, sz);
+            c->flags = 0;
+            if (sz == 1) {
+                /* AX = AL * r8 (x86) — rax'in ust bitleri korunur */
+                u64 p = (a & 0xFF) * (b & 0xFF);
+                c->regs[REG_RAX] = (c->regs[REG_RAX] & ~0xFFFFULL) | p;
+                if (p & 0xFF00ULL) c->flags |= FCF | FOF;
+            } else if (sz == 2) {
+                u64 p = (a & 0xFFFF) * (b & 0xFFFF);
+                c->regs[REG_RAX] = (c->regs[REG_RAX] & ~0xFFFFULL) | (p & 0xFFFF);
+                c->regs[REG_RDX] = (c->regs[REG_RDX] & ~0xFFFFULL) | (p >> 16);
+                if (p >> 16) c->flags |= FCF | FOF;
+            } else if (sz == 4) {
+                u64 p = (a & 0xFFFFFFFFULL) * (b & 0xFFFFFFFFULL);
+                c->regs[REG_RAX] = p & 0xFFFFFFFFULL;
+                c->regs[REG_RDX] = p >> 32;
+                if (p >> 32) c->flags |= FCF | FOF;
+            } else {
+                u64 lo, hi;
+                mulu64(a, b, &lo, &hi);
+                c->regs[REG_RAX] = lo;
+                c->regs[REG_RDX] = hi;
+                if (hi) c->flags |= FCF | FOF;
+            }
+
+        } else if (op == OP_DIV_R) {
+            sz = sf8(&s); form = sf8(&s);
+            if (form == 0) b = rget(c, sf8(&s), sz);
+            else           b = mrd(mem_addr(&s, c), sz);
+            /* flags: DIV sonrasi TUM bayraklar tanimsiz (x86) — dokunma */
+            if (sz == 1) {
+                u32 n = (u32)(c->regs[REG_RAX] & 0xFFFF);
+                u32 d = (u32)(b & 0xFF);
+                u32 q = d ? (n / d) : 0, rm = d ? (n % d) : 0;
+                if (q > 0xFF) { q = 0; rm = 0; }          /* #DE -> guvenli sifir */
+                c->regs[REG_RAX] = (c->regs[REG_RAX] & ~0xFFFFULL)
+                                 | (u64)((q & 0xFF) | ((rm & 0xFF) << 8));
+            } else if (sz == 2) {
+                u32 n = ((u32)(c->regs[REG_RDX] & 0xFFFF) << 16)
+                      |  (u32)(c->regs[REG_RAX] & 0xFFFF);
+                u32 d = (u32)(b & 0xFFFF);
+                u32 q = d ? (n / d) : 0, rm = d ? (n % d) : 0;
+                if (q > 0xFFFF) { q = 0; rm = 0; }
+                c->regs[REG_RAX] = (c->regs[REG_RAX] & ~0xFFFFULL) | (u64)(q & 0xFFFF);
+                c->regs[REG_RDX] = (c->regs[REG_RDX] & ~0xFFFFULL) | (u64)(rm & 0xFFFF);
+            } else if (sz == 4) {
+                u64 n = ((c->regs[REG_RDX] & 0xFFFFFFFFULL) << 32)
+                      |  (c->regs[REG_RAX] & 0xFFFFFFFFULL);
+                u32 d = (u32)(b & 0xFFFFFFFFULL);
+                if (d == 0) { c->regs[0] = 0; c->regs[REG_RDX] = 0; }
+                else {
+                    u32 rm;
+                    u64 q = div64_32(n, d, &rm);   /* i386: __udivmoddi4 YASAK */
+                    if (q > 0xFFFFFFFFULL) { q = 0; }     /* #DE -> guvenli sifir */
+                    c->regs[REG_RAX] = q & 0xFFFFFFFFULL;
+                    c->regs[REG_RDX] = (u64)rm;
+                }
+            } else {
+                u64 q, r;
+                if (b == 0) { c->regs[0] = 0; c->regs[REG_RDX] = 0; }
+                else {
+                    div128_64(c->regs[REG_RDX], c->regs[0], b, &q, &r);
+                    if (q >> 32) { q = 0; r = 0; }        /* #DE */
+                    c->regs[REG_RAX] = q;
+                    c->regs[REG_RDX] = r;
+                }
+            }
+
+        } else if (op == OP_BT_X) {
+            ud = sf8(&s); sz = sf8(&s); form = sf8(&s);
+            r1 = -1; addr = 0;
+            if (form == 0) { r1 = sf8(&s); a = rget(c, r1, sz); }
+            else           { addr = mem_addr(&s, c); a = mrd(addr, sz); }
+            int sf2 = sf8(&s);
+            u64 bit;
+            if (sf2 == 0) bit = rget(c, sf8(&s), sz);
+            else          bit = (u64)(u8)sf8(&s);
+            bit &= (u64)(sz * 8 - 1);
+            u64 val = (a >> bit) & 1;
+            c->flags = (c->flags & ~(u64)FCF) | (val ? FCF : 0);
+            if (ud == 1)      a |= (u64)1 << bit;         /* BTS */
+            else if (ud == 2) a &= ~((u64)1 << bit);      /* BTR */
+            else if (ud == 3) a ^= (u64)1 << bit;         /* BTC */
+            if (ud) {
+                if (form == 0) rset(c, r1, sz, a);
+                else           mwr(addr, sz, a);
+            }
+
+        } else if (op == OP_SHLD) {
+            sz = sf8(&s); r1 = sf8(&s); r2 = sf8(&s);
+            int nm = sf8(&s);
+            int n = (nm == 1) ? (int)(c->regs[REG_RCX] & (sz == 8 ? 63 : 31))
+                              : (int)(u8)sf8(&s);
+            n &= (sz == 8) ? 63 : 31;
+            if (n > sz * 8) n = sz * 8;   /* 16-bit formda sayac > genislik */
+            if (n) {
+                int sbits = sz * 8;
+                u64 d = rget(c, r1, sz), srcv = rget(c, r2, sz);
+                u64 fl = 0;
+                if (n <= sbits) { if ((d >> (sbits - n)) & 1) fl |= FCF; }
+                r = ((d << n) | (((srcv << (64 - sbits)) >> (64 - sbits)) >> (sbits - n))) & szmask(sz);
+                if (n == 1) { if ((((r >> (sbits-1)) & 1) ^ ((fl & FCF) ? 1u : 0u))) fl |= FOF; }
+                if (r == 0) fl |= FZF;
+                if ((r >> (sbits-1)) & 1) fl |= FSF;
+                if (parity8(r)) fl |= FPF;
+                c->flags = fl;
+                rset(c, r1, sz, r);
+            }
+
+        } else if (op == OP_SHRD) {
+            sz = sf8(&s); r1 = sf8(&s); r2 = sf8(&s);
+            int nm = sf8(&s);
+            int n = (nm == 1) ? (int)(c->regs[REG_RCX] & (sz == 8 ? 63 : 31))
+                              : (int)(u8)sf8(&s);
+            n &= (sz == 8) ? 63 : 31;
+            if (n > sz * 8) n = sz * 8;
+            if (n) {
+                int sbits = sz * 8;
+                u64 d = rget(c, r1, sz), srcv = rget(c, r2, sz);
+                u64 fl = 0;
+                if (n <= sbits) { if ((d >> (n - 1)) & 1) fl |= FCF; }
+                r = ((d >> n) | (((srcv << (64 - sbits)) >> (64 - sbits)) << (sbits - n))) & szmask(sz);
+                if (n == 1) { if (((d >> (sbits-1)) & 1)) fl |= FOF; }
+                if (r == 0) fl |= FZF;
+                if ((r >> (sbits-1)) & 1) fl |= FSF;
+                if (parity8(r)) fl |= FPF;
+                c->flags = fl;
+                rset(c, r1, sz, r);
+            }
+
+        } else if (op == OP_LOOP) {
+            cc = sf8(&s); sext32(&sv, sf32(&s));
+            c->regs[REG_RCX] = (c->regs[REG_RCX] - 1) & szmask(PUSHSZ);  /* x86: ecx */
+            int nz = (c->regs[REG_RCX] != 0);
+            int take = (cc == 0) ? nz : (cc == 1) ? (nz && ((c->flags & FZF) != 0))
+                                                  : (nz && ((c->flags & FZF) == 0));
+            if (take) s.ic = s.ic + (u64)sv;
+
+        } else if (op == OP_JECXZ) {
+            sext32(&sv, sf32(&s));
+            if ((c->regs[REG_RCX] & szmask(PUSHSZ)) == 0) s.ic = s.ic + (u64)sv;
+
+        } else if (op == OP_XADD) {
+            sz = sf8(&s); form = sf8(&s);
+            if (form == 0) {
+                r1 = sf8(&s); r2 = sf8(&s);
+                a = rget(c, r1, sz); b = rget(c, r2, sz);
+                r = do_alu(ALU_ADD, a, b, sz, &fl);
+                c->flags = fl;
+                rset(c, r1, sz, r);
+                rset(c, r2, sz, a);
+            } else {
+                addr = mem_addr(&s, c);
+                r2 = sf8(&s);
+                a = mrd(addr, sz); b = rget(c, r2, sz);
+                r = do_alu(ALU_ADD, a, b, sz, &fl);
+                c->flags = fl;
+                mwr(addr, sz, r);
+                rset(c, r2, sz, a);
+            }
+
+        } else if (op == OP_STR) {
+            ud = sf8(&s); sz = sf8(&s); int rp = sf8(&s);
+            /* ud: 0=movs 1=stos 2=lods 3=scas 4=cmps | rp: 0=yok 1=repe 2=repne
+               DF yonu; scas/cmps'ta ZF kosulu. Tamper-a'S tuzagi: ic dongu
+               butcesi 1<<20 yineleme (meşru string op'larinin cok uzerinde). */
+            {
+                int dir = (c->flags & FDF) ? -1 : 1;
+                u64 step = (u64)(dir * sz);
+                u64 cmask = szmask(PUSHSZ == 8 ? 8 : 4);   /* x64: rcx, x86: ecx */
+                u64 cap = (rp ? ((u64)1 << 20) : 1);
+                u64 k;
+                for (k = 0; k < cap; k++) {
+                    if (rp && (c->regs[REG_RCX] & cmask) == 0) break;
+                    if (ud == 0) {            /* movs */
+                        mwr(c->regs[REG_RDI], sz, mrd(c->regs[REG_RSI], sz));
+                        c->regs[REG_RSI] += step; c->regs[REG_RDI] += step;
+                    } else if (ud == 1) {     /* stos */
+                        mwr(c->regs[REG_RDI], sz, rget(c, REG_RAX, sz));
+                        c->regs[REG_RDI] += step;
+                    } else if (ud == 2) {     /* lods */
+                        rset(c, REG_RAX, sz, mrd(c->regs[REG_RSI], sz));
+                        c->regs[REG_RSI] += step;
+                    } else if (ud == 3) {     /* scas: cmp rax, [rdi] */
+                        r = do_alu(ALU_CMP, rget(c, REG_RAX, sz), mrd(c->regs[REG_RDI], sz), sz, &fl);
+                        c->flags = fl;
+                        c->regs[REG_RDI] += step;
+                    } else {                  /* cmps: cmp [rsi], [rdi] */
+                        r = do_alu(ALU_CMP, mrd(c->regs[REG_RSI], sz), mrd(c->regs[REG_RDI], sz), sz, &fl);
+                        c->flags = fl;
+                        c->regs[REG_RSI] += step; c->regs[REG_RDI] += step;
+                    }
+                    if (rp) c->regs[REG_RCX] = (c->regs[REG_RCX] - 1) & cmask;
+                    if (rp && (ud == 3 || ud == 4)) {
+                        if (rp == 1 && !(c->flags & FZF)) break;   /* repe */
+                        if (rp == 2 &&  (c->flags & FZF)) break;   /* repne */
+                    }
+                }
+            }
+
+        } else if (op == OP_IMUL_RM) {
+            sz = sf8(&s); r1 = sf8(&s);
+            addr = mem_addr(&s, c);
+            a = (u64)(i64)rget(c, r1, sz);
+            b = mrd(addr, sz);
+            if (sz == 4) {
+                a = (u64)(i64)(int)(a & 0xFFFFFFFF);
+                b = (u64)(i64)(int)(b & 0xFFFFFFFF);
+            }
+            r = (u64)((i64)a * (i64)b);
+            {
+                i64 pr = (i64)a * (i64)b;
+                i64 tr = (sz == 8) ? pr : (i64)(int)(u32)((u64)pr & 0xFFFFFFFFULL);
+                c->flags = (pr != tr) ? (FCF | FOF) : 0;
+            }
+            rset(c, r1, sz, r);
+
 } else if (op == OP_STRDEC) {
             u32 strva = sf32(&s), stva = sf32(&s), k = sf32(&s), len = sf32(&s);
             u8* st = (u8*)u2p(c->base + (u64)stva);
@@ -1002,6 +1403,16 @@ void vm_entry(VMContext* c) {
     c->regs[4] = c->init_rsp;
     c->flags = 0;
     c->done = 0;
+
+    /* 0.9.0-DeepVM: TEB tabani yakala (scratch[4] — debug slotlari 0..2
+       her adim ezilir, scratch[3] = perm tohumi (stub) — 4 serbest).
+       x86: FS=TEB (fs:[0x18] self-ptr) | x64: GS=TEB (gs:[0x30] self-ptr).
+       mem_addr MEMF_SEG bu tabani kullanir: x86 FS->TEB, x64 GS->TEB. */
+#if defined(VM_IS_X64)
+    { u64 teb; __asm__ volatile("movq %%gs:0x30, %0" : "=r"(teb)); c->scratch[4] = teb; }
+#else
+    { u32 teb; __asm__ volatile("movl %%fs:0x18, %0" : "=r"(teb)); c->scratch[4] = (u64)teb; }
+#endif
 
     /* 0.8.0 crypt_key: stub key^K2 tasiydi — gercek rolling anahtari geri
        coz. K2 = (bc_rva, bc_len) fonksiyonu (engine_stub ile ayni makro). */

@@ -60,7 +60,26 @@ enum XOp {
     XP_MOV_MI, XP_MOV_RI, XP_MOV_RI64, XP_LEA, XP_ALU, XP_SHIFT, XP_IMUL_RRI,
     XP_IMUL_RR, XP_INCDEC_R, XP_INCDEC_M, XP_MOVZX, XP_MOVSX, XP_JMP, XP_JCC,
     XP_CALL, XP_RET, XP_RETI16, XP_SETCC, XP_CWDE, XP_CDQ, XP_IDIV, XP_TEST_RM, XP_PUSH_I, XP_LEAVE, XP_CMOV,
-    XP_NEG, XP_NOT, XP_CALLI, XP_JMPI, XP_XCHG, XP_BSWAP
+    XP_NEG, XP_NOT, XP_CALLI, XP_JMPI, XP_XCHG, XP_BSWAP,
+    // --- 0.9.0-DeepVM: UniversalObfuscator (VMProtect pub) intel.h spec'inden
+    //     kapsam genisletmesi — lifter RED oranini dusturur ---
+    XP_MUL,        // F7 /4 (+F6 /4): RDX:RAX = RAX * r/m   (sz=1: AX = AL*r8)
+    XP_DIV,        // F7 /6 (+F6 /6): EDX:EAX / r/m        (sz=1: AL=AL/AH rem)
+    XP_BT,         // 0F A3/AB/B3/BB r/m,r  |  0F BA /4-/7 r/m,imm8
+                   //   ud: 0=BT 1=BTS 2=BTR 3=BTC; r1=dst(r/m), r2=bit-src veya imm
+    XP_SHLD,       // 0F A4 (imm8) / 0F A5 (CL): r1 = r1:r2 sola
+    XP_SHRD,       // 0F AC (imm8) / 0F AD (CL): r1:r2 sag (r1 <- r2:yuksek)
+    XP_LOOP,       // E0/E1/E2: --rcx; jnz [&& zf == cc-1]; cc: 2=loop 1=loopz 0=loopnz? -> cc alanina direk yazilir
+    XP_JECXZ,      // E3: rcx==0 -> jmp
+    XP_SAHF,       // 9E: flags <- AH (yalniz CF/ZF/SF izlenir)
+    XP_LAHF,       // 9F: AH <- SF:ZF:0:AF:0:PF:1:CF (AF/PF=0 yazilir)
+    XP_PUSHF,      // 9C: push VM flags
+    XP_POPF,       // 9D: pop VM flags
+    XP_SETFLAG,    // F5/F8/F9/FC/FD: ud 0=CLC 1=STC 2=CMC 3=CLD 4=STD
+    XP_XADD,       // 0F C1 r/m,r (0F C0 8-bit): tmp=dst; dst+=src; src=tmp
+    XP_STR,        // A4/A5 movs AA/AB stos AC/AD lods AE/AF scas A6/A7 cmps
+                   //   ud: 0=movs 1=stos 2=lods 3=scas 4=cmps; rep alanina bak
+    XP_IMUL_RM     // 0F AF imul r1, [mem] (0.9.0: mem form RED'den cikarildi)
 };
 
 struct MemOp {
@@ -79,6 +98,8 @@ struct Insn {
     int r1 = -1, r2 = -1;
     u64 imm = 0; int immsz = 0;
     int cc = 0, alu = 0, shi = 0, ud = 0;
+    int rep = 0;              // 0.9.0: 0=yok 1=rep 2=repe/repz 3=repne/repnz
+    int seg = 0;              // 0.9.0: 0=yok 4=FS 5=GS (Intel segment sirasi)
     MemOp mem;
     u64 target = 0;           // jmp/jcc/call hedefi (VA)
     std::string text;         // okunur gosterim (log icin)

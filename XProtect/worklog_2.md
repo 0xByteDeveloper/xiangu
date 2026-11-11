@@ -91,3 +91,85 @@ Stage Summary:
   (DURDU — YENI). Ceşitli senaryolar icin kapsam tablosu README_0.8.5.txt.
 - Siradaki: kullanici VEH testi; 0.9.0 (memprot paketi / TLS-packer)
   kapsam karari.
+
+---
+
+## Task 21 — 0.9.0-DeepVM Faz A: UniversalObfuscator VM derinligi portu (Tam EFLAGS + komut kapsamı)
+Agent: main (Z.ai) | Tarih: 2026-11-11 (oturum 10)
+
+KULLANICI RAPORU (0.8.5): UC TESTI TAM — metin2 d7610 ULTRA, Check Debugger
+Windows debugger + VEH debugger ikisini de yakaladi: "Check Debugger windows
+debuggeri ve Veh i başarıyla algıladı teşekkürler". TALIMAT:
+"şimdi UniversalObfuscator dan bunu geçirelim" (deep VM port).
+
+1) KAYNAK TARAMASI (scripts/uobf/src1/vmp/core/intel.cc — 31.493 satir):
+   VMProtect lifter'inin (CompileToVM, intel.cc:9744) mimarisi cozuldu:
+   - Yigin makinesi + NOR/NAND fonksiyonel-tam primitifler
+   - `if (rand() & 1)` esdeger-form dekompozisyonu (B-fazi mutasyonu lifter
+     icine gomulu — fl_ sabitleri: CF=0x0001 PF=0x0004 AF=0x0010 ZF=0x0040
+     SF=0x0080 OF=0x0800, regEFX'de tasiyor)
+   - AddCorrectFlagSection/AddCombineFlagsSection/AddExtractFlagSection
+   XProtect karsilastirmasi: 44 VM op, 4 bayrak (CF/ZF/SF/OF) — PF/AF yok
+   (cond_eval CC_P hep 0 donduruyordu!), 0F uzantilari RED.
+   ONCEKI OTURUMUN YARIM KALANI: engine.hpp'ye XP_* enum tanimlari eklenmis
+   (02:50) ama disasm/lift/interpreter 0 satir — implementasyon bu oturumda.
+
+2) 0.9.0-DEEPVM FAZ A IMPLEMENTASYONU (0.8.5 tabani KORUNDU, xb090 kopyasi):
+   a) vm_opcodes.h: VM_OPN 0x2C -> 0x3B; 15 yeni op (PUSHF/POPF/SAHF/LAHF/
+      SETFLAG/MUL_R/DIV_R/BT_X/SHLD/SHRD/LOOP/JECXZ/XADD/STR/IMUL_RM);
+      FPF/FAF/FDF bayrak bitleri; MEMF_SEG/MEMF_DISP_SEG; ALU_ADC/ALU_SBB.
+   b) vm_core.c: do_alu_c (cin parametreli; AF = kesin nibble tasiyicisi,
+      PF = LSB-8 paritesi, ADC/SBB carry-in); cond_eval gercek parity;
+      do_shift (ROL/ROR diger bayraklari KORUR — eski kod sifirliyordu;
+      OF n==1; PF); PUSHF/POPF EFLAGS imaji (bit1=1, IF=1);
+      TEB yakalama scratch[4] (x86 fs:[0x18] / x64 gs:[0x30]);
+      KOK-FIX: IDIV x64 dd=YALNIZ RDX (RAX yok sayiliyor — cqo sonrasi
+      bolum 0/cop) -> idiv128 (128/64 bit-dongu); x86 IDIV EDX:EAX ->
+      div64_32; i386 freestanding __udivmoddi4 YASAK (blob linki).
+   c) engine_disasm.cpp: 0x64/0x65 seg yakalama (yutulmaz oldu), F2/F3 rep
+      yakalama, GRP3 MUL/DIV, 0F A3/AB/B3/BB + 0F BA (BT ailesi),
+      0F A4/A5/AC/AD (SHLD/SHRD), 0F C0/C1 (XADD), E0-E3 (LOOP/JECXZ),
+      9C/9D/9E/9F (PUSHF/POPF/SAHF/LAHF), F5/F8/F9/FC/FD (SETFLAG),
+      A4-A7/AA-AF (string), 0F AF mem formu.
+      KOK-FIXLER (0.8.x'ten kalıtılan gizli buglar):
+      - 66 B8 imm16: 4 yerine 2 bayt okunmaliydi (akis desync!)
+      - 66 C7 imm16 (mem+reg formu): ayni
+      - 88/8A is8=true eksik: AH/BH/CH/DH (rm kod 4-7) RSP..RDI diye
+        cozuluyordu (mov %sil,%%ah -> RSP'nin dusuk baytina yaziyordu!)
+      - 67 E3 jecxz: hedef pc+2 yerine pc+i (onekli formda pc+3)
+   d) engine_lift.cpp: yeni XP -> OP emitleri; MEMF_SEG emem'i (segmode'da
+      disp HAM — TEB-relative rva'ya cevrilemez); LOOP/JECXZ fixup.
+   e) engine_mut.cpp: ud_of'a yeni komutlarin uses/defs (muhafazakar):
+      MUL/DIV R(0)R(2)RW(0)RW(2), BT CF+RW(ud!=0), XADD iki taraf RW,
+      STR ESI/EDI/ECX/EAX, LOOP/JECXZ RCX, PUSHF/POPF/SAHF/LAHF/SETFLAG
+      FFLAG. (0.8.5'te bu komutlar lifter RED oldugu icin mutator hic
+      gormuyordu — default:break junk canli degeri eziyordu.)
+
+3) TEST KANITLARI (kanit_090/):
+   - test_deepvm.c (14 test fonksiyonu, ham __asm__): ADC/SBB zinciri,
+     PUSHF/POPF/LAHF/SAHF, CLC/STC/CMC+JCC, MUL/DIV dword, BT ailesi
+     reg+imm, SHLD/SHRD imm+CL, LOOP/JECXZ, XADD, REP movsb/stosb/scasb
+     +STD/CLD, FS/GS TEB, PF/JP/JNP, IMUL mem (0F AF), 8-bit mul/div,
+     izole mul/div.
+   - x64 wine (V, fonksiyon-basi izole): 13/13 BIREBIR ESIT (rc=42).
+   - x86 Unicorn (oyun mimarisi, unic_deepvm_x86.py YENI: korumali PE'nin
+     stub+VM'ini sahte TEB/PEB ile kostirir, fs:[abs] siteleri hook'lar;
+     cdecl yigin duzeltmesi): V 14/14 ESIT + U 14/14 ESIT (1 duru-RED:
+     t_loop mutasyon fixup — bilinen acik, guvenli davranis).
+   - R5 ULTIMATE: rc=42 "OK sdk_print 78 OK hepsi dogru" ✓
+   - R5-tamper (.vmp1 tek-bayt): rc=117 duru-ret ✓
+   - SELFTEST OK (Xvfb ayni komut icinde — kalici kural) ✓
+   - metin2 d7610 ULTRA+antidebug statik: seed=0xD7610 bc_rva=0x547C28
+     bc_len=541, bc[0]=0x03 -> itab -> 0x1E ANTIDBG ✓ (perm tablo boyutu
+     degistigi icin bc byte'lar degisti — semantik ayni)
+
+4) BILINEN ACIKLAR (Faz B/C icin):
+   - mutator'un yeni-komut uzunluk/fixup tablosu (t_loop U-modu duru-RED)
+   - IR-ustu mutasyon (B1-B4) ve obfiske handler (C1-C3) — UniversalObf.
+     NOR/NAND dekompozisyonu lifter'a gecirilecek
+   - FPU (A4): fld/fstp/fadd/fmul — ctx st[8] genislemesi gerekli
+     (VMOFF/VMSIZE + stub sabitleri degisir) — sonraki oturum
+
+5) NOT: wine x86 calistirma hala imkansiz (wine-root wow64'suz; Debian
+   wow64 sessiz oluyor) — x86 dogrulama Unicorn diferansiyeliyle (kanit).
+   /tmp/my-project (wine-root + prefix) sandbox resetinde SAG KALDI.

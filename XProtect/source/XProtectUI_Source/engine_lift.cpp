@@ -24,7 +24,34 @@ struct Lift {
     void ereg(int r) { e((u8)r); }
 
     // MEM operandini akisa yazar; .rdata referanslarini toplar
+    // 0.9.0: I.seg (FS/GS) varsa MEMF_SEG + seg + alt-form (vm mem_addr aynasi).
+    // segmode'da disp HAM'dir: TEB-relative (gs:[0x30]) image-rva'ya cevrileMEZ.
     void emem(const MemOp& m, const Insn& I) {
+        if (I.seg) {
+            e(MEMF_SEG);
+            e((u8)I.seg);
+            if (m.riprel) {
+                /* rip-rel + seg: TEB-relative degil — ham disp ile DISP_SEG */
+                e(MEMF_DISP_SEG);
+                e32((u32)(long long)m.disp);
+                return;
+            }
+            if (m.absimage) {
+                e(MEMF_DISP_SEG);
+                e32((u32)m.absval);          /* HAM — rva cevrimi yok */
+                return;
+            }
+            /* SIB: segmode'da VM img eklemez (mem_addr segmode) */
+            e(MEMF_SIB);
+            e((u8)(m.present && m.base >= 0 ? m.base : SIB_NOBASE));
+            e((u8)(m.idx >= 0 ? m.idx : SIB_NOBASE));
+            e((u8)m.scale);
+            e32((u32)(long long)m.disp);
+            return;
+        }
+        emem_noseg(m, I);
+    }
+    void emem_noseg(const MemOp& m, const Insn& I) {
         if (m.riprel) {
             u32 tgt = I.pc + I.len + (u32)(long long)m.disp;
             e(MEMF_DISP);
@@ -278,8 +305,16 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
                 snprintf(buf, sizeof buf, "imul %s, %s, 0x%llx", regname(is64, I.r1), regname(is64, I.r2), (unsigned long long)I.imm);
             }
             break;
-        case XP_IMUL_RR: L.eop(OP_IMUL_RR); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
-            snprintf(buf, sizeof buf, "imul %s, %s", regname(is64, I.r1), regname(is64, I.r2)); break;
+        case XP_IMUL_RR: 
+            if (I.mem.present) {
+                /* 0.9.0: imul r, [mem] (0F AF bellek formu) */
+                L.eop(OP_IMUL_RM); L.e((u8)I.sz); L.ereg(I.r1); L.emem(I.mem, I);
+                snprintf(buf, sizeof buf, "imul %s, [mem]", regname(is64, I.r1));
+            } else {
+                L.eop(OP_IMUL_RR); L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
+                snprintf(buf, sizeof buf, "imul %s, %s", regname(is64, I.r1), regname(is64, I.r2));
+            }
+            break;
         case XP_INCDEC_R: L.eop(OP_INCDEC_R); L.e((u8)I.ud); L.e((u8)I.sz); L.ereg(I.r1);
             snprintf(buf, sizeof buf, "%s %s", I.ud ? "dec" : "inc", regname(is64, I.r1)); break;
         case XP_INCDEC_M: L.eop(OP_INCDEC_M); L.e((u8)I.ud); L.e((u8)I.sz); L.emem(I.mem, I);
@@ -361,6 +396,72 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
             else { L.eop(OP_NOT_R); L.e((u8)I.sz); L.ereg(I.r1);
                 snprintf(buf, sizeof buf, "not %s", regname(is64, I.r1)); }
             break;
+
+        /* ================= 0.9.0-DeepVM liftings =================
+           vm_core.c handler akislariyla BIREBIR (vm_opcodes.h yorumlari). */
+        case XP_PUSHF: L.eop(OP_PUSHF);
+            snprintf(buf, sizeof buf, "pushf"); break;
+        case XP_POPF: L.eop(OP_POPF);
+            snprintf(buf, sizeof buf, "popf"); break;
+        case XP_SAHF: L.eop(OP_SAHF);
+            snprintf(buf, sizeof buf, "sahf"); break;
+        case XP_LAHF: L.eop(OP_LAHF);
+            snprintf(buf, sizeof buf, "lahf"); break;
+        case XP_SETFLAG: L.eop(OP_SETFLAG); L.e((u8)I.ud);
+            snprintf(buf, sizeof buf, "setflag%d", I.ud); break;
+        case XP_MUL:
+            if (I.mem.present) { L.eop(OP_MUL_R); L.e((u8)I.sz); L.e((u8)1); L.emem(I.mem, I); }
+            else { L.eop(OP_MUL_R); L.e((u8)I.sz); L.e((u8)0); L.ereg(I.r1); }
+            snprintf(buf, sizeof buf, "mul %s", I.mem.present ? "[mem]" : regname(is64, I.r1)); break;
+        case XP_DIV:
+            if (I.mem.present) { L.eop(OP_DIV_R); L.e((u8)I.sz); L.e((u8)1); L.emem(I.mem, I); }
+            else { L.eop(OP_DIV_R); L.e((u8)I.sz); L.e((u8)0); L.ereg(I.r1); }
+            snprintf(buf, sizeof buf, "div %s", I.mem.present ? "[mem]" : regname(is64, I.r1)); break;
+        case XP_BT: {
+            L.eop(OP_BT_X); L.e((u8)I.ud); L.e((u8)I.sz);
+            if (I.mem.present) { L.e((u8)1); L.emem(I.mem, I); }
+            else { L.e((u8)0); L.ereg(I.r1); }
+            if (I.immsz > 0) { L.e((u8)1); L.e((u8)I.imm); }
+            else { L.e((u8)0); L.ereg(I.r2); }
+            snprintf(buf, sizeof buf, "bt%d %s", I.ud, I.mem.present ? "[mem]"
+                     : regname(is64, I.r1)); break;
+        }
+        case XP_SHLD: case XP_SHRD: {
+            L.eop(I.op == XP_SHLD ? OP_SHLD : OP_SHRD);
+            L.e((u8)I.sz); L.ereg(I.r1); L.ereg(I.r2);
+            if (I.immsz == -1) { L.e((u8)1); }         /* CL */
+            else { L.e((u8)0); L.e((u8)I.imm); }
+            snprintf(buf, sizeof buf, "%s %s, %s", I.op == XP_SHLD ? "shld" : "shrd",
+                     regname(is64, I.r1), regname(is64, I.r2)); break;
+        }
+        case XP_LOOP: {
+            if (I.target < rva || I.target >= end) { F.why = "disari loop"; return F; }
+            L.eop(OP_LOOP); L.e((u8)I.cc); u32 site = (u32)L.bc.size(); L.e32(0);
+            F.fix.push_back({ site, I.target });
+            snprintf(buf, sizeof buf, "loop%d 0x%x", I.cc, I.target); break;
+        }
+        case XP_JECXZ: {
+            if (I.target < rva || I.target >= end) { F.why = "disari jecxz"; return F; }
+            L.eop(OP_JECXZ); u32 site = (u32)L.bc.size(); L.e32(0);
+            F.fix.push_back({ site, I.target });
+            snprintf(buf, sizeof buf, "jecxz 0x%x", I.target); break;
+        }
+        case XP_XADD: {
+            L.eop(OP_XADD); L.e((u8)I.sz);
+            if (I.mem.present) { L.e((u8)1); L.emem(I.mem, I); }
+            else { L.e((u8)0); L.ereg(I.r1); }
+            L.ereg(I.r2);
+            snprintf(buf, sizeof buf, "xadd %s, %s", I.mem.present ? "[mem]" : regname(is64, I.r1),
+                     regname(is64, I.r2)); break;
+        }
+        case XP_STR: {
+            /* rep: I.rep 2=F3(repe) -> 1, 3=F2(repne) -> 2 */
+            int rp = (I.rep == 2) ? 1 : (I.rep == 3) ? 2 : 0;
+            L.eop(OP_STR); L.e((u8)I.ud); L.e((u8)I.sz); L.e((u8)rp);
+            snprintf(buf, sizeof buf, "%s%s sz%d", rp == 1 ? "repe " : rp == 2 ? "repne " : "",
+                     I.ud == 0 ? "movs" : I.ud == 1 ? "stos" : I.ud == 2 ? "lods"
+                     : I.ud == 3 ? "scas" : "cmps", I.sz); break;
+        }
         default:
             F.why = "lifter: bilinmeyen islem";
             return F;
