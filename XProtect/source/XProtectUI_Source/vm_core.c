@@ -670,6 +670,11 @@ static void vm_run(VMContext* c) {
         u64 budget = (u64)1 << 24;
         while (!c->done) {
             if (budget-- == 0) { c->done = 1; break; }
+            /* 1.0.0 kok-fix (yakinma): akis-tasma korumasi — ic bc_len'i asarsa
+               OOB bayti op diye cozmaya calisma (itab[garcop] stack-OOB okuma,
+               rastgele VM op'u = oyun-cokmesi sinifi). Duru-cikis: stub retimm
+               ile temiz doner (yanlis deger, cokme YOK). */
+            if (s.ic >= c->bc_len) { c->done = 1; break; }
         u8 op = itab[sf8(&s)];
         int alu, shi, cc, ud, sz, ssz, r1, r2, form, n;
         u32 v32;
@@ -906,6 +911,35 @@ static void vm_run(VMContext* c) {
         } else if (op == OP_POP_R) {
             r1 = sf8(&s);
             rset(c, r1, PUSHSZ, mrd(c->regs[REG_RSP] - (u64)VM_DELTA, PUSHSZ));
+            c->regs[REG_RSP] += PUSHSZ;
+
+        } else if (op == OP_NOR_ST || op == OP_NAND_ST) {
+            /* 1.0.0-UO: VMP cmNor/cmNand yigin kapisi (intel.cc birebir).
+               pop b (ust slot), pop a; push ~(a|b) | ~(a&b).
+               Kapilar sz-maskeli calisir; bayraklar = mantiksal islem
+               semantigi (do_alu AND yolu: CF=OF=0, AF=0, SF/ZF/PF=sonuc) —
+               yerel and/or/xor ile bayt-bayt ayni. Yigin dengesi: -2 slot
+               pop, +1 slot push = net RSP += PUSHSZ. Temp-reg YOK. */
+            sz = sf8(&s);
+            {
+                u64 ta = c->regs[REG_RSP] - (u64)VM_DELTA;
+                u64 vb = mrd(ta, PUSHSZ) & szmask(sz);
+                u64 va = mrd(ta - PUSHSZ, PUSHSZ) & szmask(sz);
+                u64 vr = (op == OP_NOR_ST) ? ((~(va | vb)) & szmask(sz))
+                                           : ((~(va & vb)) & szmask(sz));
+                mwr(ta - PUSHSZ, PUSHSZ, vr);
+                c->regs[REG_RSP] += PUSHSZ;
+                do_alu(ALU_AND, vr, vr, sz, &fl);
+                c->flags = fl;
+            }
+
+        } else if (op == OP_POP_RP) {
+            /* 1.0.0-UO: cmPop otRegistr size_ karsiligi — kismi-yazim pop.
+               yigin slot'u PUSHSZ genisliginde okunur, reg'e sz boyutunda
+               YAZILIR (sz<8'de ust baytlar KORUNUR — x64 and eax,ebx
+               ust-32-koruma semantigi). */
+            sz = sf8(&s); r1 = sf8(&s);
+            rset(c, r1, sz, mrd(c->regs[REG_RSP] - (u64)VM_DELTA, PUSHSZ));
             c->regs[REG_RSP] += PUSHSZ;
 
         } else if (op == OP_JMP) {

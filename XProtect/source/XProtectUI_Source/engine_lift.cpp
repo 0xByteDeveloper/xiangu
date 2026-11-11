@@ -124,6 +124,20 @@ struct Lift {
         e(OP_ALU_RR); e((u8)I.alu); e((u8)I.sz); ereg(I.r1); ereg(I.r2);
         return true;
     }
+
+    // ---- 1.0.0-UO: cmNor/cmNand yigin kapi yardimcilari (intel.cc birebir).
+    // Kapilar VM yigininda (PUSHSZ slot) calisir: temp-reg YOK, host push/pop
+    // YOK, zincir dugum-siniri icinde dengeli (JCC hedefleri op-sinirlaridir;
+    // zincire atlansa tam yurutulur, atlanirsa hic baslamaz — iki durumda da
+    // yigin/RSP dengesi bozulmaz). 0.9.5/0.10.0 cokme dersi: host-reg havuzu
+    // ve IR-junk yerine SAF yigin kapilari.
+    void g_push_r(int rn) { eop(OP_PUSH_R); e((u8)rn); }
+    void g_push_i(u32 v) { eop(OP_PUSH_I); e32(v); }
+    void g_gate(int g, int sz) { eop(g); e((u8)sz); }              // OP_NOR_ST | OP_NAND_ST
+    void g_pop_rp(int sz, int rn) { eop(OP_POP_RP); e((u8)sz); e((u8)rn); }
+    // operandin tersini yigina birakir: [PUSH r][PUSH r][NOR_ST] -> ~r (sz-maskeli)
+    void g_inv_r(int rn, int sz) { g_push_r(rn); g_push_r(rn); g_gate(OP_NOR_ST, sz); }
+    void g_inv_i(u32 v, int sz)  { g_push_i(v); g_push_i(v); g_gate(OP_NOR_ST, sz); }
 };
 
 } // namespace
@@ -166,6 +180,7 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
 
     std::map<u32, u32> pc2ic;   // kaynak pc -> bc offset
     bool saw_ret = false;
+    bool last_ret = false;      // 1.0.0: akisin son op'u RET mi (kok-fix)
     bool body_ended = false;    // ret sonrasi dolgu gorundu mu (govde bitti isareti)
     u32 retimm = 0xFFFFFFFF;
     u32 end = rva + size;
@@ -194,6 +209,7 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
 
         if (!F.plain.empty() && I.op != XP_RET) emit_junk();
         pc2ic[pc] = (u32)F.plain.size();
+        last_ret = false;   // 1.0.0: her yeni talimat RET-degil varsayimiyla baslar
         if (getenv("CPL_LIFTDBG"))
             fprintf(stderr, "[lift] pc=%06x len=%d op=%d bytes=%02x %02x %02x %02x\n",
                     pc, (int)I.len, (int)I.op,
@@ -265,6 +281,43 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
         case XP_LEA: L.eop(OP_LEA_RM); L.ereg(I.r1); L.emem(I.mem, I);
             snprintf(buf, sizeof buf, "lea %s, [mem]", regname(is64, I.r1)); break;
         case XP_ALU: {
+            // ---- 1.0.0-UO: cmAnd/cmOr/cmXor NOR/NAND yigin-kapi dekompozisyonu
+            // (intel.cc CompileToVM case cmAnd/cmOr/cmXor birebir — VMProtect
+            // VM'inde mantik komutu dogrudan YOKTUR, hepsi cmNor/cmNand
+            // kapilarindan gecer). Reg-reg ve reg-imm formlari; mem formlari
+            // yerel ALU ile (kapıya almak icin PUSH_M/POP_M gerekirdi —
+            // konservatif kaplama, semantik ayni).
+            // Zincirler (tum sz 1/2/4/8; sonuc POP_RP ile kismi-yazilir):
+            //   AND: inv(b); inv(a); NOR           -> a&b   (cmAnd dal-1)
+            //   OR : inv(a); inv(b); NAND          -> a|b   (cmOr dal-2)
+            //   XOR: inv(b); inv(a); NOR; push b;
+            //        push a; NOR; NOR              -> a^b   (cmXor dal-1)
+            // Son kapi bayraklari yerel mantik op'u ile bayt-bayt ayni kurar.
+            if (!I.mem.present && (I.alu == ALU_AND || I.alu == ALU_OR || I.alu == ALU_XOR)) {
+                bool immf = I.immsz > 0;
+                int rr = immf ? -1 : I.r2;   // operand-2 reg (imm formunda yiginda)
+                if ((immf && I.r1 >= 0) || (!immf && I.r1 >= 0 && rr >= 0)) {
+                    if (immf) L.g_inv_i((u32)(long long)I.imm, I.sz);
+                    else      L.g_inv_r(rr, I.sz);
+                    L.g_inv_r(I.r1, I.sz);
+                    if (I.alu == ALU_AND) {
+                        L.g_gate(OP_NOR_ST, I.sz);            // Nor(~a,~b)=a&b
+                    } else if (I.alu == ALU_OR) {
+                        L.g_gate(OP_NAND_ST, I.sz);           // Nand(~a,~b)=a|b
+                    } else {
+                        L.g_gate(OP_NOR_ST, I.sz);            // Nor(~a,~b)=a&b
+                        if (immf) L.g_push_i((u32)(long long)I.imm); else L.g_push_r(rr);
+                        L.g_push_r(I.r1);
+                        L.g_gate(OP_NOR_ST, I.sz);            // Nor(a,b)=~(a|b)
+                        L.g_gate(OP_NOR_ST, I.sz);            // Nor(a&b,~(a|b))=a^b
+                    }
+                    L.g_pop_rp(I.sz, I.r1);
+                    snprintf(buf, sizeof buf, "%s%s KAPI-dekompoze (sz%d)",
+                             I.alu == ALU_AND ? "and" : I.alu == ALU_OR ? "or" : "xor",
+                             immf ? "-imm" : "-rr", I.sz);
+                    break;
+                }
+            }
             // yon: engine_disasm XP_ALU üretiminde mem.present ise r2 == -2/-3 isareti
             if (I.immsz > 0) {
                 if (I.mem.present) { L.eop(OP_ALU_MI); L.e((u8)I.alu); L.e((u8)I.sz); L.emem(I.mem, I); L.e32((u32)(long long)I.imm); }
@@ -360,12 +413,12 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
             L.eop(OP_MOV_RR); L.e((u8)8); L.ereg(REG_RSP); L.ereg(REG_RBP);
             L.eop(OP_POP_R);  L.ereg(REG_RBP);
             snprintf(buf, sizeof buf, "leave"); break;
-        case XP_RET: L.eop(OP_RET); saw_ret = true;
+        case XP_RET: L.eop(OP_RET); saw_ret = true; last_ret = true;
             snprintf(buf, sizeof buf, "ret"); break;
         case XP_RETI16: {
             u32 im = (u32)I.imm;
             if (retimm != 0xFFFFFFFF && retimm != im) { F.why = "farkli ret imm"; return F; }
-            retimm = im; L.eop(OP_RET); saw_ret = true;
+            retimm = im; L.eop(OP_RET); saw_ret = true; last_ret = true;
             snprintf(buf, sizeof buf, "ret 0x%x", im); break;
         }
         case XP_SETCC: L.eop(OP_SETCC); L.e((u8)I.cc); L.ereg(I.r1);
@@ -476,7 +529,20 @@ VFn lift_function(const u8* code, u32 rva, u32 size, bool is64,
         // YERINE region_end'e atlar (cont_rva) -> yigin/donus adresi korunur.
         if (!region_mode) { F.why = "ret bulunamadi"; return F; }
         L.eop(OP_RET);
+        last_ret = true;
         F.notes.push_back("  [BOLGE] govde ret yok — yapay OP_RET + stub region sonuna atlar");
+    }
+    // ---- 1.0.0 KOK-FIX (kullanici-kanitli oyun-cokmesi sinifi) ----
+    // --add D7610:D766C gibi bolge-siniri son ret'i DIYARIDA birakir: lift
+    // izi 'pop ebp'de biter, bytecode RET'siz kalir -> VM akis-tasmasi bc
+    // sonrasi OOB bayti op diye okur (itab[garcop] stack-OOB) -> rastgele
+    // VM op'u -> oyun cokmesi. 0.9.0 'sansliydi' (OOB bayti benign cozuldu);
+    // 0.9.5/0.10.0'da bc boyutu degisince OOB bayt degisti -> cokme. Fix:
+    // akis sonu RET ile GARANTILENIR (stub retimm ile temiz doner).
+    if (!last_ret) {
+        L.eop(OP_RET);
+        F.notes.push_back("  [1.0.0-FIX] bolge-siniri kesigi: govde RET ile bitmiyordu — "
+                          "yapay OP_RET eklendi (OOB akis-tasma kok-nedeni kapandi)");
     }
 
     // 0.4.1 DÜZELTME (0.3.0 gizli bug): yerel retimm hicbir zaman F.retimm'e

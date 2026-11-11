@@ -113,6 +113,17 @@
 #define OP_STR       0x39   // ud sz rep : 0=movs 1=stos 2=lods 3=scas 4=cmps; rep 0/1(repe)/2(repne)
 #define OP_IMUL_RM   0x3A   // sz r1 mem : imul r1, [mem] (0F AF bellek formu)
 
+// --- 1.0.0-UO: UniversalObfuscator (VMP pub1 intel.cc) cmNor/cmNand YIGIN
+//     KAPILARI — birebir port. VMProtect VM'i yigin-makinesidir: cmAnd/
+//     cmOr/cmXor dogrudan komut DEGILDIR, hepsi cmNor/cmNand kapilarindan
+//     gecer (intel.cc CompileToVM case cmAnd/cmOr/cmXor +
+//     AddRegistrAndValueSection/OrValueSection).
+//     0.9.5/0.10.0 dersleri: temp-reg havuzu (r9/r10/r11) ve IR-junk YOK —
+//     kapilar saf yigin ops (temp'siz, dengeli, dugum-siniri ici).
+#define OP_NOR_ST    0x3B   // sz : pop b, pop a, push ~(a|b)&mask (mantik bayraklari)
+#define OP_NAND_ST   0x3C   // sz : pop b, pop a, push ~(a&b)&mask
+#define OP_POP_RP    0x3D   // sz r1 : kismi-yazim pop (cmPop otRegistr size_ es-karsiligi)
+
 // --- 0.8.0 polimorfik isleyiciler: opcode permütasyonu ---
 // π = anahtar-turetilmis (Fisher-Yates; tohum = fonksiyon RVA'si).
 // Encoder (engine_lift eop) gercel->raw yazar (vm_perm_enc); interpreter
@@ -120,7 +131,7 @@
 // fonksiyondan turer -> tablo tasimaya gerek yok (stub yalniz tohumu
 // ctx->scratch[3]'e yazar). Tohum 0 = kimlik degil, gecerli permütasyon
 // (determinizm iki tarafta da ayni fonksiyondan).
-#define VM_OPN 0x3B   // opcode uzayi (0x00..0x3A) — 0.9.0-DeepVM: 0x2C -> 0x3B
+#define VM_OPN 0x3E   // opcode uzayi (0x00..0x3D) — 1.0.0-UO: 0x3B -> 0x3E (3 yeni yigin kapi op'u)
 static void vm_perm_tab(unsigned int seed, unsigned char* t, int dec) {
     unsigned char p[VM_OPN]; int i, j;
     for (i = 0; i < VM_OPN; i++) p[i] = (unsigned char)i;

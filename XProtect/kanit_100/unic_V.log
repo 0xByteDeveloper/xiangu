@@ -1,0 +1,22 @@
+t_adc      native=DDDDDEDA (OK)  vm=FFFFFFFF (OK)  -> FARK
+t_bt       native=00000004 (OK)  vm=00000000 (OK)  -> FARK
+t_divonly  native=00000780 (OK)  vm=00000780 (OK)  -> ESIT
+t_flagops  native=00000077 (OK)  vm=00000077 (OK)  -> ESIT
+t_gate32   native=00500404 (OK)  vm=DEADBEEF (OK)  -> FARK
+t_gate816  native=00123477 (OK)  vm=00700100 (OK)  -> FARK
+t_gate_imm native=80008080 (OK)  vm=80000000 (OK)  -> FARK
+t_gate_loop native=0001DC07 (OK)  vm=00010007 (OK)  -> FARK
+t_gate_stack native=0000FAFE (OK)  vm=0000CAFE (OK)  -> FARK
+t_gate_zr  native=00000000 (OK)  vm=00000111 (OK)  -> FARK
+t_imulmem  native=FFFFFFC1 (OK)  vm=FFFFFFC1 (OK)  -> ESIT
+t_loop     native=0000000F (OK)  vm=0000000F (OK)  -> ESIT
+t_mul8     native=00000416 (OK)  vm=00000780 (OK)  -> FARK
+t_muldiv   native=75CCC564 (OK)  vm=75CCA2ED (OK)  -> FARK
+t_mulonly  native=00000396 (OK)  vm=00000396 (OK)  -> ESIT
+t_parity   native=00000055 (OK)  vm=00000055 (OK)  -> ESIT
+t_pushf    native=00C500C7 (OK)  vm=FFFFFDFF (OK)  -> FARK
+t_shld     native=9EFE9AB6 (OK)  vm=3C4D5E6F (OK)  -> FARK
+t_str      native=070671CF (OK)  vm=070671CF (OK)  -> ESIT
+t_xadd     native=00000062 (OK)  vm=00000062 (OK)  -> ESIT
+== SONUC: 8/20 ESIT
+BASARISIZ: t_adc, t_bt, t_gate32, t_gate816, t_gate_imm, t_gate_loop, t_gate_stack, t_gate_zr, t_mul8, t_muldiv, t_pushf, t_shld

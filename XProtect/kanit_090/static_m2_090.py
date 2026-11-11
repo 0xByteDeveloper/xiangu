@@ -32,7 +32,7 @@ def vm_keyxor(rva, ln):
     x ^= x >> 31
     return x
 
-VM_OPN = 0x3B  # opcode uzayi (vm_opcodes.h)
+VM_OPN = 0x3E  # opcode uzayi (vm_opcodes.h) — 1.0.0-UO: 0x3B -> 0x3E
 
 def vm_perm_tab(seed, dec):
     p = list(range(VM_OPN))

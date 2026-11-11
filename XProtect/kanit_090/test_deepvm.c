@@ -259,8 +259,112 @@ __attribute__((noinline)) __declspec(dllexport) unsigned int t_mul8(unsigned lon
 __attribute__((noinline)) __declspec(dllexport) unsigned int t_mulonly(unsigned int a);
 __attribute__((noinline)) __declspec(dllexport) unsigned int t_divonly(unsigned int a);
 
+/* ==================== 1.0.0-UO KAPI (NOR/NAND yigin) testleri ====================
+   Derleyici normal and/or/xor uretir; lifter 1.0.0'da bunlari cmNor/cmNand
+   yigin kapilarina dekompoze eder (intel.cc birebir). Dogru sonuc + bayrak
+   + yigin-dengesi + dongu-geri-dalisi = kanit. */
+
+/* G1) and/or/xor reg-reg sz4 + bayrak tuketimi (jz/js/jp zincir hedefleri
+   kapı-sinirlari arasindadir — JCC dugum-siniri guvenligi) */
+__attribute__((noinline)) __declspec(dllexport) unsigned int t_gate32(unsigned int a, unsigned int b) {
+    __asm__ volatile(
+        "and %1, %0    \n\t"
+        "jz 9f         \n\t"
+        "or  %2, %0    \n\t"
+        "js 9f         \n\t"
+        "xor %2, %0    \n\t"
+        "jp 9f         \n\t"
+        "jmp 8f        \n\t"
+        "9: mov $0xDEADBEEF, %0 \n\t"
+        "8:"
+        : "+r"(a) : "r"(b), "r"(b ^ 0x55555555u) : "cc");
+    return a;
+}
+
+/* G2) sz2/sz1 kapi + bayrak (and/or/xor imm formlari dahil) */
+__attribute__((noinline)) __declspec(dllexport) unsigned int t_gate816(unsigned int a) {
+    unsigned short s = (unsigned short)a;
+    unsigned char c = (unsigned char)(a >> 8);
+    __asm__ volatile(
+        "andw $0x80FF, %0 \n\t"
+        "jz 9f            \n\t"
+        "orw  $0x7001, %0 \n\t"
+        "jns 9f           \n\t"
+        "xorb $0x5A, %1   \n\t"
+        "jp 9f            \n\t"
+        "orb  $0xA5, %1   \n\t"
+        "jmp 8f           \n\t"
+        "9: movw $0x1234, %0 \n\t"
+        "movb $0x77, %b1     \n\t"
+        "8:"
+        : "+r"(s), "+r"(c) : : "cc");
+    return ((unsigned int)s << 8) | (unsigned int)c;
+}
+
+/* G3) xor r,r + ZF yolu (kapı: inv(0)=1'ler, Nor -> 0, ZF=1) */
+__attribute__((noinline)) __declspec(dllexport) unsigned int t_gate_zr(unsigned int a) {
+    unsigned int r;
+    __asm__ volatile(
+        "xor %1, %1    \n\t"
+        "je 1f         \n\t"
+        "mov $0x111, %1\n\t"
+        "1: mov %1, %0 \n\t"
+        : "=&r"(r) : "r"(a) : "cc");
+    return r;
+}
+
+/* G4) dongu icinde kapi zinciri — geri-dalis dogrudan zincir BASINA (xor op)
+   yonelir: her turda zincir yeniden-yurutulur (yigin dengesi kaniti) */
+__attribute__((noinline)) __declspec(dllexport) unsigned int t_gate_loop(unsigned int n) {
+    unsigned int acc = 0x9E3779B9u;
+    __asm__ volatile(
+        "1: xor %1, %0   \n\t"
+        "and $0xFFFF, %0 \n\t"
+        "or  $0x10000, %0\n\t"
+        "add $7, %0      \n\t"
+        "dec %2          \n\t"
+        "jnz 1b          \n\t"
+        : "+r"(acc) : "r"(0xA5A5A5A5u), "r"(n) : "cc");
+    return acc;
+}
+
+/* G5) misafir yigin basinci + kapi zinciri: zincir transient yazmalari
+   misafir push'larini EZMEMELI (VM_DELTA bolgesi); pop ile dogrulama.
+   (x64: push/pop 8-bayt — 64-bit operand zorunlu, %k0 32-bit alt-parca) */
+__attribute__((noinline)) __declspec(dllexport) unsigned int t_gate_stack(unsigned int a) {
+    unsigned long long r, k;
+    __asm__ volatile(
+        "push %2         \n\t"
+        "push $0x1234    \n\t"
+        "mov $0xF0F0, %k0 \n\t"
+        "and %k2, %k0    \n\t"
+        "or  $0x0F0F, %k0 \n\t"
+        "xor $0xFFFF, %k0 \n\t"
+        "pop  %1         \n\t"
+        "pop  %1         \n\t"
+        "xor %k2, %k0    \n\t"
+        : "=&r"(r), "=&r"(k) : "r"((unsigned long long)0xCAFEULL) : "cc");
+    (void)a;
+    return (unsigned int)r ^ (k == 0xCAFEULL ? 0u : 1u);   /* yigin bozulduysa fark */
+}
+
+/* G6) imm formu sinir degerleri (sz1/2/4; PUSH_I sext + kapi sz-maskesi) */
+__attribute__((noinline)) __declspec(dllexport) unsigned int t_gate_imm(unsigned int a) {
+    unsigned int d = a;
+    __asm__ volatile(
+        "and $0x80, %0       \n\t"
+        "jz 1f               \n\t"
+        "or  $0x8000, %0     \n\t"
+        "jmp 2f              \n\t"
+        "1: or $0x7F, %0     \n\t"
+        "2: xor $0x80000000, %0 \n\t"
+        : "+r"(d) : : "cc");
+    return d;
+}
+
 int main(void) {
-    FILE* f = fopen("Z:\\home\\z\\my-project\\scripts\\xb090\\deepvm_sonuc.txt", "w");
+    FILE* f = fopen("deepvm_sonuc.txt", "w");
+    if (!f) f = fopen("Z:\\home\\z\\my-project\\scripts\\xb100u\\deepvm_sonuc.txt", "w");
     if (!f) f = fopen("C:\\deepvm_sonuc.txt", "w");
     if (!f) return 1;
 #ifdef __i386__
@@ -281,6 +385,12 @@ int main(void) {
     fprintf(f, "DEEPVM %08X\n", t_parity(0u));
     fprintf(f, "DEEPVM %08X\n", t_imulmem(3u));
     fprintf(f, "DEEPVM %08X\n", t_mul8(0u));
+    fprintf(f, "GATE %08X\n", t_gate32(0xF0F0A5A5u, 0x0FF03C3Cu));
+    fprintf(f, "GATE %08X\n", t_gate816(0x0000BEEFu));
+    fprintf(f, "GATE %08X\n", t_gate_zr(0x41u));
+    fprintf(f, "GATE %08X\n", t_gate_loop(7u));
+    fprintf(f, "GATE %08X\n", t_gate_stack(0xDEADu));
+    fprintf(f, "GATE %08X\n", t_gate_imm(0x000000C3u));
     fprintf(f, "IX %08X\n", t_mulonly(0u)); fprintf(f, "IX %08X\n", t_divonly(0u)); fprintf(f, "SON\n");
     fclose(f);
     return 42;

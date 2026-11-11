@@ -1,0 +1,3 @@
+seed=0xD7610 bc_rva=0x548068 bc_len=215
+bc[0]=0x2B -> itab -> 0x1E
+SONUC: ANTIDBG (0x1E) DOGRU COZULUYOR ✓

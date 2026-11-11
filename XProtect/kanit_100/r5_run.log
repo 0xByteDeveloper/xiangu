@@ -1,0 +1,4 @@
+0120:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+OK main a=78 b=0x16f9 c=0x1221 d=81
+OK sdk_print 78
+OK hepsi dogru

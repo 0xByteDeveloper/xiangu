@@ -33,7 +33,7 @@
 
 // ---------------- surum ----------------
 #define XPROTECT_EDITION  L"XProtect Ultimate"
-#define XPROTECT_VERSION  L"0.8.5"
+#define XPROTECT_VERSION  L"1.0.0"
 #define XPROTECT_BUILD    L"2026-11-09"
 
 // ---------------- dil tablosu (en.lng birebir + TR) ----------------

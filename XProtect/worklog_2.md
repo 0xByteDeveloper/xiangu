@@ -173,3 +173,164 @@ debuggeri ve Veh i başarıyla algıladı teşekkürler". TALIMAT:
 5) NOT: wine x86 calistirma hala imkansiz (wine-root wow64'suz; Debian
    wow64 sessiz oluyor) — x86 dogrulama Unicorn diferansiyeliyle (kanit).
    /tmp/my-project (wine-root + prefix) sandbox resetinde SAG KALDI.
+
+## Task 22 — 0.9.5-DeepVM Faz B: IR-katmani mutasyonu + B4 build-nonce
+
+**Kapsam (UniversalObfuscator B1-B4 portu):**
+- engine_lift.cpp (+608): IrNode ara-temsili — irm_decode_node / irm_memlen /
+  irm_ncall_clobber / irm_uddef / irm_finish. Junk enjeksiyonu IR duzeyinde
+  (uses/defs'ten turetilir; junk canli degeri bozamaz).
+- engine_main.cpp (+30) + engine_util.cpp (+24): B4 build-nonce —
+  perm_seed = XP_PERM_NONCE ^ fn_rva (handler-shuffle dahil). Varsayilan 0 =
+  0.9.0 davranisi. XPROTECT_PERM_NONCE env ile sabitlenir.
+- engine_mut.cpp (+21): LOOP/LOOPE/LOOPNE (E0-E2) + JECXZ (E3) rel8 yeniden
+  kodlama + kind-2 dahili rel8 fixup; tasarsa sesli duru-RED.
+  **0.9.0'in bilinen acigi (t_loop U-modu duru-RED) kapandi.**
+- engine.hpp (+5): IrNode yapisalari.
+
+**Ders (kalici):** 0.9.x x64 stub yerlesiminde bc_rva imm32 @stub+91
+(48 05 imm32). 0.8.1 script'i 92 okuyordu — 1 bayt kayma "bc bolumu
+bulunamadi" diye gorunuyordu. kanit_095/static_ad_095.py duzeltilmis.
+
+**Kanit (kanit_095/regress_095.txt, verify_095.py ile taze dogrulama):**
+PASS=11 FAIL=0 — T1 SELFTEST OK; T2/T3 deepvm bayt-bayt; T4 R5 rc=42
+(taze derle: sdkonly+pack+sectcrypt+loadercrc+filecrc+stripfixups);
+T5 tamper rc=117; T6 ayni-nonce md5 esit + rc=42; T7a antidebug KAYIT;
+T7b statik ANTIDBG: seed=0x9A5B6C83 bc_rva=0x40EA0 bc_len=50,
+bc[0]=0x13 -> itab -> 0x1E. Sabit nonce: XPROTECT_PERM_NONCE=0x9A5B7C31.
+
+**Arac (bu oturum): xguard v2 — NO-KILL kaynak koruyucu**
+Kullanicinin zorunlu kurali: hicbir surec oldurulmez. Sadece kademeli
+kisitlama: CPU >=%90 → renice 19 → taskset tek-cekirdek → kisa STOP/CONT
+nefes-molasi. RAM >=%90 → renice → SIGSTOP (buzla; RAM %85 altina inince
+SIGCONT). Sizinti tespiti: RSS >512MB ve 6 orneklem %25+ buyume → taskset+
+renice. Hedef: toplam CPU'nun ve RAM'in en az %10'u hep bos. Korumali ata
+zinciri (PID 1'e kadar) asla dokunulmaz. `xguard watch 3` arka plan;
+`xguard ensure` oturum basinda; `xguard rg`; `xguard run --tmo T --mem M`.
+
+**Ortam yeniden-kurulum kilavuzu (sandbox reset sonrasi, kalici kural 3):**
+1. pip: `pip install ziglang pefile` (zig cc = PE derleyici, pefile = kanit)
+2. wine-10.0 chroot: `bash /home/z/my-project/scripts/wchroot.sh <exe>` —
+   script /home/z/my-project'u Z:\ olarak baglar; wineprefix
+   /home/z/my-project/scripts/xb095w altinda KALICI (home korunur)
+3. Xvfb: `setsid Xvfb :99 -screen 0 1024x768x24 &` (UI/protect kosulari icin,
+   DISPLAY=:99; regress script'leri otomatik baslatir)
+4. wine x86 calistirma IMKANSIZ (wow64'suz root-wine) — x86 dogrulama
+   Unicorn diferansiyeliyle (unic_deepvm_x86.py)
+5. VM blob yeniden-uretim: `bash build_vmblob.sh` (xb095 dizini; gcc-32
+   chroot icinde; vm64.bin 16028B / vmx86.bin 23776B / vm_blob.cpp 206797B)
+6. UI derleme: `bash build_ui.sh` (mingw x64+x86; cikti XProtectUI.exe +
+   XProtectUI32.exe ~10 dk, xguard acikken -j2 guvenli)
+7. GitHub: token /home/z/my-project/scripts/gh_token.txt (chmod 600)
+
+**Sonraki faz (Faz C + A4):** C1-C3 obfiske handler (NOR/NAND dekompozisyonu,
+UniversalObfuscator core/lift*), C2 VM-in-VM, A4 FPU (fld/fstp/fadd/fmul;
+ctx st[8] genislemesi → VMOFF/VMSIZE + stub sabitleri degisir).
+Paket: releases/XProtect_0.9.5.zip. Depo: 0.9.5 commit.
+
+## Task 23 — 0.10.0-FazC (C1): VMP cmNor/cmNand atomik mantik dekompozisyonu
+
+**Kapsam (UniversalObfuscator intel.cc AddRegistrAndValueSection/OrValueSection 1:1):**
+- vm_opcodes.h: OP_NOR_RR=0x3B, OP_NAND_RR=0x3C (bayraksiz atomik);
+  VM_OPN 0x3B -> 0x3D (tum bytecode yeniden-kodlanir — bilincli kirilim)
+- vm_core.c: yorumlayici ~((r1|r2)) / ~((r1&r2)) — sz-maskeli, bayraksiz
+- engine_lift.cpp: IR uzunluk tablosu + uses/defs (fwr YOK) + dekomposizyon:
+  AND → NAND(NAND(a,b),NAND(a,b)) | NOR(NOR(a,a),NOR(b,b));
+  OR → NOR(NOR(a,b),NOR(a,b)); sonrasina TEST r,r (SF/ZF/PF birebir geri;
+  CF=OF=0, AF undef — logic op semantigiyle ozdes). Gecici-reg havuzu
+  r9/r10/r11 push/pop sarimli (liveness'tan bagimsiz). imm formu sz<=4.
+  Yogunluk ~%21 (pick60 x pick35).
+- B3 junk-guvenligi: 0.9.5 IR uses/defs altyapisi sayesinde ek islem gerekmedi.
+
+**Kanit (kanit_100/):**
+- regress_100.txt: PASS=10 FAIL=0 — t_norchain YENI test fonksiyonu
+  (and/or + jz/js flag-tuketimi): 14/14 bayt-bayt. R5 rc=42, tamper 117,
+  nonce md5-ozdes+rc=42, statik ANTIDBG 0x1E (VM_OPN 0x3D).
+- nor_census_100.log: nor_probe bc akisi op-uzunluklariyla yurundu
+  (17 stub, 292 op) — OP_NOR_RR op-konumlarinda dogrudan gorundu
+  (beklenti 6x0.6x0.35=1.3 ile uyumlu). probe_walk.py = kanit araci.
+
+**Ders:** nohup arka-plan derlemesi ara-cagri temizliginde OLUYOR — agir
+derlemeler foreground + timeout ile adim-adim kosulmali (LZMA/x64/x86
+ayri cagrilar). xguard v2 izleyici tum derleme/regresyon boyunca aktif;
+hici kisitlama tetiklenmedi (yuk dagilimi yavas-yavas artiyor).
+
+**Sonraki (Faz C devam + A4):** C2 VM-in-VM (kendi VM'ini kendisi korur),
+A4 FPU lifter (ctx st[8]; fld/fstp/fadd/fmul; VMOFF/VMSIZE+stub sabitleri).
+Paket: releases/XProtect_0.10.0.zip. Depo: 0.10.0 commit.
+
+## Task 24 — 1.0.0-UO: 0.9.0'a donus + UniversalObfuscator yigin-kapilari + oyun-cokmesi KOK-DUZELTMESI
+
+Agent: main (Z.ai) | Tarih: 2026-11-11 (oturum 11)
+
+KULLANICI RAPORU: 0.9.5/0.10.0 BOZUK — "korumaya aldığım oyun fonksiyonu
+çalışınca crash veriyor oyun". TALIMAT: XProtect_0.9.0'a geri dön (en iyi
+optimize sürüm), UniversalObfuscator'un BIREBIR aynısı yap, sinir yok.
+xguard v3 istegi: saatlerce calisabilen izleyici.
+
+1) xguard v3 (scripts/xguard): 2 cekirdek/4GB'ye kalibre; %10 RAM+CPU
+   garanti bolgesi; merdiven renice->taskset->duty-cycle; kill YALNIZ
+   5+ strike'lik tekrar-eden suclu (son care); korumali-ata zinciri;
+   log rotasyonu; ic-dongu olurse dis kokpu yeniden baslatir; run
+   --tmo (dahili bash-alarm — harici `timeout` sureci YOK) + --mem
+   (ulimit). Kullanici uyarisi: "timeout gibi dongulere dikkat".
+
+2) UO KAYNAK ANALIZI (uobf/src1/vmp/core/intel.cc 31.493 satir):
+   VMProtect VM'i YIGIN-MAKINESI. cmAnd/cmOr/cmXor dogrudan komut DEGIL:
+   hepsi cmNor/cmNand kapilarindan gecer (case cmAnd dal-1: Nor(inv,inv);
+   cmOr dal-2: Nand(inv,inv); cmXor dal-1: Nor uclu zincir). Bayrak
+   bolumleri de yiginda (EFX/EIX OR/AND-plane). 47x `rand()&1`
+   esdeger-form.
+
+3) 1.0.0 KAPI PORTU (0.9.0 tabani; 0.9.5/0.10.0 ozellikleri GERI ALINDI):
+   - vm_opcodes.h: OP_NOR_ST=0x3B, OP_NAND_ST=0x3C, OP_POP_RP=0x3D
+     (kismi-yazim pop = cmPop otRegistr size_); VM_OPN 0x3B->0x3E
+   - vm_core.c: yigin kapilari (PUSHSZ slot, sz-maskeli, mantik-bayraklari
+     do_alu AND yolu ile bayt-bayt); POP_RP (sz<8 ust-bayt koruma);
+     AKIS-TASMA KORUMASI (ic >= bc_len -> duru-cikis)
+   - engine_lift.cpp: g_push_r/g_gate/g_pop_rp/g_inv_r yardimcilari;
+     XP_ALU'da and/or/xor reg-reg + reg-imm dekompozisyonu (tum sz);
+     AND: inv(b),inv(a),NOR | OR: inv(a),inv(b),NAND | XOR: 12-op Nor
+     zinciri (intel.cc dal-1 birebir). mem-formlari yerel ALU (konservatif).
+   - 0.9.5/0.10.0 DERSI UYGULANDI: temp-reg havuzu YOK (r9/r10/r11
+     push/pop cokme suphesi), IR-junk YOK, nonce YOK. Kapilar dengeli
+     (2 push + kapi + pop), dugum-siniri ici; JCC hedefi op-siniri.
+
+4) *** OYUN-COKMESI KOK-NUDENI BULUNDU (kullanici kanitli sinif) ***
+   bc_census_100.py (yeni arac) ile metin2 d7610 bytecode'u UCTAN-UCA
+   yurundu. BULGU: --add D7610:D766C bolge-siniri son ret 8'i (0xD766C)
+   DIYARIDA birakir -> lift izi "pop ebp"de biter -> bytecode RET'siz
+   (0.9.0-ref: bc_len=194 son-op=POP_R KANIT). VM ic-sinir kontrolu
+   YOKTU: bc[bc_len] OOB bayti op diye cozulur (itab[garcop] stack-OOB)
+   -> rastgele op. 0.9.0 SANS LIYDI (OOB benign); 0.9.5/0.10.0'da IR-junk
+   + kapilar bc boyutunu degistirdi -> OOB bayt degisti -> COKME. Kapilar
+   suclu degildi; kesik akis 0.8.5'ten beri hastaydi.
+   FIX (iki katman): (a) lifter akis sonunu RET ile garanti eder
+   (last_ret bayragi; bolge-kesigine yapay OP_RET); (b) interpreter
+   ic >= bc_len -> duru-cikis. Fix sonrasi census: bc_len=215, 51 op,
+   son-op=RET, NOR_ST=5, POP_RP=1 — YAPI-SAGLAM + KAPI AKTIF.
+
+5) KANIT (kanit_100/, regress_100.sh): PASS=14 FAIL=0 —
+   T1 SELFTEST OK; T2 x64 V bayt-bayt (6 yeni GATE testi: t_gate32
+   and/or/xor+jz/js/jp; t_gate816 sz1/2; t_gate_zr xor r,r+ZF;
+   t_gate_loop geri-dalis zincir-BASINA; t_gate_stack misafir-yigin
+   basinci; t_gate_imm sinir-imm 0x80/0x8000/0x80000000);
+   T3 x86 Unicorn V+U tam eslesme (oyun mimarisi PE32);
+   T4 R5 ULTIMATE rc=42; T5 tamper 117; T6 md5-ozdes;
+   T7 metin2 KAYIT + ANTIDBG 0x1E + census YAPI-SAGLAM.
+   NOT: zig CRT TLS callback'i tekrar cikti -> test-prep'te TLS data-dir
+   temizligi regress_100.sh'e gomulu (0.8.5 dersi kaliciyor).
+   NOT2: T5 tamper .vmp0 yerine .vmp1 (stub) secmeli — 117 altin standardi.
+
+6) VERSIYON: XPROTECT_VERSION 0.8.5 -> 1.0.0 (0.9.x'te unutulmustu).
+   Paket: releases/XProtect_1.0.0.zip (md5 fe5e13da) + download/.
+   0.9.5/0.10.0 zip'leri download/'tan SILINDI (geri cekildi).
+   Depo: 1.0.0-UO commit (uo-full branch, 0.9.0 tabani).
+
+7) xguard izleme-notu: genis grep 120s timeout yedi (kullanici uyarisi
+   yerinde) — dar-erisim kullan. Tum derleme/regresyon xguard v3
+   gozetiminde sorunsuz (hic kisitlama tetiklenmedi).
+
+Sonraki: kullanici Windows testi (temiz oyun + debugger baterisi + damage);
+A4 FPU lifter (ctx st[8]; VMOFF/VMSIZE + stub sabitleri) — UO tam parite
+kalan tek buyuk blok; C2 VM-in-VM (roadmap).

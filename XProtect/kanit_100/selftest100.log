@@ -1,0 +1,13 @@
+0024:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+002c:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+0034:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+003c:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+0048:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+0070:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+0078:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+0090:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+00ac:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+00b4:err:ntoskrnl:ZwLoadDriver failed to create driver L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\winebth": c00000e5
+003c:fixme:service:scmdatabase_autostart_services Auto-start service L"winebth" failed to start: 1359
+00fc:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
+SELFTEST OK funcs=0 proj=0 lics=0
