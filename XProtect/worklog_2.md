@@ -334,3 +334,112 @@ xguard v3 istegi: saatlerce calisabilen izleyici.
 Sonraki: kullanici Windows testi (temiz oyun + debugger baterisi + damage);
 A4 FPU lifter (ctx st[8]; VMOFF/VMSIZE + stub sabitleri) — UO tam parite
 kalan tek buyuk blok; C2 VM-in-VM (roadmap).
+
+## Task 27 — 1.2.0-B1: mult-VM/Advanced (rel32 dis-akis) + B5 debugmode [SURUYOR]
+
+Agent: main (Z.ai) | Tarih: 2026-11-12 (oturum 12 — sandbox reset sonrasi)
+
+ORTAM KURTARMA (kalici kural 3 uygulandi):
+- Repo taze clone (gh_token.txt): son commit 6371bd4 (1.1.0 release, md5 30ae1447).
+  Kullanici verdigi URL zip'i ile repo releases/ zip'i md5-es (30ae14474f1c...).
+- wine chroot yeniden: setup_env.sh mantigi (apt-get download wine64 libwine
+  wine-binfmt -> dpkg -x -> setup_wine_root.sh). IKI YENI DERS:
+  (a) Debian wine 10.0 repack'te /usr/lib/wine/wineserver SHELL SCRIPT — chroot'ta
+      /bin/sh bind EDILMEDIgi icin "could not exec wineserver". COZUM: script'i
+      wineserver64 ELF ile ez (wine-root/usr/lib/wine/wineserver).
+  (b) wchroot.sh'e PATH=/usr/lib/wine:/usr/bin:/bin export eklendi.
+- pip: ziglang 0.17.1 + pefile + unicorn -> site_pkgs (kalici) + venv.
+- gcc -m32 LINK icin CRT istiyor; blob uretimi -c + ham ld kullandigindan
+  multilib GEREKMEDI (gcc -m32 -c vm_core.c OK; ld -m elf_i386 host).
+- Xvfb sistemde sag. xguard v4 yazildi (pid watch; %1 marj / %99 kullanilabilir;
+  kademeli renice->taskset->pulsing; kill yalniz 3+ strike + RSS>256MB son care).
+
+BASLINE KANITI (a4fpu/, regress_base.sh — wine --cli ERKEN DONUYOR:
+cikti dosyasi POLL edilmeli; regress_base.sh bekleme-dongulu yazildi):
+- B1 R5 ULTIMATE (sdkonly+pack+sectcrypt+loadercrc+filecrc+stripfixups):
+  RCODE=42 + "OK hepsi dogru" (r5_110_p.exe)
+- B2 tamper .vmp1 tek-bayt: RCODE=117 (duru-ret altin standart)
+- B3 metin2 d7610 U+antidebug: koruma OK (m2_110.exe; stub seed=0xD7610,
+  bc_rva=0x54B868 bc_len=567 — 1.1.0 blob degisimiyle anchor kaydi;
+  static_m2_090.py'in 0.9.0 itab bekleyisi icin 1.2.0 yeniden-yazimi yapilacak)
+
+KRITIK BULGU: repo vm_core.c COMMIT-BOZUK (c->regsap[k]] — derlenemez;
+1.1.0 derlemesi pre-generate vm_blob.cpp'den yapilmisti). regs[map[k]]
+duzeltildi; x64+x86 blob yeniden uretim kanitlandi.
+
+B1 KOD (vm_opcodes.h + vm_core.c + engine_lift.cpp + engine_stub.cpp +
+engine_main.cpp + engine.hpp + xprotect_ui.cpp):
+- OP_JMPEXT=0x41 (rva32; done=3, scratch[6]=rva), OP_JCCEXT=0x42 (cc rva32);
+  VM_OPN 0x40->0x43. Lifte: disari JMP artik OP_JMPEXT (ncall+ret yerine —
+  yigin temiz, x86 yaprak kipinde de calisir); disari JCC artik duru-RED DEGIL.
+- Stub natgt kolu (done==3): rcx=base+scratch[6] -> RCX push_area slot'una
+  (ctx+0x338) yazilir; pop'lar F'nin SON degerlerini geri koyar; jmp rcx.
+  Donus adresi yiginda KALIR (hedef kendi ret-imm'ini temizler). rcx volatile
+  ezmesi ABI-gecerli. x86: edx hesap -> pushad ECX slot (esp+SUB+0x1C) ->
+  popad'da ecx=hedef -> jmp ecx.
+- vtAdvanced (UO/VMP intel.cc VirtualMachineType 1:1): VM_KSA komut-
+  sifreleyici (4-byte kaba periyot, baska sabit ailesi — VM_KS 8-byte'in
+  kardesi); kip ctx scratch[5] (stub C6 84 24 F0 00 00 00 01 disp32-form);
+  encoder opt.vm_adv ile ayni aile. CLI: --vmadv.
+- mult-VM (VirtualMachineList semantigi): opt.vmn (CLI --vmn N, 1..8);
+  vm_id = rva % vmn; ayni VM'in fonksiyonlari AYNI opcode haritasi
+  (perm_seed = ((vm_id+1)*0x9E3779B9 ^ 0x51ED270B)|1) + AYNI anahtar-alani
+  (decoder anahtar = stub-tasiyan ^ K2 ^ VM_VMK(vm_id); encoder ekey =
+  base ^ VM_VMK(vm_id); VM_VMK(0)=0 -> vmn=1 bayt-bayt 1.1.0 uyumlu).
+  vm_id ctx scratch[7] (stub C7 84 24 00 01 00 00 <id>).
+- B5 debugmode (VMP pefile.cc:4792 birebir): opt.debugmode -> .vmp0 bosluk
+  dolumu 0xCC (INT3). CLI: --debugmode.
+
+## Task 27 devam — B2 TAM-LOADER (TLS+pack) + B5 debugmode — TAMAMLANDI
+
+**B2: TLS callback'leri + cpPack birlikte (VMP tarzi defer-tasarim):**
+- engine_pack.cpp: TLS-callback RED'i kaldirildi; her callback icin .vmp1
+  icinde trampoline uretildi (push regs + pushfq; cfg state-byte kontrol;
+  state=0 (TLS zamani) -> NO-OP ret; state=1 (EP zamani) -> jmp orijinal
+  callback). Callback DIZISI .vmp1'e tasindi; TLS-dir AddressOfCallBacks
+  guncellendi. EP pack-stub'ina callback-dongusu eklendi (unpack SONRASI
+  callback'ler cagirilir — arg'larla: rcx=0, rdx=DLL_PROCESS_ATTACH, r8=0 /
+  x86 stdcall pushlar). ASLR notu: yeni dizi reloc tasimaz —
+  --stripfixups ile kullanin (log'a yazildi).
+- DERSLER (her biri canli-testle yakalandi):
+  1. compaction raw kaymasi: tramp yazimi compaction ONCESI raw'a gidiyordu,
+     compaction sonrasi farkli ofset — TLS blogu compaction SONRASINA tasindi.
+  2. E9 self-rel formulu: `c.size()+5` YANLIS (E9 push sonrasi c.size()+1):
+     dogrusu `c.size()+4` — OEP jmp 1 bayt kacyordu (0x145F vs 0x1460 kaniti).
+  3. ModRM: cmp byte [r11+8] = `41 80 7B` (79 = r9 olur — junk-state erken
+     callback -> unpack ezilmesi -> 0xC0000005).
+  4. pushfq sirasi: push regs SONRA pushfq; popfq SONRA pop regs — tersinde
+     popfq rax-slot'unu bayrak diye yukler (TF=1 -> 0x80000004 single-step).
+  5. xrt_unpack state byte SET ETMEZ (o XRT-gate'in isiydi): EP-stub kendisi
+     state=1 yazmali — aksi halde tramp'lar EP'de de defer (tls_ran=0 kaniti).
+  6. TLS callback cagri-args: dongude (h=0, reason=DLL_PROCESS_ATTACH, pv=0)
+     verilmeli — reason=cop olursa callback govdesi atlanir (tls_ran=0).
+  7. jz mesafeleri: arg-set blogu eklenince .done kayar — jz'ler guncellenmeli.
+- KANIT: tls_test (TLS callback + pack + stripfixups) RCODE=42
+  ("TLS OK: callback EP'den once calisti") — eski davranis: pack+TLS = RED
+  ya da crash. tls_test_nocb izolasyonuyla pack-yolu ayri dogrulandi.
+
+**B5 cpDebugMode (--debugmode):**
+- .vmp0 IC-dolumu YAPILMADI: cfg'nin sifir-alanlari canli — tam-dolum state
+  byte'i 0xCC'e ezer (ilk-denemede rc=1 kaniti). INT3 dolumu BOLGE-KALANINDA
+  zaten uygulanir (yerinde-stub govde kalan + tramp junk = 0xCC — disasm
+  int3'lerle kanitli). Bayrak log'a islenir.
+
+**REGRESYON (final motor):** sdk_b1 (JMPEXT/JCCEXT/gates + --debugmode)
+rc=42; R5 ULTIMATE + --debugmode rc=42; mult-VM vmn=4 + vmadv rc=42;
+tamper 117; determinizm md5-ozdes; metin2 d7610 U+antidebug koruma OK
+(statik: seed=0xD7610, bc_rva=0x54BD00, bc_len=567 — anahtar/seed boru
+hatti bayt-bayt dogrulandi; x86 stub desenleriyle).
+
+**IKILI:** XProtectUI.exe 1,275,392B; XProtectUI32.exe 1,326,080B.
+
+**KALAN (Faz C'den):** B3 cpResourceProtection (resource sifreleme +
+FindResource/LoadResource/LoadString/EnumResource* yonlendirme — VMP
+IsInternal semantigi), B4 cpVirtualFiles (bundler: gomulu dosya agaci +
+faLoad/faRegister/faInstall — UO file_manager.cc modeli). GitHub token
+olmus (API 401) — commit'ler lokalde, token yenilenince push.
+
+**Ortam notu (kurtarma):** wine-root'ta wineserver SHELL SCRIPT'tir —
+chroot'ta /bin/sh bind edilmediginden wineserver64 ELF ile ezmek zorunlu;
+wchroot.sh'e PATH export eklendi. gcc -m32 LINK icin CRT ister ama blob
+uretimi -c + ham ld kullandigindan multilib gerekmez.

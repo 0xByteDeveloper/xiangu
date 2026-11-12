@@ -1,13 +1,0 @@
-== R1: R5 ULTIMATE (V+M+U sdkonly + pack + sectcrypt + loadercrc + filecrc + stripfixups) ==
-R5 rc=42  OK sdk_print 78 OK hepsi dogru 
-== R2: tamper (paketli cikti tek-bayt, --rt-nomsg) ==
-tamper: .vmp1 bayt cevirildi (raw+33280)
-R5-tamper rc=117 (beklenen: 42 DEGIL — duru-ret)
-== R3: SELFTEST ==
-SELFTEST: SELFTEST OK funcs=0 proj=0 lics=0
-selftest rc=0
-== R4: metin2 d7610 ULTRA + antidebug statik ==
-seed=0xD7610 bc_rva=0x545548 bc_len=546
-bc[0]=0x0A -> itab -> 0x1E
-SONUC: ANTIDBG (0x1E) DOGRU COZULUYOR ✓
-== regresyon sonu ==

@@ -1,5 +1,0 @@
-seed=0xD7610 bc_rva=0x548068 bc_len=215 makine=x86
-yuruyus: 51 op, tam bc_len=215 bitti, son-op=RET
-kapi sayimi: NOR_ST=5 NAND_ST=0 POP_RP=1 toplam-kapi=5
-ust-ops: PUSH_R=10, MOV_RR=7, POP_R=6, NOR_ST=5, NCALL=4, RET=3, ALU_RI=2, ALU_RR=2, JCC=2, MOV_RM=2, MOV_MR=2, ANTIDBG=1
-SONUC: YAPI-SAGLAM (uctan-uca yuruyus) + KAPI AKTIF ✓

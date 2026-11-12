@@ -1,16 +1,0 @@
-damage RVA=0x1450 size=0x43
-011c:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
-mode=clean r=3812 dr0=0
-[clean] mode=clean r=3812 dr0=0 rc=42 -> CALISTI (beklenen CALISTI) = GECTI
-0144:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
-mode=sw r=-559038737 dr0=0
-[sw] mode=sw r=-559038737 dr0=0 rc=1 -> DURDU (beklenen DURDU) = GECTI
-016c:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
-mode=hw r=-559038737 dr0=0
-[hw] mode=hw r=-559038737 dr0=0 rc=1 -> DURDU (beklenen DURDU) = GECTI
-0194:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
-mode=vehonly r=-559038737 dr0=0
-[vehonly] mode=vehonly r=-559038737 dr0=0 rc=1 -> DURDU (beklenen DURDU) = GECTI
-01bc:fixme:ntdll:init_cpu_info Failed to get logical processor information, status 0xc0000002.
-mode=peb r=-559038737 dr0=0
-[peb] mode=peb r=-559038737 dr0=0 rc=1 -> DURDU (beklenen DURDU) = GECTI

@@ -1,9 +1,0 @@
-clean     done=1 eax=0x11223344 OK -> TAMAM
-beingdbg  done=1 eax=0xDEADBEEF OK -> TAMAM
-ntglobal  done=1 eax=0xDEADBEEF OK -> TAMAM
-kapicc    done=1 eax=0xDEADBEEF OK -> TAMAM
-tf        done=1 eax=0xDEADBEEF OK -> TAMAM
-drx       done=1 eax=0xDEADBEEF OK -> TAMAM
-drx0      done=1 eax=0x11223344 OK -> TAMAM
-drxfail   done=1 eax=0x11223344 OK -> TAMAM
-SONUC: 8/8
