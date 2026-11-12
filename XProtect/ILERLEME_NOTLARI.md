@@ -38,14 +38,19 @@
   2) zip'i download/'a ve repo kokune koy + ILERLEME_NOTLARI.md'yi repo'ya
   3) git add+commit+push (token 401 ise skip, push_bekleyen sayacini artir)
   4) log: cp_daemon.log
-- SONUC: (daemon kurulup baslatilinca buraya yazilacak)
+- SONUC (04:17): cp_daemon.py yazildi, tek-tur test OK: cp1 zip 3,077,962B
+  uretildi (download/XProtect_1.2.0_cp1.zip). Push 401 -> push_bekleyen.txt'ye
+  birikti (token gelince otomatik bosalicak). Daemon cift-fork BASLATILDI
+  (dongu 240 sn; cp2 ilk otomatik tur ~04:20).
 
 ## 2026-11-12 04:26 — PLAN: vm_core.c commit-bozuk fix dogrulamasi
 
 - SORUN (onceki oturum kaydi): repo vm_core.c "c->regsap[k]]" ile COMMIT-BOZUK
   gelmisti; duzeltildi. A ziplinde duzeltilmis hal mi, dogrulanacak.
 - YAPILACAK: grep regsap + gcc -m32 -c derleme denemesi.
-- SONUC: (doldurulacak)
+- SONUC (04:18): A zip'indeki vm_core.c'de "regsap[k]]" YOK (fix yerinde);
+  kanit = derleme testi: -DVM_IS_X64 -DVM_WINDOWS ile rc=0 (28,648B obj),
+  -m32 -DVM_IS_X86 ile rc=0 (40,964B obj). Iki mimari de temiz.
 
 ## 2026-11-12 04:27 — PLAN: wine-root + derleme + regresyon
 
