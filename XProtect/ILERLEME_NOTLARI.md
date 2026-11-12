@@ -60,10 +60,41 @@
   2) vm64.bin/vmx86.bin blob yeniden uretim (gen_blob.py yolu)
   3) XProtectUI.exe + 32 yeniden derleme (build_ui.sh)
   4) Regresyon: sdk_b1 rc=42, R5 ULTIMATE rc=42, tamper rc=117, tls_test rc=42
-- SONUC: (doldurulacak)
+- SONUC (04:40): TAMAMLANDI — 5/5 altin standart:
+  R1 R5 ULTIMATE (sdkonly+pack+sectcrypt+loadercrc+filecrc+stripfixups+
+     debugmode) rc=42 "OK hepsi dogru"
+  R2 tamper .vmp1 tek-bayt (--rt-nomsg varyanti) rc=117 DURU-RET
+  R3 sdk_b1 (JMPEXT/JCCEXT/gates + debugmode) rc=42
+  R4 tls_test (pack+stripfixups) rc=42 "TLS OK" (B2 kaniti)
+  R5 mult-VM vmn=4 + vmadv rc=42 (B1 kaniti)
+- DERSLER (yakalanan ve duzeltilen 3 kustum):
+  1. gen_blob.py A ziplinde YOKTU — B'den alindi (guncelle: blob uretimi
+     icin gen_blob.py + vm64/vmx86.bin gerekiyor).
+  2. lzma/ klasoru A ziplinde YOKTU — 0.6.1 kaynak agacindan kopyalandi
+     (LzmaEnc.c/LzFind.c + headers).
+  3. engine_sym.hpp A ziplinde YOKTU — B'den alindi. DERS: A zipli
+     eksik-dosya ile gelmisti; B kopyasi bunlari kapatmistir (merge -n).
+  4. wine cmd ilk sıcak başlatmada asılı kalmaktir: pkill -9 wine +
+     wineboot -i/-u ile tazele; wchroot.sh'e PATH export eklendi.
+  Boyutlar worklog kaydiyla OZDES: XProtectUI.exe 1,275,392B;
+  XProtectUI32.exe 1,326,080B (md5 farkı derleme-yolu kaynakli — islevsel
+  kanit regresyon).
+- Kanit loglari: kanit/1.2.0/ (prot+run loglari) — cp zip'lerine giriyor.
+- KOPRU: kullanici 04:48'te "merhaba" yolladi (PC->sandbox CANLI);
+  40 sn dinleme penceresi bos kapandi, ise devam edildi (20-sn kurali).
 
 ## 2026-11-12 04:28 — PLAN: B3 cpResourceProtection (Faz C kalan isi)
 
 - YAPILACAK: resource sifreleme + FindResource/LoadResource/LoadString/
   EnumResource* yonlendirme (VMP IsInternal semantigi).
+- TASARIM (yapilmadan once, UO/VMP referans):
+  1) engine'e resSifreleme modulu: sec .rsrc verisini CFB (sectcrypt
+     ailesi) ile sifrele; anahtar gizli-alanda (stub-tasiyan) yasar.
+  2) XRT-gate'e resource API yonlendirme: FindResourceA/W -> okumadan
+     ONCE bagli .rsrc sayfasini cozer; LoadResource/LockResource ayni
+     gate; LoadStringA/W ve EnumResource* XRT-icinde karsiliklar.
+  3) IsInternal semantigi (VMP): yalniz korunan modulun kendisinin
+     resource'larina dokun; harici DLL resource'larina pas.
+  4) Test: res_test.c — FindResource+LoadResource+LockResource ile
+     gomulu metin okur; dogru metin cikarsa rc=42.
 - SONUC: (doldurulacak)
