@@ -443,3 +443,40 @@ olmus (API 401) — commit'ler lokalde, token yenilenince push.
 chroot'ta /bin/sh bind edilmediginden wineserver64 ELF ile ezmek zorunlu;
 wchroot.sh'e PATH export eklendi. gcc -m32 LINK icin CRT ister ama blob
 uretimi -c + ham ld kullandigindan multilib gerekmez.
+
+## Task 28 — 1.2.0-B3: cpResourceProtection — TAMAMLANDI
+
+Agent: main (Z.ai) | Tarih: 2026-11-12 (oturum 13 — A/B zip birlesimi sonrasi)
+
+KULLANICI ISTEGI: A/B zip karsilastirma (A en yeni; B'nin kanit_b1 loglari
+merge edildi) + checkpoint sistemi (cp_daemon.py 240 sn, GitHub push token
+401 oldugu icin lokal birikmeli) + zbridge 20-sn dinleme kurali
+(senkron20.py) + bulunan hatalarin duzeltmesi.
+
+ORTAM KURTARMA (5 ders):
+- A zip'i eksik dosyali geldi: gen_blob.py, lzma/, engine_sym.hpp —
+  B zip'inden + 0.6.1 kaynak agacindan tamamlandi (merge -n).
+- vm_core.c: A kaynakta regsap fix yerinde; iki mimari derleme rc=0.
+- wine-root: wineserver script->ELF ezme + wchroot.sh PATH export;
+  wine cmd sıcak başlatmada asili kalirsa pkill -9 wine + wineboot.
+- Test dizini Z:\home\z\my-project altinda OLMALI (/tmp yolu Z:'de gorunmez).
+
+B3 KOD (engine_pack.cpp + engine.hpp + engine_main.cpp + xprotect_ui.cpp):
+- do_pack'e resprot param; skip hesabinda RESOURCE (di==2) istisnasi:
+  .rsrc icerigi LZMA+CFB paket-akisina girer, unpack geri yazar.
+  RDT+DataEntry RVA'lari bolum yerinde kaldigindan degismez (VMP
+  Resources semantigi: statikte sifreli, RAM'de acik).
+- [RESPROT] log + OZET'e resprot=ACIK/kapali + GUI cap->opt koprusu.
+
+KANIT (kanit/1.2.0/):
+- res_test.c + add_rsrc.py (PE'ye RCDATA gomme; dersler: dir hdr 16B,
+  entry 8B {id,off|0x80000000}, RT_RCDATA=10, DataEntry {rva,size,cp,res}
+  sirasi, SizeOfImage guncelleme — yoksa loader rc=6).
+- "[PACK] .rsrc 512 B -> LZMA 69 B [CFB]"; statikte .rsrc raw sifreli;
+  calisma: RES DOGRU + RCODE=42.
+- REGRESYON (B3'lü build): R1=42, R2 tamper=117, R3=42, R4=42 TLS OK,
+  R5 mvm=42 — 5/5.
+- IKILI: XProtectUI.exe 1,276,416B; XProtectUI32.exe 1,327,104B.
+
+Sonraki: B4 cpVirtualFiles (bundler: gomulu dosya agaci + faLoad/
+faRegister/faInstall — UO file_manager.cc modeli).

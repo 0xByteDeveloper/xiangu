@@ -120,3 +120,32 @@
   kanit/res_test.c + kanit/1.2.0/add_rsrc.py.
 - KALAN: B4 cpVirtualFiles (bundler: gomulu dosya agaci +
   faLoad/faRegister/faInstall — UO file_manager.cc modeli).
+
+## 2026-11-12 05:15 — PLAN: B4 cpVirtualFiles (sonraki oturum icin)
+
+- YAPILACAK (is HENUZ BASLAMADI — not onceli):
+  1) UO file_manager.cc modeli (scripts/uosrc/core): gomulu dosya agaci
+     (bundle), faLoad/faRegister/faInstall API sekilleri — 1:1 port.
+  2) engine: --vfile <cikti-kaynak:demo>: hedef EXE'ye gomulu dosya agaci
+     yazilacak (.vmp0 icinde bagli alan); fa* SDK API'lari isaretli.
+  3) XRT: fa* uygulamalari — dosya adi -> icerik cozme, sanal
+     CreateFile/ReadFile benzeri yuzey (kapsam: faLoad/faRegister).
+  4) Test: vf_test.c — faLoad ile gomulu dosyayi okur; icerik dogruysa
+     rc=42.
+- SONUC: (baslayinca doldurulacak)
+
+## 2026-11-12 05:15 — OTURUM OZETI (13. oturum)
+
+- A/B KARAR: A en yeni (B1 mult-VM + B2 TLS + B5 debugmode iceren
+  02:55 goruntusu); B'nin kanit_b1 loglari merge edildi.
+- DUZELTILEN KUSUMLAR: A zip eksik dosyalari (gen_blob.py, lzma/,
+  engine_sym.hpp) — B'den tamamlandi; wine-root yeniden kuruldu
+  (wineserver ELF + PATH dersleri); test yolu Z: uyumu.
+- YENI: B3 cpResourceProtection tam calisiyor (--rsrcprot; statikte
+  .rsrc CFB-sifreli, runtime transparan, rc=42; regresyon 5/5 + 117).
+- CHECKPOINT: cp1..cp16 uretildi (4 dk dongu) + XProtect_1.2.0_final.zip.
+  PUSH DURUMU: GitHub token 401 — tum cp'ler lokalde birikti
+  (push_bekleyen.txt); token yenilenince bir sonraki turda OTOMATIK gider.
+- KOPRU: senkron20.py (20-sn pencere, not gelirse pencere yenilenir)
+  canli; kullanici "merhaba"si 04:48'te yakalandi; iki 40-sn pencere
+  bos kapandi (kural: gelmezse devam).
