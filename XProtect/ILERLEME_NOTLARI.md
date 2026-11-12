@@ -97,4 +97,26 @@
      resource'larina dokun; harici DLL resource'larina pas.
   4) Test: res_test.c — FindResource+LoadResource+LockResource ile
      gomulu metin okur; dogru metin cikarsa rc=42.
-- SONUC: (doldurulacak)
+- SONUC (05:10): B3 TAMAMLANDI — cpResourceProtection CALISIYOR:
+  1. res_test.c (RCDATA ID=1 okuyan test) + add_rsrc.py (PE'ye .rsrc
+     ekleyen arac) yazildi. add_rsrc dersleri: dir hdr 16B + entry 8B
+     {id, off|0x80000000}; RT_RCDATA=10; DataEntry {rva,size,cp,res}
+     SIRASI; SizeOfImage GUNCELLENMELI (yoksa loader rc=6).
+  2. Motor: do_pack'e resprot param (engine.hpp default false); skip
+     hesabinda di==2 istisnasi; [RESPROT] log; engine_main cagrisi
+     opt.rsrcprot geciyor; OZET'e "resprot=ACIK/kapali".
+  3. UI: GUI cap->opt koprusu eklendi (cpResourceProtection biti
+     opt.rsrcprot'a); CLI --rsrcprot zaten vardi (4042).
+  4. KANIT: --rsrcprot ile res_test_r.exe korundu: "[PACK] .rsrc
+     RVA=0x0003C000 512 B -> LZMA 69 B (%13.5) [CFB]"; statikte .rsrc
+     raw CFB-sifreli (ilk 32 bayt entropi), gizli metin resource-
+     verisinde YOK (yalniz testin kendi .rdata literal'i kaliyor);
+     calisirken: RES OK 22 bayt + RES DOGRU + RCODE=42 (unpack
+     transparan geri yaziyor).
+  5. Yeni build ile tam regresyon YENIDEN: R1=42 ("OK hepsi dogru"),
+     R2 tamper=117 (duru-ret), R3=42, R4=42 TLS OK, R5=42 — 5/5.
+  Boyutlar: XProtectUI.exe 1,276,416B; XProtectUI32.exe 1,327,104B
+  (B3 kodu ~1KB buyume). Kanitlar: kanit/1.2.0/resprot_prot.log +
+  kanit/res_test.c + kanit/1.2.0/add_rsrc.py.
+- KALAN: B4 cpVirtualFiles (bundler: gomulu dosya agaci +
+  faLoad/faRegister/faInstall — UO file_manager.cc modeli).
