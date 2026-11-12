@@ -149,3 +149,40 @@
 - KOPRU: senkron20.py (20-sn pencere, not gelirse pencere yenilenir)
   canli; kullanici "merhaba"si 04:48'te yakalandi; iki 40-sn pencere
   bos kapandi (kural: gelmezse devam).
+
+---
+## 2026-11-12 (bu oturum) — PLAN: XProtectArea repo + UO %100 port turu
+
+- KULLANICI TALEBI: tum checkpoint zip'leri + kaynak kodlari artik
+  github.com/0xByteDeveloper/XProtectArea'ya atilacak. Token yenilendi (401
+  cozuldu, /user testi 200 OK).
+- YAPILACAK (sira):
+  1) cp_daemon.py XProtectArea surumune yukselt: cp klasor yapisi
+     (checkpoints/Xprotect_1.2.0_cpN/ + zip + CHECKPOINT.txt) + backlog
+     (cp1-23, 184MB) flush + 4 dk dongu.
+  2) Ilk push: source + kanit + dokumanlar + backlog cp zipleri.
+  3) UO ANALIZI SONUCU (subagent raporu alindi):
+     - Encrypt ByteCode (UO): SADECE sanallastirilmis fonksiyonlarin VM
+       bytecode'unu sifreler (per-opcode kripto zinciri + adres-init rolling
+       key + alan-basina cozme). Stack/exe-tamami degil.
+     - Encrypt Registers (UO 3.5.1): OLUMSU bayrak (hicbir kod okumuyor);
+       islevsel karsiligi bytecode'taki register-operand baytinin
+       sifrelenmesi. XProtect'te GERCEK ozellik yapacagiz (VM register
+       dosyasi bellekte sifreli + operand bayt sifreleme) -> UO'yu ASAN.
+     - Check Debugger (UO): 15 teknik + direct syscall + temiz ntdll kopyasi
+       (ScyllaHide direnci). XProtect'e ustun set portlanacak.
+  4) BULDU (hata): xprotect_ui.cpp:2570 — opt.vmenc = (options &
+     cpEncryptBytecode) == 0 → INVERS! "Encrypt Bytecode" isaretlenince
+     sifreleme KAPANIYOR. DUZELTILECEK: isaret = sifrele + varsayilan acik.
+  5) BULDU (eksik): cpEncryptRegs kutusu UI'da var ama hicbir motor opt'ina
+     bagli degil (olumsu). GERCEK port yapilacak: opt.vmregs + vm_core.c
+     regs[16] bellek-ici sifreleme + operand-bayt sifreleme.
+  6) Anti-debug ustun set: xrt_core.c — NtQueryInformationProcess
+     (DebugPort/DebugObjectHandle), NtSetInformationThread
+     (HideFromDebugger), NtQuerySystemInformation
+     (SystemKernelDebuggerInformation), SoftICE surucu taramasi,
+     CloseHandle(0xDEADC0DE), TF+DR0-3, VM-ici donus-adresi int3 kontrolu.
+  7) Rebuild (build_vmblob + build_xrt + build_ui) + R1-R5 regresyonlari.
+  8) Dokumanlar: PORT_DURUMU.md (% parite) + OZELLIK_LISTESI.md (tum 20
+     ozellik aciklamasi + UO matrisi) repo'ya.
+- HEDEF: her 4 dk bir cp; isler bittince tam proje zip push.
